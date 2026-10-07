@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: logbook-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: logbook
+      POSTGRES_PASSWORD: logbook_dev_secret
+      POSTGRES_DB: logbook
+      TZ: Asia/Shanghai
+    command: >
+      postgres
+      -c shared_buffers=32MB
+      -c work_mem=4MB
+      -c max_connections=10
+      -c timezone=Asia/Shanghai
+      -c log_timezone=Asia/Shanghai
+    ports:
+      - "127.0.0.1:5432:5432"
+    deploy:
+      resources:
+        limits:
+          memory: 80M
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./sql/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+
+volumes:
+  pgdata:
+    name: logbook_pgdata
