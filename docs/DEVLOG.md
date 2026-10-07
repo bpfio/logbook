@@ -40,10 +40,10 @@
 
 ### [DEV-2026-10-07-04] Logbook QNAP 生产环境部署与全栈替换上线 — ✅ 闭环
 
-- **任务源**: 用户指令经正式审批（路线 A：彻底替换升级为 Logbook，回收 192.168.1.68 IP，配置讯飞星火向量，绝对保障 QNAP 其他服务安全）。
+- **任务源**: 用户指令经正式审批（路线 A：彻底替换升级为 Logbook，回收生产节点 IP，配置讯飞星火向量，绝对保障 QNAP 其他服务安全）。
 - **已交付**:
   1. **生产镜像容器化**: 编写 `Dockerfile`（基于 `python:3.13-slim` + `uv` 极速构建 + 纯 Python `asyncssh`），本地秒级构建出纯净轻量镜像 `logbook:latest` 并流式载入 QNAP Docker；
-  2. **Rekall 优雅下线**: 优雅停止并移除旧 `rekall-app` 与 `rekall-postgres` 容器，释放 IP `192.168.1.68` 及端口；
+  2. **Rekall 优雅下线**: 优雅停止并移除旧 `rekall-app` 与 `rekall-postgres` 容器，释放节点 IP 及端口；
   3. **绝对隔离与零冲击**: QNAP 上原有服务（`gitea`、`fastapi-dls-1`、`kms-1`）全程 100% 隔离运行未受干扰；
   4. **Logbook 生产双容器 Pod 上线**:
      - 在 QNAP `/share/CACHEDEV1_DATA/Container/logbook/` 部署 `compose.yaml` 与 `01_init.sql`；
@@ -53,7 +53,7 @@
      - 本地 `~/.gemini/config/mcp_config.json` 免密 SSH 管道全通；
      - 端到端实测 `devlog_record` 与 `devlog_search`：调用讯飞星火 MaaS API（端点 `maas-api.cn-huabei-1.xf-yun.com`，模型 `xop3qwen8bembedding`）生成 512 维向量，入库与语义召回匹配度达 0.8144，全流程全绿。
 - **判据与实测**:
-  - `ssh sysadmin@192.168.1.68 "logbook doctor"`: PG 18.6 连接正常、Asia/Shanghai 时区正常、pgvector 扩展就绪；
+  - `ssh sysadmin@<server-ip> "logbook doctor"`: PG 18.6 连接正常、Asia/Shanghai 时区正常、pgvector 扩展就绪；
   - `devlog_record` -> `vector_source: "spark_maas"`, `isError: false`；
   - `devlog_search` -> 精确召回目标手记，得分 0.8144。
 
