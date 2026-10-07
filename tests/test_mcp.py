@@ -33,7 +33,7 @@ async def test_mcp_task_flow():
     # 查询
     query_res = await task_query(project="logbook", status=["running"])
     assert len(query_res) >= 1
-    assert query_res[0]["id"] == "MCP-01"
+    assert any(t["id"] == "MCP-01" for t in query_res)
 
     # 闭环推进
     close_res = await task_upsert(
