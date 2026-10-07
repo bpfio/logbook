@@ -13,7 +13,7 @@
 
 | ID | 状态 | 优先级 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|---|
-| L02 | closed | P1 | feat | 双平面隔离底座、PostgreSQL 18+pgvector、FastMCP 与 CLI 看板落地 | pending | 测试 10/10 全绿，Brix 数据无损导入导出核销 |
+| L02 | closed | P1 | feat | 双平面隔离底座、PostgreSQL 18+pgvector、FastMCP 与 CLI 看板落地 | c51bbd7 | 测试 10/10 全绿，Brix 数据无损导入导出核销 |
 | L01 | closed | P1 | feat | Logbook 创世纪立项、规则制定与基础脚手架建立 | main | 仓库创建与 AGENTS.md / README / DEVLOG 初始化 |
 
 ---
