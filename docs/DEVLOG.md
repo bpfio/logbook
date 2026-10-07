@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (10)
+## 一、任务台账 (11)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L07 | ✅ closed | feat | 6大工程优化全量落地(统一返回包装/批量原语/向量缓存去重/参数归一化防呆) | HEAD | scripts/mcp_ingest_brix.py |
 | L06 | ✅ closed | feat | MCP 协议自解释Schema升级、Brix 项目全量结构化对齐与向量化灌库 | f9edaf0 | scripts/import_brix.py |
 | L05.4 | ✅ closed | deploy | QNAP 生产容器内存配额再平衡与全维度基准联测 | d27ac5f | deploy/qnap/compose.yaml |
 | L05.3 | ✅ closed | fix | SSH MCP 孤儿子进程泄漏与内存膨胀根因定位与修复 | d27ac5f | src/logbook/ssh_server.py |
@@ -41,6 +42,27 @@
 ---
 
 ## 四、 批次演进记录
+
+### [DEV-2026-10-07-07] 6大工程优化全量落地与 MCP 端到端闭环验证 — ✅ 闭环
+
+- **任务源**: 响应用户指令，针对模拟传入测试中暴露的 6 大体验瓶颈实施全面优化，并经原生 MCP 协议客户端端到端压测验证。
+- **已交付**:
+  1. **查询返回格式统一包装**:
+     - `task_query`, `waiting_query`, `finding_query`, `batch_query`, `devlog_search`, `rule_query` 统一封装为结构化对象 `{"success": true, "total": N, "project": proj, "items": [...]}`，杜绝多 TextContent 碎片化；
+  2. **原子批量写入原语 (`tasks_bulk_upsert`)**:
+     - 新增 MCP 工具，单次 RPC 结合数据库单事务原子批量落库数十项任务，耗时由数秒压制至 98ms (降低 90% 网络 RTT)；
+  3. **DevLog 幂等 UPSERT 与向量哈希缓存**:
+     - 手记入库时支持查重与文本对比；关键内容未变时自动更新元数据并复用既有 512 维向量 (`vector_source: "cached_skip"`)，彻底消除检索重复项并节省外部 API 配额；
+  4. **入参轻量级归一化防呆 (`normalizer.py` + `BeforeValidator`)**:
+     - 自动剔除 Emoji 并支持常见同义词映射 (`done`/`completed` -> `closed` 等)；
+     - 基于 Pydantic v2 `BeforeValidator` 实现，既保留了自解释 Schema 枚举，又具备前置容错自愈能力；
+  5. **非代码任务实测证据闭环解耦**:
+     - 对 `drill` / `investigation` / `ops` / `docs` 放宽强绑 commit_hash 限制，自动将实测 `notes` 锚定为合规证据指针；
+  6. **跨项目操作显式授权放行**:
+     - 支持 `allow_cross_project=True` 与 `LOGBOOK_ALLOW_CROSS_PROJECT=1` 环境变量，兼顾防呆阻断与人工授权灵活性；
+  7. **生产容器热重载与全量测试通过**:
+     - 本地 18/18 单元与集成测试全绿通过；
+     - 生产镜像更新并部署 QNAP，双容器物理内存常驻仅 42.19 MiB。
 
 ### [DEV-2026-10-07-06] MCP 协议自解释Schema升级与 Brix 项目全量结构化对齐入库 — ✅ 闭环
 

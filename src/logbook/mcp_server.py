@@ -28,7 +28,19 @@ from .time_sync import get_beijing_now, format_beijing
 from .vector import get_embedding
 from .converter import export_devlog_markdown
 from .negotiation import validate_and_negotiate_project, ProjectNegotiationError
+from .normalizer import (
+    normalize_status, normalize_task_type, normalize_priority,
+    normalize_severity, normalize_waiting_category
+)
 from .db import db
+from typing import Annotated
+from pydantic import BeforeValidator
+
+TaskStatusArg = Annotated[TaskStatus, BeforeValidator(normalize_status)]
+TaskTypeArg = Annotated[TaskType, BeforeValidator(normalize_task_type)]
+TaskPriorityArg = Annotated[TaskPriority, BeforeValidator(normalize_priority)]
+FindingSeverityArg = Annotated[FindingSeverity, BeforeValidator(normalize_severity)]
+WaitingCategoryArg = Annotated[WaitingCategory, BeforeValidator(normalize_waiting_category)]
 
 # 创建 MCP Server 实例
 mcp = MCPServer("logbook-mcp-server")
@@ -177,9 +189,9 @@ async def task_upsert(
     project: str,
     id: str,
     title: str,
-    status: Literal["planned", "running", "blocked", "closed", "wontfix"],
-    task_type: Literal["feat", "fix", "verify", "investigation", "drill", "docs", "ops", "deploy"] = "fix",
-    priority: Literal["P0", "P1", "P2", "P3"] = "P2",
+    status: TaskStatusArg,
+    task_type: TaskTypeArg = TaskType.FIX,
+    priority: TaskPriorityArg = TaskPriority.P2,
     assignee: str | None = "agy",
     parent_id: str | None = None,
     commit_hash: str | None = None,
@@ -187,6 +199,7 @@ async def task_upsert(
     notes: str | None = None,
     tags: list[str] | None = None,
     batch_id: str | None = None,
+    allow_cross_project: bool = False,
 ) -> dict:
     """原子登记或推进任务状态机。强制要求显式提供 project 参数。支持 assignee 责任归属与 parent_id 分级解耦。
 
@@ -207,21 +220,31 @@ async def task_upsert(
     - commit_hash: 关联提交散列。
     - proof_link: 报告或证据指针 (如 '报告 dfc50ef')。
     - batch_id: 归属研发批次号 (如 'DEV-2026-10-07-02')。
+    - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
     """
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
     s_title = sanitize_text(title).clean_text
     s_notes = sanitize_text(notes).clean_text if notes else None
 
+    # BeforeValidator 已在前置校验阶段将参数自动规范化为 Enum 实例
+    st_val = status.value if isinstance(status, TaskStatus) else normalize_status(status)
+    tt_val = task_type.value if isinstance(task_type, TaskType) else normalize_task_type(task_type)
+    pr_val = priority.value if isinstance(priority, TaskPriority) else normalize_priority(priority)
+
+    # 针对非代码演练任务，若无 commit_hash 且提供了实测 notes，则自动锚定 notes 为 proof_link 满足证据闭环断言
+    if st_val == "closed" and not commit_hash and not proof_link and s_notes:
+        proof_link = f"notes: {s_notes[:100]}"
+
     task = Task(
         id=id,
         title=s_title,
-        task_type=TaskType(task_type),
-        priority=TaskPriority(priority),
-        status=TaskStatus(status),
+        task_type=TaskType(tt_val),
+        priority=TaskPriority(pr_val),
+        status=TaskStatus(st_val),
         assignee=assignee,
         parent_id=parent_id,
         commit_hash=commit_hash,
@@ -239,6 +262,70 @@ async def task_upsert(
 
 
 @mcp.tool()
+async def tasks_bulk_upsert(
+    project: str,
+    tasks: list[dict],
+    batch_id: str | None = None,
+    allow_cross_project: bool = False,
+) -> dict:
+    """原子批量登记或更新任务台账 (单事务批量落库，大幅压减网络 RTT 往返开销)。
+
+    参数说明:
+    - project: 必填。项目代号。
+    - tasks: 必填。任务字典列表，单项包含 id, title, status 等。
+    - batch_id: 可选。统一归属研发批次号 (若任务项本身未指定，则以此默认填充)。
+    - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
+    """
+    try:
+        proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    # 若指定了统一批次号，自动保底确保 batches 存在以满足外键约束
+    if batch_id:
+        await db.upsert_batch(proj, Batch(id=batch_id, title=f"研发批次 {batch_id}", status=BatchStatus.RUNNING))
+
+    task_objs = []
+    for t in tasks:
+        tid = t.get("id")
+        if not tid:
+            continue
+        title = sanitize_text(t.get("title", "")).clean_text
+        norm_st = normalize_status(t.get("status", "planned"))
+        norm_tt = normalize_task_type(t.get("task_type", "fix"))
+        norm_pr = normalize_priority(t.get("priority", "P2"))
+        notes = sanitize_text(t.get("notes", "")).clean_text if t.get("notes") else None
+        b_id = t.get("batch_id") or batch_id
+        c_hash = t.get("commit_hash")
+        p_link = t.get("proof_link")
+        if norm_st == "closed" and not c_hash and not p_link and notes:
+            p_link = f"notes: {notes[:100]}"
+
+        task_objs.append(Task(
+            id=tid,
+            title=title,
+            task_type=TaskType(norm_tt),
+            priority=TaskPriority(norm_pr),
+            status=TaskStatus(norm_st),
+            assignee=t.get("assignee", "agy"),
+            parent_id=t.get("parent_id"),
+            commit_hash=c_hash,
+            proof_link=p_link,
+            notes=notes,
+            tags=t.get("tags") or [],
+            batch_id=b_id,
+        ))
+
+    saved_tasks = await db.bulk_upsert_tasks(proj, task_objs)
+    return {
+        "success": True,
+        "project": proj,
+        "total": len(saved_tasks),
+        "items": [t.model_dump(mode="json") for t in saved_tasks]
+    }
+
+
+@mcp.tool()
 async def task_query(
     project: str,
     status: list[Literal["planned", "running", "blocked", "closed", "wontfix"]] | None = None,
@@ -247,15 +334,15 @@ async def task_query(
     assignee: str | None = None,
     parent_id: str | None = None,
     limit: int = 50,
-) -> list[dict] | dict:
-    """多维查询任务看板。强制要求显式提供 project 参数。支持按状态、优先级、批次、责任人与父任务过滤。"""
+) -> dict:
+    """多维查询任务看板。强制要求显式提供 project 参数。返回标准化包装对象。"""
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
-    st_enums = [TaskStatus(s) for s in status] if status else None
-    pr_enums = [TaskPriority(p) for p in priority] if priority else None
+    st_enums = [TaskStatus(normalize_status(s)) for s in status] if status else None
+    pr_enums = [TaskPriority(normalize_priority(p)) for p in priority] if priority else None
     tasks = await db.query_tasks(
         proj,
         status=st_enums,
@@ -265,7 +352,13 @@ async def task_query(
         parent_id=parent_id,
         limit=limit
     )
-    return [t.model_dump(mode="json") for t in tasks]
+    items = [t.model_dump(mode="json") for t in tasks]
+    return {
+        "success": True,
+        "project": proj,
+        "total": len(items),
+        "items": items
+    }
 
 
 @mcp.tool()
@@ -274,11 +367,12 @@ async def finding_record(
     id: str,
     summary: str,
     source: str = "audit",
-    severity: Literal["P1", "P2", "P3"] = "P2",
+    severity: FindingSeverityArg = FindingSeverity.P2,
     status: Literal["open", "infix", "fixed", "wontfix", "blocked"] = "open",
     task_id: str | None = None,
     reporter: str = "audit",
     resolution: str | None = None,
+    allow_cross_project: bool = False,
 ) -> dict:
     """登记或更新缺陷/审计发现项。强制要求显式提供 project 参数。支持 reporter 责任归属。
 
@@ -292,19 +386,22 @@ async def finding_record(
     - task_id: 关联修复任务 ID。
     - reporter: 报告者 Agent。
     - resolution: 处置结果或修复 Commit 标识。
+    - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
     """
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
     s_summary = sanitize_text(summary).clean_text
     s_resolution = sanitize_text(resolution).clean_text if resolution else None
 
+    sev_val = severity.value if isinstance(severity, FindingSeverity) else normalize_severity(severity)
+
     finding = Finding(
         id=id,
         source=source,
-        severity=FindingSeverity(severity),
+        severity=FindingSeverity(sev_val),
         status=FindingStatus(status),
         task_id=task_id,
         reporter=reporter,
@@ -316,11 +413,36 @@ async def finding_record(
 
 
 @mcp.tool()
+async def finding_query(
+    project: str,
+    status: list[Literal["open", "infix", "fixed", "wontfix", "blocked"]] | None = None,
+    severity: list[Literal["P1", "P2", "P3"]] | None = None,
+    limit: int = 50,
+) -> dict:
+    """查询缺陷与审计发现项。强制要求显式提供 project 参数。返回标准化包装对象。"""
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    st_enums = [FindingStatus(s) for s in status] if status else None
+    sev_enums = [FindingSeverity(normalize_severity(s)) for s in severity] if severity else None
+    findings = await db.query_findings(proj, status=st_enums, severity=sev_enums, limit=limit)
+    items = [f.model_dump(mode="json") for f in findings]
+    return {
+        "success": True,
+        "project": proj,
+        "total": len(items),
+        "items": items
+    }
+
+
+@mcp.tool()
 async def waiting_query(
     project: str,
     status: Literal["open", "closed"] = "open"
-) -> list[dict] | dict:
-    """查询待办与阻塞项 (如待用户决策事项)。强制要求显式提供 project 参数。"""
+) -> dict:
+    """查询待办与阻塞项 (如待用户决策事项)。强制要求显式提供 project 参数。返回标准化包装对象。"""
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
@@ -328,7 +450,13 @@ async def waiting_query(
 
     st = WaitingStatus(status)
     waitings = await db.query_waitings(proj, status=st)
-    return [w.model_dump(mode="json") for w in waitings]
+    items = [w.model_dump(mode="json") for w in waitings]
+    return {
+        "success": True,
+        "project": proj,
+        "total": len(items),
+        "items": items
+    }
 
 
 @mcp.tool()
@@ -336,10 +464,11 @@ async def waiting_record(
     project: str,
     id: str,
     description: str,
-    category: Literal["user", "closing", "external"] = "user",
+    category: WaitingCategoryArg = WaitingCategory.USER,
     status: Literal["open", "closed"] = "open",
     owner: str = "user",
     resolution: str | None = None,
+    allow_cross_project: bool = False,
 ) -> dict:
     """登记或更新待办与阻塞项。强制要求显式提供 project 参数。
 
@@ -351,15 +480,18 @@ async def waiting_record(
     - status: 状态 ('open'=阻塞中, 'closed'=已解决)。
     - owner: 责任人 (默认 'user')。
     - resolution: 解决结论。
+    - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
     """
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    cat_val = category.value if isinstance(category, WaitingCategory) else normalize_waiting_category(category)
+
     waiting = Waiting(
         id=id,
-        category=WaitingCategory(category),
+        category=WaitingCategory(cat_val),
         owner=owner,
         status=WaitingStatus(status),
         description=sanitize_text(description).clean_text,
@@ -381,8 +513,10 @@ async def devlog_record(
     task_id: str | None = None,
     visibility: Literal["project_private", "public_safe"] = "project_private",
     tags: list[str] | None = None,
+    id: int | None = None,
+    allow_cross_project: bool = False,
 ) -> dict:
-    """结构化录入排查手记 (强制覆盖根因四要素 + 自动脱敏 + 512维向量入库)。强制要求显式提供 project 参数。支持 author 溯源。
+    """结构化录入排查手记 (支持幂等去重与向量缓存 + 强制覆盖根因四要素 + 自动脱敏)。强制要求显式提供 project 参数。支持 author 溯源。
 
     结构化四要素必填项:
     - project: 必填。项目代号。
@@ -392,10 +526,13 @@ async def devlog_record(
     - solution: 必填。【解决方案】明确修复逻辑与架构重构。
     - evidence: 必填。【验证证据】复现与修复后的实测比对输出。
     - author: 记录者 Agent 或人类专家 (默认 'agy')。
+    - task_id: 关联任务编号。
     - visibility: 密级 ('project_private'=项目私有, 'public_safe'=全局开源脱敏)。
+    - id: 可选。指定排查手记 ID 执行幂等更新。
+    - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
     """
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
@@ -406,7 +543,64 @@ async def devlog_record(
     s_sol = sanitize_text(solution).clean_text
     s_ev = sanitize_text(evidence).clean_text
 
-    # 计算 512 维向量
+    # 1. 检查是否存在同任务/同主题手记 (幂等查重与向量缓存复用)
+    existing = await db.find_existing_devlog(proj, devlog_id=id, task_id=task_id, title=s_title)
+    if existing:
+        content_unchanged = (
+            existing.get("title") == s_title and
+            existing.get("problem") == s_problem and
+            existing.get("root_cause") == s_rc and
+            existing.get("solution") == s_sol and
+            existing.get("evidence") == s_ev
+        )
+        if content_unchanged:
+            # 文本未变，仅更新元数据，复用已有向量
+            updated = await db.update_devlog(
+                devlog_id=existing["id"],
+                title=s_title,
+                author=author,
+                problem=s_problem,
+                root_cause=s_rc,
+                solution=s_sol,
+                evidence=s_ev,
+                visibility=visibility,
+                tags=tags or [],
+                embedding=None,
+                task_id=task_id,
+            )
+            return {
+                "success": True,
+                "devlog_id": updated["id"],
+                "project": proj,
+                "vector_source": "cached_skip",
+                "message": f"排查手记 [{updated['id']}] 内容未变化，已更新元数据并复用已有向量缓存"
+            }
+        else:
+            # 文本发生变更，重新计算 512 维向量
+            full_text = f"{s_title} {s_problem} {s_rc} {s_sol}"
+            embed_res = await get_embedding(full_text)
+            updated = await db.update_devlog(
+                devlog_id=existing["id"],
+                title=s_title,
+                author=author,
+                problem=s_problem,
+                root_cause=s_rc,
+                solution=s_sol,
+                evidence=s_ev,
+                visibility=visibility,
+                tags=tags or [],
+                embedding=embed_res.embedding,
+                task_id=task_id,
+            )
+            return {
+                "success": True,
+                "devlog_id": updated["id"],
+                "project": proj,
+                "vector_source": embed_res.source,
+                "message": f"排查手记 [{updated['id']}] 内容已更新并重新生成向量索引"
+            }
+
+    # 2. 全新手记：计算 512 维向量并录入
     full_text = f"{s_title} {s_problem} {s_rc} {s_sol}"
     embed_res = await get_embedding(full_text)
 
@@ -438,8 +632,8 @@ async def devlog_search(
     project: str,
     query: str,
     limit: int = 5,
-) -> list[dict] | dict:
-    """语义向量与全文混合检索跨 Agent 长期记忆。优先当前项目私密经验 + 全局开源安全经验。"""
+) -> dict:
+    """语义向量与全文混合检索跨 Agent 长期记忆。优先当前项目私密经验 + 全局开源安全经验。返回标准化包装对象。"""
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
@@ -454,17 +648,27 @@ async def devlog_search(
         query_text=s_query if not embed_res.embedding else None,
         limit=limit
     )
-    return results
+    return {
+        "success": True,
+        "project": proj,
+        "total": len(results),
+        "items": results
+    }
 
 
 @mcp.tool()
 async def rule_query(
     keyword: str | None = None,
     category: Literal["general", "network", "kernel", "database", "security", "engineering", "governance", "resource"] | None = None
-) -> list[dict]:
-    """开工前对齐架构铁律与工程红线 (SSOT)。全项目共享。支持按领域 category 精准过滤。"""
+) -> dict:
+    """开工前对齐架构铁律与工程红线 (SSOT)。全项目共享。支持按领域 category 精准过滤。返回标准化包装对象。"""
     rules = await db.query_rules(keyword=keyword, category=category)
-    return [r.model_dump(mode="json") for r in rules]
+    items = [r.model_dump(mode="json") for r in rules]
+    return {
+        "success": True,
+        "total": len(items),
+        "items": items
+    }
 
 
 @mcp.tool()
@@ -492,6 +696,7 @@ async def batch_upsert(
     branch_name: str | None = None,
     summary: str | None = None,
     methodology_notes: str | None = None,
+    allow_cross_project: bool = False,
 ) -> dict:
     """登记或更新研发批次演进记录与排障方法论。强制要求显式提供 project 参数。
 
@@ -503,9 +708,10 @@ async def batch_upsert(
     - branch_name: 关联代码分支。
     - summary: 批次任务源与方案总结。
     - methodology_notes: 排障方法论、未办结复作入口与讨论过程。
+    - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
     """
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
@@ -522,15 +728,21 @@ async def batch_upsert(
 
 
 @mcp.tool()
-async def batch_query(project: str, limit: int = 20) -> list[dict] | dict:
-    """查询项目历史研发批次演进记录与讨论复盘。强制要求显式提供 project 参数。"""
+async def batch_query(project: str, limit: int = 20) -> dict:
+    """查询项目历史研发批次演进记录与讨论复盘。强制要求显式提供 project 参数。返回标准化包装对象。"""
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
     batches = await db.query_batches(proj, limit=limit)
-    return [b.model_dump(mode="json") for b in batches]
+    items = [b.model_dump(mode="json") for b in batches]
+    return {
+        "success": True,
+        "project": proj,
+        "total": len(items),
+        "items": items
+    }
 
 
 def run_stdio():

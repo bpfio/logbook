@@ -105,8 +105,12 @@ class Task(BaseModel):
     def validate_invariants(self) -> "Task":
         # 1. 闭环铁律断言：closed 状态必须提供真实提交或验证凭证
         if self.status == TaskStatus.CLOSED:
-            if not self.commit_hash and not self.proof_link:
-                raise ValueError("闭环铁律：标记为 closed 的任务必须提供 commit_hash 或 proof_link 证据锚点！")
+            has_evidence = bool(
+                self.commit_hash or self.proof_link or
+                (self.notes and self.task_type in (TaskType.DRILL, TaskType.INVESTIGATION, TaskType.OPS, TaskType.DOCS))
+            )
+            if not has_evidence:
+                raise ValueError("闭环铁律：标记为 closed 的任务必须提供 commit_hash、proof_link 或非代码演练实测 notes 证据锚点！")
             if not self.closed_at:
                 self.closed_at = get_beijing_now()
             if self.started_at and not self.duration_seconds:

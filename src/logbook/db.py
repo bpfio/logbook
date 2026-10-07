@@ -184,6 +184,51 @@ class Database:
             row = await conn.fetchrow(query, task_id)
             return Task(**dict(row)) if row else None
 
+    async def bulk_upsert_tasks(self, project: str, tasks: list[Task]) -> list[Task]:
+        """在单个事务中原子批量插入或更新多条任务。"""
+        await self.ensure_project(project)
+        if not tasks:
+            return []
+        query = f"""
+            INSERT INTO "{project}".tasks (
+                id, batch_id, parent_id, title, task_type, priority, status,
+                assignee, commit_hash, proof_link, notes, tags,
+                created_at, updated_at, started_at, closed_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                batch_id = COALESCE(EXCLUDED.batch_id, "{project}".tasks.batch_id),
+                parent_id = COALESCE(EXCLUDED.parent_id, "{project}".tasks.parent_id),
+                title = EXCLUDED.title,
+                task_type = EXCLUDED.task_type,
+                priority = EXCLUDED.priority,
+                status = EXCLUDED.status,
+                assignee = EXCLUDED.assignee,
+                commit_hash = COALESCE(EXCLUDED.commit_hash, "{project}".tasks.commit_hash),
+                proof_link = COALESCE(EXCLUDED.proof_link, "{project}".tasks.proof_link),
+                notes = COALESCE(EXCLUDED.notes, "{project}".tasks.notes),
+                tags = EXCLUDED.tags,
+                updated_at = EXCLUDED.updated_at,
+                started_at = COALESCE("{project}".tasks.started_at, EXCLUDED.started_at),
+                closed_at = EXCLUDED.closed_at
+            RETURNING id, batch_id, parent_id, title, task_type, priority, status,
+                      assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
+                      started_at, closed_at, duration_seconds;
+        """
+        results = []
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for t in tasks:
+                    row = await conn.fetchrow(
+                        query,
+                        t.id, t.batch_id, t.parent_id, t.title, t.task_type.value, t.priority.value, t.status.value,
+                        t.assignee, t.commit_hash, t.proof_link, t.notes, t.tags,
+                        t.created_at, t.updated_at, t.started_at, t.closed_at
+                    )
+                    results.append(Task(**dict(row)))
+        return results
+
     # =========================================================================
     # 发现与缺陷台账 (findings)
     # =========================================================================
@@ -360,6 +405,84 @@ class Database:
             res = dict(row)
             res["embedding"] = devlog.embedding
             return DevLog(**res)
+
+    async def find_existing_devlog(
+        self,
+        project_id: str,
+        devlog_id: int | None = None,
+        task_id: str | None = None,
+        title: str | None = None
+    ) -> dict | None:
+        """根据 id / (project, task_id) / (project, title) 查找现有排障手记。"""
+        await self.connect()
+        async with self._pool.acquire() as conn:
+            if devlog_id:
+                row = await conn.fetchrow("SELECT * FROM shared.devlogs WHERE id = $1;", devlog_id)
+                if row:
+                    return dict(row)
+            if task_id:
+                row = await conn.fetchrow(
+                    "SELECT * FROM shared.devlogs WHERE project_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1;",
+                    project_id, task_id
+                )
+                if row:
+                    return dict(row)
+            if title:
+                row = await conn.fetchrow(
+                    "SELECT * FROM shared.devlogs WHERE project_id = $1 AND title = $2 ORDER BY id DESC LIMIT 1;",
+                    project_id, title
+                )
+                if row:
+                    return dict(row)
+            return None
+
+    async def update_devlog(
+        self,
+        devlog_id: int,
+        title: str,
+        author: str,
+        problem: str,
+        root_cause: str,
+        solution: str,
+        evidence: str,
+        visibility: str,
+        tags: list[str],
+        embedding: list[float] | None = None,
+        task_id: str | None = None,
+    ) -> dict:
+        """更新已有手记。若 embedding 为 None，则保留原有向量不覆盖。"""
+        await self.connect()
+        async with self._pool.acquire() as conn:
+            if embedding is not None:
+                vec_literal = f"[{','.join(str(x) for x in embedding)}]"
+                sql = """
+                    UPDATE shared.devlogs
+                    SET title = $2, author = $3, problem = $4, root_cause = $5,
+                        solution = $6, evidence = $7, visibility = $8, tags = $9,
+                        task_id = $10, embedding = $11::vector, updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                              visibility, tags, occurred_at, created_at, updated_at;
+                """
+                row = await conn.fetchrow(
+                    sql, devlog_id, title, author, problem, root_cause,
+                    solution, evidence, visibility, tags, task_id, vec_literal
+                )
+            else:
+                sql = """
+                    UPDATE shared.devlogs
+                    SET title = $2, author = $3, problem = $4, root_cause = $5,
+                        solution = $6, evidence = $7, visibility = $8, tags = $9,
+                        task_id = $10, updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                              visibility, tags, occurred_at, created_at, updated_at;
+                """
+                row = await conn.fetchrow(
+                    sql, devlog_id, title, author, problem, root_cause,
+                    solution, evidence, visibility, tags, task_id
+                )
+            return dict(row)
 
     async def search_devlogs(
         self,

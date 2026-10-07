@@ -73,13 +73,17 @@ async def test_mcp_tool_negotiation_response():
 
 @pytest.mark.asyncio
 async def test_cross_project_permission_boundary():
-    """测试跨项目越权物理拦截 (身处 logbook 仓库妄图篡改 brix)。"""
+    """测试跨项目越权物理拦截与显式授权放行。"""
     curr_ws = detect_current_workspace_project()
     assert curr_ws == "logbook"  # 当前物理工作区正是 logbook
 
-    # 试图指定 brix
+    # 1. 默认无授权阻断
     with pytest.raises(PermissionError, match="越权阻断"):
         await validate_and_negotiate_project("brix")
+
+    # 2. 显式声明 allow_cross_project=True 时安全放行
+    ok_proj = await validate_and_negotiate_project("brix", allow_cross_project=True)
+    assert ok_proj == "brix"
 
 
 @pytest.mark.asyncio
