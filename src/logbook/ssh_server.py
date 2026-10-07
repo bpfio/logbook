@@ -102,10 +102,18 @@ async def pipe_streams(reader, writer):
                 break
             writer.write(data)
             await writer.drain()
-    except (asyncio.CancelledError, ConnectionResetError):
+    except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
         pass
     except Exception as e:
         logger.debug(f"Stream pipe notice: {e}")
+    finally:
+        try:
+            if hasattr(writer, "write_eof"):
+                writer.write_eof()
+            elif hasattr(writer, "close"):
+                writer.close()
+        except Exception:
+            pass
 
 
 async def handle_ssh_process(process: asyncssh.SSHServerProcess) -> None:
@@ -151,11 +159,27 @@ async def handle_ssh_process(process: asyncssh.SSHServerProcess) -> None:
     t2 = asyncio.create_task(pipe_streams(subproc.stdout, process.stdout))
     t3 = asyncio.create_task(pipe_streams(subproc.stderr, process.stderr))
 
-    # 等待子进程退出
-    rc = await subproc.wait()
-    t1.cancel()
-    await asyncio.gather(t2, t3, return_exceptions=True)
-    process.exit(rc)
+    rc = 1
+    try:
+        # 等待子进程退出
+        rc = await subproc.wait()
+    except (asyncio.CancelledError, Exception):
+        rc = 1
+    finally:
+        # 严格清理孤儿进程与后台任务，杜绝内存泄漏
+        t1.cancel()
+        t2.cancel()
+        t3.cancel()
+        if subproc.returncode is None:
+            try:
+                subproc.terminate()
+                try:
+                    await asyncio.wait_for(subproc.wait(), timeout=1.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    subproc.kill()
+            except Exception:
+                pass
+        process.exit(rc if rc is not None else 0)
 
 
 def ensure_host_key(key_path_str: str) -> str:
