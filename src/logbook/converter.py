@@ -10,7 +10,8 @@ from typing import NamedTuple
 from .models import (
     Task, TaskStatus, TaskPriority, TaskType,
     Finding, FindingStatus, FindingSeverity,
-    Waiting, WaitingStatus, WaitingCategory
+    Waiting, WaitingStatus, WaitingCategory,
+    Batch, BatchStatus
 )
 from .db import db
 
@@ -19,15 +20,121 @@ class ParseSummary(NamedTuple):
     tasks_imported: int
     findings_imported: int
     waitings_imported: int
+    batches_imported: int = 0
 
 
 async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSummary:
-    """解析 Markdown 表格并灌库。"""
+    """解析 Markdown 表格与批次段落并灌库。"""
     t_count = 0
     f_count = 0
     w_count = 0
+    b_count = 0
 
     lines = markdown_text.splitlines()
+
+    # 1. 首先解析所有批次段落 (## [DEV-...] ...)
+    batches_to_save: list[tuple[Batch, list[str]]] = []
+    current_batch_id = None
+    current_batch_title = None
+    current_batch_status = BatchStatus.COMPLETED
+    current_batch_lines: list[str] = []
+
+    batch_header_re = re.compile(r"^##\s+\[(DEV-[^\]]+)\]\s+(.*?)(?:\s+—\s+(.*?))?$")
+
+    for line in lines:
+        s = line.strip()
+        m = batch_header_re.match(s)
+        if m:
+            if current_batch_id:
+                # 结算上一个批次
+                summary_lines = []
+                methodology_lines = []
+                for bl in current_batch_lines:
+                    if any(bl.startswith(k) for k in ("- **任务源**:", "- **✅ 已并入", "- **✅ 已交卷", "- **⏸ 未办结")):
+                        summary_lines.append(bl)
+                    elif any(bl.startswith(k) for k in ("- **排障方法论", "- **台账", "- **⏭ 待办", "- **📋 备案", "- **方法入规程")):
+                        methodology_lines.append(bl)
+                    elif bl.startswith("- "):
+                        summary_lines.append(bl)
+                batches_to_save.append((
+                    Batch(
+                        id=current_batch_id,
+                        title=current_batch_title or current_batch_id,
+                        status=current_batch_status,
+                        summary="\n".join(summary_lines) if summary_lines else None,
+                        methodology_notes="\n".join(methodology_lines) if methodology_lines else None
+                    ),
+                    current_batch_lines
+                ))
+            current_batch_id = m.group(1).strip()
+            current_batch_title = m.group(2).strip()
+            raw_st = m.group(3).strip() if m.group(3) else ""
+            if any(k in raw_st for k in ("停机", "halted", "⏸")):
+                current_batch_status = BatchStatus.HALTED
+            elif any(k in raw_st for k in ("闭环", "closed", "completed", "✅")):
+                current_batch_status = BatchStatus.COMPLETED
+            elif any(k in raw_st for k in ("进行中", "running", "🟢")):
+                current_batch_status = BatchStatus.RUNNING
+            else:
+                current_batch_status = BatchStatus.PLANNED
+            current_batch_lines = []
+        elif current_batch_id:
+            if s.startswith("## ") and not s.startswith("## [DEV-"):
+                # 退出批次段落
+                summary_lines = []
+                methodology_lines = []
+                for bl in current_batch_lines:
+                    if any(bl.startswith(k) for k in ("- **任务源**:", "- **✅ 已并入", "- **✅ 已交卷", "- **⏸ 未办结")):
+                        summary_lines.append(bl)
+                    elif any(bl.startswith(k) for k in ("- **排障方法论", "- **台账", "- **⏭ 待办", "- **📋 备案", "- **方法入规程")):
+                        methodology_lines.append(bl)
+                    elif bl.startswith("- "):
+                        summary_lines.append(bl)
+                batches_to_save.append((
+                    Batch(
+                        id=current_batch_id,
+                        title=current_batch_title or current_batch_id,
+                        status=current_batch_status,
+                        summary="\n".join(summary_lines) if summary_lines else None,
+                        methodology_notes="\n".join(methodology_lines) if methodology_lines else None
+                    ),
+                    current_batch_lines
+                ))
+                current_batch_id = None
+                current_batch_lines = []
+            elif s:
+                current_batch_lines.append(s)
+
+    if current_batch_id:
+        summary_lines = []
+        methodology_lines = []
+        for bl in current_batch_lines:
+            if any(bl.startswith(k) for k in ("- **任务源**:", "- **✅ 已并入", "- **✅ 已交卷", "- **⏸ 未办结")):
+                summary_lines.append(bl)
+            elif any(bl.startswith(k) for k in ("- **排障方法论", "- **台账", "- **⏭ 待办", "- **📋 备案", "- **方法入规程")):
+                methodology_lines.append(bl)
+            elif bl.startswith("- "):
+                summary_lines.append(bl)
+        batches_to_save.append((
+            Batch(
+                id=current_batch_id,
+                title=current_batch_title or current_batch_id,
+                status=current_batch_status,
+                summary="\n".join(summary_lines) if summary_lines else None,
+                methodology_notes="\n".join(methodology_lines) if methodology_lines else None
+            ),
+            current_batch_lines
+        ))
+
+    # 灌入所有批次
+    latest_batch_id = None
+    for batch_obj, _ in batches_to_save:
+        if not latest_batch_id:
+            latest_batch_id = batch_obj.id
+        await db.upsert_batch(project, batch_obj)
+        b_count += 1
+
+    # 2. 解析任务、发现与待办表格
     current_table = None
 
     for line in lines:
@@ -98,7 +205,8 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
                         status=status,
                         commit_hash=commit,
                         proof_link=proof,
-                        notes=notes
+                        notes=notes,
+                        batch_id=latest_batch_id
                     )
                     await db.upsert_task(project, task)
                     t_count += 1
@@ -163,7 +271,7 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
                 except Exception:
                     pass
 
-    return ParseSummary(tasks_imported=t_count, findings_imported=f_count, waitings_imported=w_count)
+    return ParseSummary(tasks_imported=t_count, findings_imported=f_count, waitings_imported=w_count, batches_imported=b_count)
 
 
 async def export_devlog_markdown(project: str) -> str:
@@ -192,9 +300,9 @@ async def export_devlog_markdown(project: str) -> str:
     ]
 
     for t in tasks:
-        st_icon = "✅ closed" if t.status == TaskStatus.CLOSED else t.status.value
-        commit_str = t.commit_hash or "-"
-        proof_or_notes = t.proof_link or t.notes or "-"
+        st_icon = "closed" if t.status == TaskStatus.CLOSED else t.status.value
+        commit_str = t.commit_hash or ""
+        proof_or_notes = t.proof_link or t.notes or ""
         lines.append(f"| {t.id} | {st_icon} | {t.task_type.value} | {t.title} | {commit_str} | {proof_or_notes} |")
 
     lines.extend([
@@ -208,7 +316,7 @@ async def export_devlog_markdown(project: str) -> str:
     ])
 
     for f in findings:
-        res = f.resolution or "-"
+        res = f.resolution or ""
         lines.append(f"| {f.id} | {f.source} | {f.severity.value} | {f.status.value} | {res} | {f.summary} |")
 
     lines.extend([
@@ -225,19 +333,18 @@ async def export_devlog_markdown(project: str) -> str:
         lines.append(f"| {w.id} | {w.category.value} | {w.status.value} | {w.description} |")
 
     if batches:
-        lines.extend([
-            "",
-            "---",
-            "",
-            "## 四、批次演进记录",
-            "",
-        ])
         for b in batches:
-            lines.append(f"### [{b.id}] {b.title} — {b.status.value}")
+            st_text = "⏸ 停机保存态" if b.status == BatchStatus.HALTED else "✅ 闭环" if b.status == BatchStatus.COMPLETED else "🟢 进行中" if b.status == BatchStatus.RUNNING else "🔵 规划中"
+            lines.extend([
+                "",
+                "---",
+                "",
+                f"## [{b.id}] {b.title} — {st_text}",
+                "",
+            ])
             if b.summary:
-                lines.append(f"- **任务源**: {b.summary}")
+                lines.append(f"{b.summary}")
             if b.methodology_notes:
-                lines.append(f"- **排障方法论与会话经验**: {b.methodology_notes}")
-            lines.append("")
+                lines.append(f"{b.methodology_notes}")
 
     return "\n".join(lines) + "\n"

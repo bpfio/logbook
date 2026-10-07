@@ -42,7 +42,7 @@ def status(project: str):
     """打印项目任务台账与阻塞项看板。强制显式提供项目名称。"""
     async def _status():
         try:
-            proj = await validate_and_negotiate_project(project)
+            proj = await validate_and_negotiate_project(project, is_write=False)
         except ProjectNegotiationError as e:
             console.print(f"[bold red]✘ 未找到项目 '{e.requested_project}'[/bold red]")
             if e.suggestions:

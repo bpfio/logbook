@@ -85,8 +85,8 @@ async def get_registered_projects() -> list[str]:
         return [r["schema_name"].lower() for r in rows]
 
 
-async def validate_and_negotiate_project(project: str) -> str:
-    """强制核验项目身份。若存在拼写错误或越权，触发结构化协商。"""
+async def validate_and_negotiate_project(project: str, is_write: bool = True) -> str:
+    """强制核验项目身份。若存在拼写错误或写操作越权，触发结构化协商。"""
     if not project or not project.strip():
         raise ValueError("【语法错误】project 参数为必填项，禁止为空！请显式指定目标项目名称。")
 
@@ -119,8 +119,8 @@ async def validate_and_negotiate_project(project: str) -> str:
             message=msg
         )
 
-    # 2. 项目存在，但与当前物理工作区不符 -> 触发物理越权阻断
-    if workspace_proj and workspace_proj in registered and req != workspace_proj:
+    # 2. 项目存在，但与当前物理工作区不符 -> 仅在写操作时触发物理越权阻断
+    if is_write and workspace_proj and workspace_proj in registered and req != workspace_proj:
         raise PermissionError(
             f"【Logbook 隔离拦截】越权阻断：当前物理工作区锁定为 [{workspace_proj}]，"
             f"禁止跨项目向 [{req}] 执行写操作或敏感操作！"

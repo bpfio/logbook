@@ -45,7 +45,12 @@ class Database:
         import asyncio
         loop = asyncio.get_running_loop()
         if self._pool is not None and getattr(self._pool, "_loop", None) != loop:
+            old_pool = self._pool
             self._pool = None
+            try:
+                old_pool.terminate()
+            except Exception:
+                pass
 
         if not self._pool:
             self._pool = await asyncpg.create_pool(

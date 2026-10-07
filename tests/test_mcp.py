@@ -153,3 +153,23 @@ async def test_mcp_batch_flow():
     batches = await batch_query(project="logbook")
     assert len(batches) >= 1
     assert any(b["id"] == "DEV-TEST-01" for b in batches)
+
+
+@pytest.mark.asyncio
+async def test_mcp_waiting_flow():
+    """测试 MCP waiting_record 与 waiting_query。"""
+    from logbook.mcp_server import waiting_record, waiting_query
+    res = await waiting_record(
+        project="logbook",
+        id="WAIT-TEST-01",
+        description="等待用户裁决方案选型",
+        category="user",
+        status="open"
+    )
+    assert res["success"] is True
+    assert res["waiting"]["id"] == "WAIT-TEST-01"
+    assert res["waiting"]["category"] == "user"
+
+    waitings = await waiting_query(project="logbook", status="open")
+    assert any(w["id"] == "WAIT-TEST-01" for w in waitings)
+

@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (9)
+## 一、任务台账 (10)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L06 | ✅ closed | feat | MCP 协议自解释Schema升级、Brix 项目全量结构化对齐与向量化灌库 | HEAD | scripts/import_brix.py |
 | L05.4 | ✅ closed | deploy | QNAP 生产容器内存配额再平衡与全维度基准联测 | d27ac5f | deploy/qnap/compose.yaml |
 | L05.3 | ✅ closed | fix | SSH MCP 孤儿子进程泄漏与内存膨胀根因定位与修复 | d27ac5f | src/logbook/ssh_server.py |
 | L05.2 | ✅ closed | feat | 代码模型层与 MCP 工具全量对齐及测试套件扩充 | 04eab61 | tests/test_logbook.py |
@@ -40,6 +41,29 @@
 ---
 
 ## 四、 批次演进记录
+
+### [DEV-2026-10-07-06] MCP 协议自解释Schema升级与 Brix 项目全量结构化对齐入库 — ✅ 闭环
+
+- **任务源**: 用户令经显式审批，全面升级 MCP 协议主动告知字段能力，无损组织并将 `bpfio/brix` 任务台账与排障手记结构化对齐入库。
+- **已交付**:
+  1. **MCP 协议层主动自解释能力**:
+     - 在 `src/logbook/mcp_server.py` 中将核心状态、类型与优先级全面升级为 Python `typing.Literal` 强约束；
+     - FastMCP 生成的标准 JSON Schema 现原生携带 `enum` 数组与字段级 `description`，Agent 端调用前即可获知完整字段要求；
+     - 新增 `waiting_record` 工具与 `logbook://schema/fields` 数据字典资源；
+  2. **双向转换管道 (converter.py) 批次无损支持**:
+     - 升级 Markdown 逆向解析器，支持捕获 `## [DEV-...]` 批次段落并结构化解析为 `batches`；
+     - 导入任务时自动关联当期 `batch_id`，对齐导出格式；
+  3. **Brix 全量数据结构化对齐与向量化灌库**:
+     - 编写幂等灌库脚本 `scripts/import_brix.py`；
+     - 4 大批次入库 `brix.batches` (含 `DEV-2026-10-07-02` 停机保存态及方法论)；
+     - 20 项任务入库 `brix.tasks` (全部关联批次，`F19` 置为 `blocked`，各任务分配责任人 Agent，锚定 commit hash)；
+     - 91 项发现入库 `brix.findings` (含 F-320/F-321 阻塞项与 DRILL-F15 未结项)；
+     - 14 项待办入库 `brix.waitings` (含 WAIT-F320 等待用户决策)；
+     - 提炼 4 篇工业级排障手记入库 `shared.devlogs`，调用讯飞星火 MaaS API 实时计算 512 维向量 (实测余弦召回率 0.7957)；
+  4. **跨项目读写隔离机制优化与镜像构建**:
+     - 优化 `negotiation.py` 支持区分写操作（跨工作区强拦截）与只读操作（允许只读检索）；
+     - 修复 `db.py` 切换事件循环时的连接池泄漏问题；
+     - QNAP 生产环境无缝热重载，实测物理常驻内存降至 **64.4MB** (app: 42MB, pg: 22MB)。
 
 ### [DEV-2026-10-07-05] Logbook 字段深度优化、多Agent协同与生产联调验证 — ✅ 闭环
 

@@ -10,7 +10,7 @@
 import sys
 import os
 import asyncio
-from typing import Any
+from typing import Any, Literal
 try:
     from mcp.server.mcpserver import MCPServer
 except ImportError:
@@ -42,7 +42,7 @@ mcp = MCPServer("logbook-mcp-server")
 async def get_active_tasks_resource(project: str) -> str:
     """提供指定项目当前所有活跃 (running) 与阻塞 (blocked) 任务的只读 Markdown 快照。"""
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, is_write=False)
         tasks = await db.query_tasks(proj, status=[TaskStatus.RUNNING, TaskStatus.BLOCKED])
         if not tasks:
             return f"项目 [{proj}] 当前无活跃或阻塞中的任务。"
@@ -58,7 +58,7 @@ async def get_active_tasks_resource(project: str) -> str:
 async def get_open_waitings_resource(project: str) -> str:
     """提供指定项目所有未决待办与待用户裁决项的只读快照。"""
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, is_write=False)
         waitings = await db.query_waitings(proj, status=WaitingStatus.OPEN)
         if not waitings:
             return f"项目 [{proj}] 当前无阻塞待办项。"
@@ -90,6 +90,55 @@ async def get_engineering_rules_resource() -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"读取架构铁律失败: {e}"
+
+
+@mcp.resource("logbook://schema/fields")
+async def get_schema_fields_resource() -> str:
+    """提供 Logbook 数据字典、实体规范与字段约束清单 (面向 Agent 字段指引)。"""
+    return """# Logbook 工业级研发台账数据字典与字段正典 (SSOT)
+
+## 1. 任务台账 (tasks)
+- id: 任务编号 (必填, 如 'F14', 'L05.1')
+- title: 任务标题 (必填, 256字符内)
+- status: 状态机 (必填, 枚举: 'planned', 'running', 'blocked', 'closed', 'wontfix')
+- task_type: 工程类型 (枚举: 'feat', 'fix', 'verify', 'investigation', 'drill', 'docs', 'ops', 'deploy')
+- priority: 优先级 (枚举: 'P0', 'P1', 'P2', 'P3')
+- assignee: 协同锁责任人 (如 'agy', 'agent_xxx')
+- parent_id: 父任务编号 (支持树状层级解耦)
+- commit_hash: 交付提交散列 (closed 状态必填/强推荐)
+- proof_link: 报告或证据指针 (如 '报告 dfc50ef')
+- batch_id: 归属研发批次号 (如 'DEV-2026-10-07-02')
+
+## 2. 研发批次 (batches)
+- id: 批次编号 (必填, 如 'DEV-2026-10-07-02')
+- title: 批次标题 (必填)
+- status: 批次状态 (枚举: 'planned', 'running', 'completed', 'halted')
+- summary: 任务源、目标与方案概述
+- methodology_notes: 排障方法论、未办结复作入口与讨论过程
+
+## 3. 根因排查手记 (devlogs)
+- title: 故障或排查简述 (必填)
+- problem: 【故障现象】具体错误日志、复现路径与环境 (必填)
+- root_cause: 【根因定位】机理分析，穿透至代码行或系统内核 (必填)
+- solution: 【解决方案】明确修复逻辑与架构重构 (必填)
+- evidence: 【验证证据】复现与修复后的实测比对输出 (必填)
+- author: 记录者 (默认 'agy')
+- visibility: 密级 ('project_private', 'public_safe')
+
+## 4. 发现台账 (findings)
+- id: 发现编号 (如 'F-320', 'AUDIT-P1-1')
+- source: 来源 (如 'audit', 'realmachine', 'F-322池')
+- severity: 严重级别 ('P1', 'P2', 'P3')
+- status: 处置状态 ('open', 'infix', 'fixed', 'wontfix', 'blocked')
+- resolution: 处置结果或修复任务编号
+
+## 5. 待办与阻塞 (waitings)
+- id: 待办编号 (如 'WAIT-F320', 'CLOSE-1')
+- description: 阻塞事项详细描述与唤醒条件 (必填)
+- category: 类别 ('user'=待人类裁决, 'closing'=收尾动作, 'external'=外部依赖)
+- status: 状态 ('open', 'closed')
+- owner: 责任人 (默认 'user')
+"""
 
 
 # =============================================================================
@@ -128,9 +177,9 @@ async def task_upsert(
     project: str,
     id: str,
     title: str,
-    status: str,
-    task_type: str = "fix",
-    priority: str = "P2",
+    status: Literal["planned", "running", "blocked", "closed", "wontfix"],
+    task_type: Literal["feat", "fix", "verify", "investigation", "drill", "docs", "ops", "deploy"] = "fix",
+    priority: Literal["P0", "P1", "P2", "P3"] = "P2",
     assignee: str | None = "agy",
     parent_id: str | None = None,
     commit_hash: str | None = None,
@@ -139,7 +188,26 @@ async def task_upsert(
     tags: list[str] | None = None,
     batch_id: str | None = None,
 ) -> dict:
-    """原子登记或推进任务状态机。强制要求显式提供 project 参数。支持 assignee 责任归属与 parent_id 分级解耦。"""
+    """原子登记或推进任务状态机。强制要求显式提供 project 参数。支持 assignee 责任归属与 parent_id 分级解耦。
+
+    字段说明与规程要求:
+    - project: 必填。项目代号 (如 'brix', 'logbook')。
+    - id: 必填。任务唯一标识 (如 'F14', 'L05.1')。
+    - title: 必填。任务目标与简述 (256字符内)。
+    - status: 必填。阶段状态机:
+        * 'planned': 已规划待办
+        * 'running': 进行中 (开工必标记)
+        * 'blocked': 阻塞中 (等待用户裁决或外部依赖)
+        * 'closed': 办结闭环 (必须带 commit_hash 或 proof_link 真实证据)
+        * 'wontfix': 经评估不予修复并备案
+    - task_type: 工程类型 ('feat', 'fix', 'verify', 'investigation', 'drill', 'docs', 'ops', 'deploy')。
+    - priority: 优先级 ('P0'=阻塞故障, 'P1'=核心严重, 'P2'=中度演练, 'P3'=轻微文档)。
+    - assignee: 责任人锁 (防止多 Agent 争抢，如 'agy', 'agent_xxx')。
+    - parent_id: 父任务 ID (支持树状拆解)。
+    - commit_hash: 关联提交散列。
+    - proof_link: 报告或证据指针 (如 '报告 dfc50ef')。
+    - batch_id: 归属研发批次号 (如 'DEV-2026-10-07-02')。
+    """
     try:
         proj = await validate_and_negotiate_project(project)
     except ProjectNegotiationError as e:
@@ -173,8 +241,8 @@ async def task_upsert(
 @mcp.tool()
 async def task_query(
     project: str,
-    status: list[str] | None = None,
-    priority: list[str] | None = None,
+    status: list[Literal["planned", "running", "blocked", "closed", "wontfix"]] | None = None,
+    priority: list[Literal["P0", "P1", "P2", "P3"]] | None = None,
     batch_id: str | None = None,
     assignee: str | None = None,
     parent_id: str | None = None,
@@ -182,7 +250,7 @@ async def task_query(
 ) -> list[dict] | dict:
     """多维查询任务看板。强制要求显式提供 project 参数。支持按状态、优先级、批次、责任人与父任务过滤。"""
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
@@ -206,13 +274,25 @@ async def finding_record(
     id: str,
     summary: str,
     source: str = "audit",
-    severity: str = "P2",
-    status: str = "open",
+    severity: Literal["P1", "P2", "P3"] = "P2",
+    status: Literal["open", "infix", "fixed", "wontfix", "blocked"] = "open",
     task_id: str | None = None,
     reporter: str = "audit",
     resolution: str | None = None,
 ) -> dict:
-    """登记或更新缺陷/审计发现项。强制要求显式提供 project 参数。支持 reporter 责任归属。"""
+    """登记或更新缺陷/审计发现项。强制要求显式提供 project 参数。支持 reporter 责任归属。
+
+    字段说明:
+    - project: 必填。项目代号。
+    - id: 必填。发现项 ID (如 'F-320', 'AUDIT-P1-1')。
+    - summary: 必填。缺陷现象描述与备注。
+    - source: 发现来源 (如 'audit', 'realmachine', 'F-322池', 'drill-F15')。
+    - severity: 严重级别 ('P1', 'P2', 'P3')。
+    - status: 处置状态 ('open', 'infix', 'fixed', 'wontfix', 'blocked')。
+    - task_id: 关联修复任务 ID。
+    - reporter: 报告者 Agent。
+    - resolution: 处置结果或修复 Commit 标识。
+    """
     try:
         proj = await validate_and_negotiate_project(project)
     except ProjectNegotiationError as e:
@@ -236,16 +316,57 @@ async def finding_record(
 
 
 @mcp.tool()
-async def waiting_query(project: str, status: str = "open") -> list[dict] | dict:
+async def waiting_query(
+    project: str,
+    status: Literal["open", "closed"] = "open"
+) -> list[dict] | dict:
     """查询待办与阻塞项 (如待用户决策事项)。强制要求显式提供 project 参数。"""
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
     st = WaitingStatus(status)
     waitings = await db.query_waitings(proj, status=st)
     return [w.model_dump(mode="json") for w in waitings]
+
+
+@mcp.tool()
+async def waiting_record(
+    project: str,
+    id: str,
+    description: str,
+    category: Literal["user", "closing", "external"] = "user",
+    status: Literal["open", "closed"] = "open",
+    owner: str = "user",
+    resolution: str | None = None,
+) -> dict:
+    """登记或更新待办与阻塞项。强制要求显式提供 project 参数。
+
+    字段说明:
+    - project: 必填。项目代号。
+    - id: 必填。阻塞待办 ID (如 'WAIT-F320', 'CLOSE-1')。
+    - description: 必填。阻塞事项描述与唤醒条件。
+    - category: 类别 ('user'=需用户决策/授权, 'closing'=批次收尾动作, 'external'=外部依赖)。
+    - status: 状态 ('open'=阻塞中, 'closed'=已解决)。
+    - owner: 责任人 (默认 'user')。
+    - resolution: 解决结论。
+    """
+    try:
+        proj = await validate_and_negotiate_project(project)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    waiting = Waiting(
+        id=id,
+        category=WaitingCategory(category),
+        owner=owner,
+        status=WaitingStatus(status),
+        description=sanitize_text(description).clean_text,
+        resolution=sanitize_text(resolution).clean_text if resolution else None,
+    )
+    saved = await db.upsert_waiting(proj, waiting)
+    return {"success": True, "project": proj, "waiting": saved.model_dump(mode="json")}
 
 
 @mcp.tool()
@@ -258,10 +379,21 @@ async def devlog_record(
     evidence: str,
     author: str = "agy",
     task_id: str | None = None,
-    visibility: str = "project_private",
+    visibility: Literal["project_private", "public_safe"] = "project_private",
     tags: list[str] | None = None,
 ) -> dict:
-    """结构化录入排查手记 (根因四要素 + 自动脱敏 + 512维向量入库)。强制要求显式提供 project 参数。支持 author 溯源。"""
+    """结构化录入排查手记 (强制覆盖根因四要素 + 自动脱敏 + 512维向量入库)。强制要求显式提供 project 参数。支持 author 溯源。
+
+    结构化四要素必填项:
+    - project: 必填。项目代号。
+    - title: 必填。排查主题或故障简述。
+    - problem: 必填。【故障现象】具体错误日志、复现路径与环境参数。
+    - root_cause: 必填。【根因定位】机理分析，穿透至代码行或系统内核。
+    - solution: 必填。【解决方案】明确修复逻辑与架构重构。
+    - evidence: 必填。【验证证据】复现与修复后的实测比对输出。
+    - author: 记录者 Agent 或人类专家 (默认 'agy')。
+    - visibility: 密级 ('project_private'=项目私有, 'public_safe'=全局开源脱敏)。
+    """
     try:
         proj = await validate_and_negotiate_project(project)
     except ProjectNegotiationError as e:
@@ -309,7 +441,7 @@ async def devlog_search(
 ) -> list[dict] | dict:
     """语义向量与全文混合检索跨 Agent 长期记忆。优先当前项目私密经验 + 全局开源安全经验。"""
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
@@ -326,7 +458,10 @@ async def devlog_search(
 
 
 @mcp.tool()
-async def rule_query(keyword: str | None = None, category: str | None = None) -> list[dict]:
+async def rule_query(
+    keyword: str | None = None,
+    category: Literal["general", "network", "kernel", "database", "security", "engineering", "governance", "resource"] | None = None
+) -> list[dict]:
     """开工前对齐架构铁律与工程红线 (SSOT)。全项目共享。支持按领域 category 精准过滤。"""
     rules = await db.query_rules(keyword=keyword, category=category)
     return [r.model_dump(mode="json") for r in rules]
@@ -336,7 +471,7 @@ async def rule_query(keyword: str | None = None, category: str | None = None) ->
 async def export_markdown(project: str, output_path: str = "docs/DEVLOG.md") -> str:
     """从数据库生成完全兼容 brix 格式的 DEVLOG.md。强制要求显式提供 project 参数。"""
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.message
 
@@ -353,12 +488,22 @@ async def batch_upsert(
     project: str,
     id: str,
     title: str,
-    status: str = "completed",
+    status: Literal["planned", "running", "completed", "halted"] = "completed",
     branch_name: str | None = None,
     summary: str | None = None,
     methodology_notes: str | None = None,
 ) -> dict:
-    """登记或更新研发批次演进记录与排障方法论。强制要求显式提供 project 参数。"""
+    """登记或更新研发批次演进记录与排障方法论。强制要求显式提供 project 参数。
+
+    字段说明:
+    - project: 必填。项目代号。
+    - id: 必填。批次编号 (如 'DEV-2026-10-07-02')。
+    - title: 必填。批次标题与主题。
+    - status: 批次状态 ('planned', 'running', 'completed', 'halted')。
+    - branch_name: 关联代码分支。
+    - summary: 批次任务源与方案总结。
+    - methodology_notes: 排障方法论、未办结复作入口与讨论过程。
+    """
     try:
         proj = await validate_and_negotiate_project(project)
     except ProjectNegotiationError as e:
@@ -380,7 +525,7 @@ async def batch_upsert(
 async def batch_query(project: str, limit: int = 20) -> list[dict] | dict:
     """查询项目历史研发批次演进记录与讨论复盘。强制要求显式提供 project 参数。"""
     try:
-        proj = await validate_and_negotiate_project(project)
+        proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
