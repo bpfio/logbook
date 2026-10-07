@@ -22,22 +22,37 @@ async def get_embedding(text: str, timeout: float = 0.5) -> EmbeddingResult:
     if not text:
         return EmbeddingResult(embedding=None, source="none")
 
-    api_key = os.getenv("SPARK_API_KEY")
-    api_url = os.getenv("SPARK_EMBED_URL", "https://spark-api-open.xf-yun.com/v1/embeddings")
+    api_key = os.getenv("EMBEDDING_API_KEY", os.getenv("SPARK_API_KEY"))
+    api_url = os.getenv(
+        "EMBEDDING_API_URL",
+        os.getenv("SPARK_EMBED_URL", "https://maas-api.cn-huabei-1.xf-yun.com/v2/embeddings")
+    )
+    model = os.getenv("EMBEDDING_MODEL_NAME", "xop3qwen8bembedding")
+    eff_timeout = float(os.getenv("EMBEDDING_TIMEOUT", str(timeout)))
 
-    # 1. 尝试调用生产级星火 MaaS 向量接口 (若环境变量已配置)
+    # 1. 尝试调用生产级星火 MaaS / OpenAI 兼容向量接口 (若环境变量已配置)
     if api_key:
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    api_url,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json={"input": text, "model": "spark-embedding-512"}
-                )
+            payload = {
+                "input": [text] if isinstance(text, str) else text,
+                "model": model
+            }
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            async with httpx.AsyncClient(timeout=eff_timeout) as client:
+                resp = await client.post(api_url, headers=headers, json=payload)
                 if resp.status_code == 200:
                     data = resp.json()
-                    vec = data["data"][0]["embedding"]
-                    if len(vec) == 512:
+                    items = data.get("data", [])
+                    if items:
+                        raw_vec = items[0]["embedding"]
+                        dim = 512
+                        vec = list(raw_vec[:dim]) if len(raw_vec) >= dim else list(raw_vec) + [0.0] * (dim - len(raw_vec))
+                        norm = sum(x * x for x in vec) ** 0.5
+                        if norm > 0:
+                            vec = [round(x / norm, 6) for x in vec]
                         return EmbeddingResult(embedding=vec, source="spark_maas")
         except Exception:
             # 网络抖动超时或失败，直接进入降级分支
