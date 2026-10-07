@@ -74,37 +74,46 @@ class Database:
     # 任务台账 (tasks)
     # =========================================================================
 
-    async def upsert_task(self, project: str, task: Task) -> Task:
+    async def upsert_task(self, project: str, task: Task, operator: str = "agy") -> Task:
         await self.ensure_project(project)
+        # 获取原有状态以沉淀精确状态转移审计
+        existing = await self.get_task(project, task.id)
+        from_status = existing.status.value if existing else None
+
         query = f"""
-            INSERT INTO {project}.tasks (
-                id, batch_id, title, task_type, priority, status,
-                commit_hash, proof_link, notes, created_at, started_at, closed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            INSERT INTO "{project}".tasks (
+                id, batch_id, parent_id, title, task_type, priority, status,
+                assignee, commit_hash, proof_link, notes, tags, created_at, updated_at, started_at, closed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (id) DO UPDATE SET
                 batch_id = EXCLUDED.batch_id,
+                parent_id = EXCLUDED.parent_id,
                 title = EXCLUDED.title,
                 task_type = EXCLUDED.task_type,
                 priority = EXCLUDED.priority,
                 status = EXCLUDED.status,
+                assignee = EXCLUDED.assignee,
                 commit_hash = EXCLUDED.commit_hash,
                 proof_link = EXCLUDED.proof_link,
                 notes = EXCLUDED.notes,
-                started_at = COALESCE({project}.tasks.started_at, EXCLUDED.started_at),
+                tags = EXCLUDED.tags,
+                updated_at = EXCLUDED.updated_at,
+                started_at = COALESCE("{project}".tasks.started_at, EXCLUDED.started_at),
                 closed_at = EXCLUDED.closed_at
-            RETURNING id, batch_id, title, task_type, priority, status,
-                      commit_hash, proof_link, notes, created_at, started_at, closed_at, duration_seconds;
+            RETURNING id, batch_id, parent_id, title, task_type, priority, status,
+                      assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
+                      started_at, closed_at, duration_seconds;
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
-                task.id, task.batch_id, task.title, task.task_type.value, task.priority.value, task.status.value,
-                task.commit_hash, task.proof_link, task.notes, task.created_at, task.started_at, task.closed_at
+                task.id, task.batch_id, task.parent_id, task.title, task.task_type.value, task.priority.value, task.status.value,
+                task.assignee, task.commit_hash, task.proof_link, task.notes, task.tags, task.created_at, task.updated_at, task.started_at, task.closed_at
             )
-            # 记录时间线流
+            # 记录时间线流 (精确记录 from_status -> to_status)
             await conn.execute(
-                f"INSERT INTO {project}.task_timeline (task_id, to_status, operator, occurred_at) VALUES ($1, $2, $3, $4)",
-                task.id, task.status.value, "system", get_beijing_now()
+                f'INSERT INTO "{project}".task_timeline (task_id, from_status, to_status, operator, occurred_at) VALUES ($1, $2, $3, $4, $5)',
+                task.id, from_status, task.status.value, operator, get_beijing_now()
             )
             return Task(**dict(row))
 
@@ -114,6 +123,8 @@ class Database:
         status: list[TaskStatus] | None = None,
         priority: list[TaskPriority] | None = None,
         batch_id: str | None = None,
+        assignee: str | None = None,
+        parent_id: str | None = None,
         limit: int = 50
     ) -> list[Task]:
         await self.ensure_project(project)
@@ -133,11 +144,20 @@ class Database:
             conditions.append(f"batch_id = ${idx}")
             params.append(batch_id)
             idx += 1
+        if assignee:
+            conditions.append(f"assignee = ${idx}")
+            params.append(assignee)
+            idx += 1
+        if parent_id:
+            conditions.append(f"parent_id = ${idx}")
+            params.append(parent_id)
+            idx += 1
 
         query = f"""
-            SELECT id, batch_id, title, task_type, priority, status,
-                   commit_hash, proof_link, notes, created_at, started_at, closed_at, duration_seconds
-            FROM {project}.tasks
+            SELECT id, batch_id, parent_id, title, task_type, priority, status,
+                   assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
+                   started_at, closed_at, duration_seconds
+            FROM "{project}".tasks
             WHERE {" AND ".join(conditions)}
             ORDER BY created_at DESC
             LIMIT {limit};
@@ -149,9 +169,10 @@ class Database:
     async def get_task(self, project: str, task_id: str) -> Task | None:
         await self.ensure_project(project)
         query = f"""
-            SELECT id, batch_id, title, task_type, priority, status,
-                   commit_hash, proof_link, notes, created_at, started_at, closed_at, duration_seconds
-            FROM {project}.tasks
+            SELECT id, batch_id, parent_id, title, task_type, priority, status,
+                   assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
+                   started_at, closed_at, duration_seconds
+            FROM "{project}".tasks
             WHERE id = $1;
         """
         async with self._pool.acquire() as conn:
@@ -165,24 +186,26 @@ class Database:
     async def upsert_finding(self, project: str, finding: Finding) -> Finding:
         await self.ensure_project(project)
         query = f"""
-            INSERT INTO {project}.findings (
-                id, source, severity, status, task_id, summary, resolution, discovered_at, resolved_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO "{project}".findings (
+                id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (id) DO UPDATE SET
                 source = EXCLUDED.source,
                 severity = EXCLUDED.severity,
                 status = EXCLUDED.status,
                 task_id = EXCLUDED.task_id,
+                reporter = EXCLUDED.reporter,
                 summary = EXCLUDED.summary,
                 resolution = EXCLUDED.resolution,
                 resolved_at = EXCLUDED.resolved_at
-            RETURNING id, source, severity, status, task_id, summary, resolution, discovered_at, resolved_at;
+            RETURNING id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at;
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
                 finding.id, finding.source, finding.severity.value, finding.status.value,
-                finding.task_id, finding.summary, finding.resolution, finding.discovered_at, finding.resolved_at
+                finding.task_id, finding.reporter, finding.summary, finding.resolution,
+                finding.discovered_at, finding.resolved_at
             )
             return Finding(**dict(row))
 
@@ -204,12 +227,12 @@ class Database:
             idx += 1
         if severity:
             conditions.append(f"severity = ANY(${idx})")
-            params.append([s.value for s in severity])
+            params.append([p.value for p in severity])
             idx += 1
 
         query = f"""
-            SELECT id, source, severity, status, task_id, summary, resolution, discovered_at, resolved_at
-            FROM {project}.findings
+            SELECT id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at
+            FROM "{project}".findings
             WHERE {" AND ".join(conditions)}
             ORDER BY discovered_at DESC
             LIMIT {limit};
@@ -225,21 +248,22 @@ class Database:
     async def upsert_waiting(self, project: str, waiting: Waiting) -> Waiting:
         await self.ensure_project(project)
         query = f"""
-            INSERT INTO {project}.waitings (
-                id, category, status, description, resolution, blocked_at, resolved_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO "{project}".waitings (
+                id, category, status, owner, description, resolution, blocked_at, resolved_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (id) DO UPDATE SET
                 category = EXCLUDED.category,
                 status = EXCLUDED.status,
+                owner = EXCLUDED.owner,
                 description = EXCLUDED.description,
                 resolution = EXCLUDED.resolution,
                 resolved_at = EXCLUDED.resolved_at
-            RETURNING id, category, status, description, resolution, blocked_at, resolved_at;
+            RETURNING id, category, status, owner, description, resolution, blocked_at, resolved_at;
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
-                waiting.id, waiting.category.value, waiting.status.value,
+                waiting.id, waiting.category.value, waiting.status.value, waiting.owner,
                 waiting.description, waiting.resolution, waiting.blocked_at, waiting.resolved_at
             )
             return Waiting(**dict(row))
@@ -253,8 +277,8 @@ class Database:
             params.append(status.value)
 
         query = f"""
-            SELECT id, category, status, description, resolution, blocked_at, resolved_at
-            FROM {project}.waitings
+            SELECT id, category, status, owner, description, resolution, blocked_at, resolved_at
+            FROM "{project}".waitings
             WHERE {" AND ".join(conditions)}
             ORDER BY blocked_at DESC;
         """
@@ -269,7 +293,7 @@ class Database:
     async def upsert_batch(self, project: str, batch: Batch) -> Batch:
         await self.ensure_project(project)
         query = f"""
-            INSERT INTO {project}.batches (
+            INSERT INTO "{project}".batches (
                 id, title, status, branch_name, summary, methodology_notes, created_at, closed_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (id) DO UPDATE SET
@@ -293,7 +317,7 @@ class Database:
         await self.ensure_project(project)
         query = f"""
             SELECT id, title, status, branch_name, summary, methodology_notes, created_at, closed_at
-            FROM {project}.batches
+            FROM "{project}".batches
             ORDER BY created_at DESC
             LIMIT {limit};
         """
@@ -314,19 +338,19 @@ class Database:
 
         query = """
             INSERT INTO shared.devlogs (
-                project_id, task_id, title, problem, root_cause, solution, evidence,
-                visibility, tags, embedding, occurred_at, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::vector, $11, $12)
-            RETURNING id, project_id, task_id, title, problem, root_cause, solution, evidence,
-                      visibility, tags, occurred_at, created_at;
+                project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                visibility, tags, embedding, occurred_at, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::vector, $12, $13, $14)
+            RETURNING id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                      visibility, tags, occurred_at, created_at, updated_at;
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
-                devlog.project_id, devlog.task_id, devlog.title,
+                devlog.project_id, devlog.task_id, devlog.title, devlog.author,
                 devlog.problem, devlog.root_cause, devlog.solution, devlog.evidence,
                 devlog.visibility.value, devlog.tags, vec_literal,
-                devlog.occurred_at, devlog.created_at
+                devlog.occurred_at, devlog.created_at, devlog.updated_at
             )
             res = dict(row)
             res["embedding"] = devlog.embedding
@@ -347,8 +371,8 @@ class Database:
             if query_vector:
                 vec_literal = f"[{','.join(str(x) for x in query_vector)}]"
                 sql = f"""
-                    SELECT id, project_id, task_id, title, problem, root_cause, solution, evidence,
-                           visibility, tags, occurred_at,
+                    SELECT id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                           visibility, tags, occurred_at, created_at, updated_at,
                            (1 - (embedding <=> $2::vector)) AS score
                     FROM shared.devlogs
                     WHERE {vis_cond} AND embedding IS NOT NULL
@@ -358,8 +382,8 @@ class Database:
                 rows = await conn.fetch(sql, project, vec_literal, limit)
             elif query_text:
                 sql = f"""
-                    SELECT id, project_id, task_id, title, problem, root_cause, solution, evidence,
-                           visibility, tags, occurred_at,
+                    SELECT id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                           visibility, tags, occurred_at, created_at, updated_at,
                            ts_rank_cd(tsv_content, plainto_tsquery('simple', $2)) AS score
                     FROM shared.devlogs
                     WHERE {vis_cond} AND tsv_content @@ plainto_tsquery('simple', $2)
@@ -369,8 +393,8 @@ class Database:
                 rows = await conn.fetch(sql, project, query_text, limit)
             else:
                 sql = f"""
-                    SELECT id, project_id, task_id, title, problem, root_cause, solution, evidence,
-                           visibility, tags, occurred_at, 1.0 AS score
+                    SELECT id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                           visibility, tags, occurred_at, created_at, updated_at, 1.0 AS score
                     FROM shared.devlogs
                     WHERE {vis_cond}
                     ORDER BY occurred_at DESC
@@ -388,43 +412,48 @@ class Database:
         await self.connect()
         query = """
             INSERT INTO shared.rules (
-                id, title, summary, bad_practice, good_practice, constraints, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                id, category, title, summary, bad_practice, good_practice, constraints, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (id) DO UPDATE SET
+                category = EXCLUDED.category,
                 title = EXCLUDED.title,
                 summary = EXCLUDED.summary,
                 bad_practice = EXCLUDED.bad_practice,
                 good_practice = EXCLUDED.good_practice,
                 constraints = EXCLUDED.constraints,
                 updated_at = EXCLUDED.updated_at
-            RETURNING id, title, summary, bad_practice, good_practice, constraints, created_at, updated_at;
+            RETURNING id, category, title, summary, bad_practice, good_practice, constraints, created_at, updated_at;
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
-                rule.id, rule.title, rule.summary, rule.bad_practice,
+                rule.id, rule.category, rule.title, rule.summary, rule.bad_practice,
                 rule.good_practice, rule.constraints, rule.created_at, rule.updated_at
             )
             return Rule(**dict(row))
 
-    async def query_rules(self, keyword: str | None = None) -> list[Rule]:
+    async def query_rules(self, keyword: str | None = None, category: str | None = None) -> list[Rule]:
         await self.connect()
         async with self._pool.acquire() as conn:
+            conditions = ["1=1"]
+            params = []
+            idx = 1
+            if category:
+                conditions.append(f"category = ${idx}")
+                params.append(category)
+                idx += 1
             if keyword:
-                kw = f"%{keyword}%"
-                rows = await conn.fetch(
-                    """
-                    SELECT id, title, summary, bad_practice, good_practice, constraints, created_at, updated_at
-                    FROM shared.rules
-                    WHERE title ILIKE $1 OR summary ILIKE $1 OR constraints ILIKE $1
-                    ORDER BY id;
-                    """,
-                    kw
-                )
-            else:
-                rows = await conn.fetch(
-                    "SELECT id, title, summary, bad_practice, good_practice, constraints, created_at, updated_at FROM shared.rules ORDER BY id;"
-                )
+                conditions.append(f"(title ILIKE ${idx} OR summary ILIKE ${idx} OR constraints ILIKE ${idx})")
+                params.append(f"%{keyword}%")
+                idx += 1
+
+            query = f"""
+                SELECT id, category, title, summary, bad_practice, good_practice, constraints, created_at, updated_at
+                FROM shared.rules
+                WHERE {" AND ".join(conditions)}
+                ORDER BY id;
+            """
+            rows = await conn.fetch(query, *params)
             return [Rule(**dict(r)) for r in rows]
 
 

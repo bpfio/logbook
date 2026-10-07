@@ -11,7 +11,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 64M
+          memory: 96M
     environment:
       - PYTHONUNBUFFERED=1
       - APP_ENV=production
@@ -42,7 +42,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 80M
+          memory: 48M
     environment:
       - POSTGRES_DB=logbook
       - POSTGRES_USER=postgres

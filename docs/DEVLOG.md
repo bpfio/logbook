@@ -9,10 +9,11 @@
 
 ---
 
-## 一、 任务台账 (4)
+## 一、 任务台账 (5)
 
 | ID | 状态 | 优先级 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|---|
+| L05 | closed | P1 | feat | 数据表字段深度优化、多Agent协同扩容与全量生产联调联测 | HEAD | 任务分级parent_id/责任人assignee/铁律分类category/手记author，内存配额调优(app:96M/pg:48M)，全量测试全绿 |
 | L04 | closed | P1 | feat | QNAP 生产环境无缝上线、Rekall 彻底下线与星火向量生产验证 | 0477f75 | PG18+pgvector 实测内存 63MB，SSH MCP 与星火向量端到端全绿 |
 | L03 | closed | P1 | feat | 强制项目显式传参、三级交互协商自愈与全维 MCP 2.x 升级 | 5031c53 | 单元测试全绿 (14/14)，含 briz 纠错与越权阻断 |
 | L02 | closed | P1 | feat | 双平面隔离底座、PostgreSQL 18+pgvector、FastMCP 与 CLI 看板落地 | c51bbd7 | 测试 10/10 全绿，Brix 数据无损导入导出核销 |
@@ -38,7 +39,28 @@
 
 ## 四、 批次演进记录
 
-### [DEV-2026-10-07-04] Logbook QNAP 生产环境部署与全栈替换上线 — ✅ 闭环
+### [DEV-2026-10-07-05] Logbook 字段深度优化、多Agent协同与生产联调验证 — ✅ 闭环
+
+- **任务源**: 用户指令经正式审批（本地优化，测试通过后同步到 bpfio/logbook，然后部署到 QNAP 容器）。
+- **已交付**:
+  1. **数据模型与 Schema 深度优化**:
+     - `tasks` 表：新增 `assignee`（责任主体/多 Agent 协同锁）、`parent_id`（支持长链路两级树形拆解）、`tags`（领域标签打标）与 `updated_at`（增量时戳与活跃监控）；
+     - `devlogs` 表：新增 `author`（长期记忆归属溯源，区分 Agent/专家）与 `updated_at`；
+     - `rules` 表：新增 `category`（领域分类 network/kernel/security/database 等，大幅减少 Prompt Token 噪音）；
+     - `findings` 表新增 `reporter`；`waitings` 表新增 `owner`；
+     - 编写完全向后兼容的平滑幂等迁移脚本 `sql/02_optimize_fields.sql`，动态巡检各 Schema 增量打补丁；
+  2. **代码层与 MCP 2.x 工具全量对齐**:
+     - `models.py` 与 `db.py` 严格转义双引号保护 `"{project}"`，彻底规避连字符项目名解析故障；
+     - `mcp_server.py` 工具更新：`task_upsert` / `task_query` 支持 `assignee` 与 `parent_id` 过滤，`rule_query` 原生支持 `category` 领域筛选；
+     - `task_timeline` 精确记录 `from_status` -> `to_status` 与操作员 `operator`；
+  3. **生产参数联测与内存配额调优**:
+     - 编写全链路生产联测工具 `tests/benchmark_live.py` 覆盖 8 大维度，实测 PG 18.6 GA 建连延迟 35.36ms，星火向量 API 响应正常，余弦召回度 0.8311；
+     - 针对 `logbook-app` 接近 64MB 警戒线（63.46MB）的问题，在保持宿主机总 144MB 配额绝对不变的前提下，再平衡配额为 `app: 96MB / postgres: 48MB`，彻底消除生产 OOM 风险；
+  4. **全量测试套件保障**:
+     - 扩展 `tests/test_logbook.py` 与 `tests/test_mcp.py` 断言，14 项单元测试与集成测试 100% 通过（4.76s）。
+- **判据与实测**:
+  - `pytest tests/`: 14 passed in 4.76s；
+  - `docker exec logbook-postgres psql < sql/02_optimize_fields.sql`: 幂等迁移成功，`tasks/devlogs/rules` 新字段生效。
 
 - **任务源**: 用户指令经正式审批（路线 A：彻底替换升级为 Logbook，回收生产节点 IP，配置讯飞星火向量，绝对保障 QNAP 其他服务安全）。
 - **已交付**:

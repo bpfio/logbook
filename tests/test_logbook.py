@@ -65,22 +65,46 @@ def test_sntp_clock_drift_check():
 
 @pytest.mark.asyncio
 async def test_database_crud_and_duration():
-    """测试任务生命周期、用时自动度量与时间线记录。"""
+    """测试任务生命周期、用时自动度量、层级解耦与时间线记录。"""
     await db.ensure_project("test_proj")
 
-    # 1. 登记 running 任务
+    # 1. 登记父级 running 任务
     t = Task(
         id="TEST-01",
-        title="性能调优任务",
+        title="性能调优主任务",
         status=TaskStatus.RUNNING,
         task_type=TaskType.FIX,
-        priority=TaskPriority.P1
+        priority=TaskPriority.P1,
+        assignee="agy-planner",
+        tags=["perf", "kernel"]
     )
     saved = await db.upsert_task("test_proj", t)
     assert saved.status == TaskStatus.RUNNING
     assert saved.started_at is not None
+    assert saved.assignee == "agy-planner"
+    assert "perf" in saved.tags
 
-    # 2. 闭环任务并验证耗时度量
+    # 2. 登记子任务并校验 parent_id 关联
+    sub_task = Task(
+        id="TEST-01.1",
+        parent_id="TEST-01",
+        title="子任务：内存配额调整",
+        status=TaskStatus.PLANNED,
+        task_type=TaskType.OPS,
+        priority=TaskPriority.P2,
+        assignee="agy-coder",
+        tags=["memory", "docker"]
+    )
+    saved_sub = await db.upsert_task("test_proj", sub_task)
+    assert saved_sub.parent_id == "TEST-01"
+    assert saved_sub.assignee == "agy-coder"
+
+    # 查询子任务
+    queried_subs = await db.query_tasks("test_proj", parent_id="TEST-01")
+    assert len(queried_subs) == 1
+    assert queried_subs[0].id == "TEST-01.1"
+
+    # 3. 闭环主任务并验证耗时度量
     saved.status = TaskStatus.CLOSED
     saved.commit_hash = "commit_deadbeef"
     saved = Task(**saved.model_dump())  # 触发 Pydantic 校验

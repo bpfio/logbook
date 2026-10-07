@@ -1,65 +1,17 @@
 -- ============================================================================
--- Logbook PostgreSQL 18 + pgvector 初始化 DDL (双平面架构)
--- SSOT: /home/yupeng/logbook/AGENTS.md
+-- Logbook 字段优化与审计扩容平滑迁移脚本 (02_optimize_fields.sql)
+-- 幂等执行: 采用 ADD COLUMN IF NOT EXISTS 与动态 Schema 遍历
 -- ============================================================================
 
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
--- ============================================================================
--- 一、 共享知识面 (Shared Knowledge Plane: Schema shared)
--- ============================================================================
-CREATE SCHEMA IF NOT EXISTS shared;
-
--- 1. 架构铁律与工程红线表 (Rules)
-CREATE TABLE IF NOT EXISTS shared.rules (
-    id VARCHAR(64) PRIMARY KEY,                  -- 规则标识，如 'RULE-NET-01'
-    category VARCHAR(32) NOT NULL DEFAULT 'general', -- 领域分类：network, kernel, database, security, writing 等
-    title VARCHAR(256) NOT NULL,
-    summary TEXT NOT NULL,                       -- 一句话核心原则
-    bad_practice TEXT NOT NULL,                  -- 错误示范 (Anti-Pattern)
-    good_practice TEXT NOT NULL,                 -- 正确做法 (Best Practice)
-    constraints TEXT,                            -- 边界约束与红线说明
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+-- 1. 架构铁律扩容
+ALTER TABLE shared.rules ADD COLUMN IF NOT EXISTS category VARCHAR(32) NOT NULL DEFAULT 'general';
 CREATE INDEX IF NOT EXISTS idx_rules_category ON shared.rules(category);
 
--- 2. 排查手记与长期记忆表 (DevLogs: 故障四要素 + 512维向量 + 全文检索)
-CREATE TABLE IF NOT EXISTS shared.devlogs (
-    id BIGSERIAL PRIMARY KEY,
-    project_id VARCHAR(32) NOT NULL,             -- 归属项目 (如 'brix', 'logbook')
-    task_id VARCHAR(32),                         -- 关联项目任务 ID (如 'F14')
-    title VARCHAR(256) NOT NULL,
-    author VARCHAR(64) NOT NULL DEFAULT 'agy',   -- 记录者 Agent 或 人类专家
-    -- 结构化根因四要素 (必填)
-    problem TEXT NOT NULL,                       -- 故障现象与复现路径
-    root_cause TEXT NOT NULL,                    -- 机理定位与代码/内核穿透分析
-    solution TEXT NOT NULL,                      -- 明确修复逻辑与架构重构
-    evidence TEXT NOT NULL,                      -- 修复前后实测对比证据
-    -- 密级防线
-    visibility VARCHAR(16) NOT NULL DEFAULT 'project_private'
-        CHECK (visibility IN ('project_private', 'org_internal', 'public_safe')),
-    -- 检索加速字段
-    tags VARCHAR(32)[] DEFAULT '{}',
-    embedding vector(512),                       -- 512 维向量 (讯飞星火 MaaS)
-    tsv_content tsvector GENERATED ALWAYS AS (
-        to_tsvector('simple', title || ' ' || problem || ' ' || root_cause || ' ' || solution)
-    ) STORED,
-    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+-- 2. 排查手记扩容
+ALTER TABLE shared.devlogs ADD COLUMN IF NOT EXISTS author VARCHAR(64) NOT NULL DEFAULT 'agy';
+ALTER TABLE shared.devlogs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
 
-CREATE INDEX IF NOT EXISTS idx_devlogs_project_vis ON shared.devlogs(project_id, visibility);
-CREATE INDEX IF NOT EXISTS idx_devlogs_tsv ON shared.devlogs USING gin(tsv_content);
-CREATE INDEX IF NOT EXISTS idx_devlogs_vector_hnsw ON shared.devlogs USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
-
--- ============================================================================
--- 二、 动态项目执行面 DDL 模板函数 (Project Execution Plane)
--- 任何新项目注册均调用此函数完成 Schema 及表结构幂等初始化
--- ============================================================================
+-- 3. 动态项目执行面模板函数更新 (保证未来创建的新项目 Schema 包含新字段)
 CREATE OR REPLACE FUNCTION shared.init_project_schema(p_name TEXT) 
 RETURNS VOID AS $$
 DECLARE
@@ -160,6 +112,38 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- 初始化默认自带的项目 Schema
-SELECT shared.init_project_schema('brix');
-SELECT shared.init_project_schema('logbook');
+-- 4. 对所有存量业务项目 Schema 幂等扩容
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN SELECT schema_name FROM information_schema.schemata 
+             WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast', 'shared', 'public')
+               AND schema_name NOT LIKE 'pg_%'
+    LOOP
+        -- 仅当该 schema 存在 tasks 表时执行变更
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = r.schema_name AND table_name = 'tasks') THEN
+            EXECUTE format('ALTER TABLE %I.tasks ADD COLUMN IF NOT EXISTS assignee VARCHAR(64) DEFAULT ''agy'';', r.schema_name);
+            EXECUTE format('ALTER TABLE %I.tasks ADD COLUMN IF NOT EXISTS parent_id VARCHAR(32);', r.schema_name);
+            EXECUTE format('ALTER TABLE %I.tasks ADD COLUMN IF NOT EXISTS tags VARCHAR(32)[] DEFAULT ''{}'';', r.schema_name);
+            EXECUTE format('ALTER TABLE %I.tasks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;', r.schema_name);
+            EXECUTE format('CREATE INDEX IF NOT EXISTS idx_%s_tasks_parent ON %I.tasks(parent_id);', r.schema_name, r.schema_name);
+            EXECUTE format('CREATE INDEX IF NOT EXISTS idx_%s_tasks_assignee ON %I.tasks(assignee);', r.schema_name, r.schema_name);
+        END IF;
+
+        -- findings
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = r.schema_name AND table_name = 'findings') THEN
+            EXECUTE format('ALTER TABLE %I.findings ADD COLUMN IF NOT EXISTS reporter VARCHAR(64) DEFAULT ''audit'';', r.schema_name);
+        END IF;
+
+        -- waitings
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = r.schema_name AND table_name = 'waitings') THEN
+            EXECUTE format('ALTER TABLE %I.waitings ADD COLUMN IF NOT EXISTS owner VARCHAR(64) DEFAULT ''user'';', r.schema_name);
+        END IF;
+
+        -- task_timeline
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = r.schema_name AND table_name = 'task_timeline') THEN
+            EXECUTE format('ALTER TABLE %I.task_timeline ADD COLUMN IF NOT EXISTS from_status VARCHAR(16);', r.schema_name);
+        END IF;
+    END LOOP;
+END $$;

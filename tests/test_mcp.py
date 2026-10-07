@@ -18,20 +18,35 @@ from logbook.models import Rule
 
 @pytest.mark.asyncio
 async def test_mcp_task_flow():
-    """测试 MCP task_upsert 与 task_query。"""
+    """测试 MCP task_upsert 与 task_query (支持 assignee 与 parent_id)。"""
     res = await task_upsert(
         project="logbook",
         id="MCP-01",
         title="测试 MCP 任务流水",
         status="running",
         priority="P1",
-        task_type="feat"
+        task_type="feat",
+        assignee="agy-lead",
+        tags=["core", "mcp"]
     )
     assert res["success"] is True
     assert res["task"]["status"] == "running"
+    assert res["task"]["assignee"] == "agy-lead"
 
-    # 查询
-    query_res = await task_query(project="logbook", status=["running"])
+    # 登记分级子任务
+    sub_res = await task_upsert(
+        project="logbook",
+        id="MCP-01.1",
+        parent_id="MCP-01",
+        title="测试 MCP 分级子任务",
+        status="running",
+        assignee="agy-worker"
+    )
+    assert sub_res["success"] is True
+    assert sub_res["task"]["parent_id"] == "MCP-01"
+
+    # 按责任人与状态精确查询
+    query_res = await task_query(project="logbook", status=["running"], assignee="agy-lead")
     assert len(query_res) >= 1
     assert any(t["id"] == "MCP-01" for t in query_res)
 
@@ -57,10 +72,12 @@ async def test_mcp_finding_and_waiting():
         id="FIND-01",
         summary="发现一个连接超时缺陷",
         severity="P2",
-        status="open"
+        status="open",
+        reporter="agy-audit"
     )
     assert f_res["success"] is True
     assert f_res["finding"]["id"] == "FIND-01"
+    assert f_res["finding"]["reporter"] == "agy-audit"
 
 
 @pytest.mark.asyncio
@@ -69,6 +86,7 @@ async def test_mcp_devlog_and_search():
     rec_res = await devlog_record(
         project="logbook",
         title="TCP 重传丢包排查手记",
+        author="agy-network",
         problem="客户端在大包发送时遭遇 14B 截断",
         root_cause="MSS clamp 缺位与 MTU 不对称",
         solution="开启 brix_pf syn maxseg 1412 截断规避",
@@ -89,6 +107,7 @@ async def test_mcp_rule_and_export():
     # 插入一条规则
     rule = Rule(
         id="RULE-TEST-01",
+        category="security",
         title="测试铁律",
         summary="绝不在生产环境写明文密码",
         bad_practice="硬编码密码在配置文件中",
@@ -97,9 +116,10 @@ async def test_mcp_rule_and_export():
     )
     await db.upsert_rule(rule)
 
-    rules = await rule_query("测试铁律")
+    rules = await rule_query("测试铁律", category="security")
     assert len(rules) >= 1
     assert rules[0]["id"] == "RULE-TEST-01"
+    assert rules[0]["category"] == "security"
 
     # 导出 markdown 测试
     export_path = "tests/test_export.md"

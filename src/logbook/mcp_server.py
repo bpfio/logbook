@@ -130,12 +130,15 @@ async def task_upsert(
     status: str,
     task_type: str = "fix",
     priority: str = "P2",
+    assignee: str | None = "agy",
+    parent_id: str | None = None,
     commit_hash: str | None = None,
     proof_link: str | None = None,
     notes: str | None = None,
+    tags: list[str] | None = None,
     batch_id: str | None = None,
 ) -> dict:
-    """原子登记或推进任务状态机。强制要求显式提供 project 参数。"""
+    """原子登记或推进任务状态机。强制要求显式提供 project 参数。支持 assignee 责任归属与 parent_id 分级解耦。"""
     try:
         proj = await validate_and_negotiate_project(project)
     except ProjectNegotiationError as e:
@@ -150,9 +153,12 @@ async def task_upsert(
         task_type=TaskType(task_type),
         priority=TaskPriority(priority),
         status=TaskStatus(status),
+        assignee=assignee,
+        parent_id=parent_id,
         commit_hash=commit_hash,
         proof_link=proof_link,
         notes=s_notes,
+        tags=tags or [],
         batch_id=batch_id,
     )
     saved = await db.upsert_task(proj, task)
@@ -169,9 +175,11 @@ async def task_query(
     status: list[str] | None = None,
     priority: list[str] | None = None,
     batch_id: str | None = None,
+    assignee: str | None = None,
+    parent_id: str | None = None,
     limit: int = 50,
 ) -> list[dict] | dict:
-    """多维查询任务看板。强制要求显式提供 project 参数。"""
+    """多维查询任务看板。强制要求显式提供 project 参数。支持按状态、优先级、批次、责任人与父任务过滤。"""
     try:
         proj = await validate_and_negotiate_project(project)
     except ProjectNegotiationError as e:
@@ -179,7 +187,15 @@ async def task_query(
 
     st_enums = [TaskStatus(s) for s in status] if status else None
     pr_enums = [TaskPriority(p) for p in priority] if priority else None
-    tasks = await db.query_tasks(proj, status=st_enums, priority=pr_enums, batch_id=batch_id, limit=limit)
+    tasks = await db.query_tasks(
+        proj,
+        status=st_enums,
+        priority=pr_enums,
+        batch_id=batch_id,
+        assignee=assignee,
+        parent_id=parent_id,
+        limit=limit
+    )
     return [t.model_dump(mode="json") for t in tasks]
 
 
@@ -192,9 +208,10 @@ async def finding_record(
     severity: str = "P2",
     status: str = "open",
     task_id: str | None = None,
+    reporter: str = "audit",
     resolution: str | None = None,
 ) -> dict:
-    """登记或更新缺陷/审计发现项。强制要求显式提供 project 参数。"""
+    """登记或更新缺陷/审计发现项。强制要求显式提供 project 参数。支持 reporter 责任归属。"""
     try:
         proj = await validate_and_negotiate_project(project)
     except ProjectNegotiationError as e:
@@ -209,6 +226,7 @@ async def finding_record(
         severity=FindingSeverity(severity),
         status=FindingStatus(status),
         task_id=task_id,
+        reporter=reporter,
         summary=s_summary,
         resolution=s_resolution,
     )
@@ -237,11 +255,12 @@ async def devlog_record(
     root_cause: str,
     solution: str,
     evidence: str,
+    author: str = "agy",
     task_id: str | None = None,
     visibility: str = "project_private",
     tags: list[str] | None = None,
 ) -> dict:
-    """结构化录入排查手记 (根因四要素 + 自动脱敏 + 512维向量入库)。强制要求显式提供 project 参数。"""
+    """结构化录入排查手记 (根因四要素 + 自动脱敏 + 512维向量入库)。强制要求显式提供 project 参数。支持 author 溯源。"""
     try:
         proj = await validate_and_negotiate_project(project)
     except ProjectNegotiationError as e:
@@ -262,6 +281,7 @@ async def devlog_record(
         project_id=proj,
         task_id=task_id,
         title=s_title,
+        author=author,
         problem=s_problem,
         root_cause=s_rc,
         solution=s_sol,
@@ -305,9 +325,9 @@ async def devlog_search(
 
 
 @mcp.tool()
-async def rule_query(keyword: str | None = None) -> list[dict]:
-    """开工前对齐架构铁律与工程红线 (SSOT)。全项目共享。"""
-    rules = await db.query_rules(keyword=keyword)
+async def rule_query(keyword: str | None = None, category: str | None = None) -> list[dict]:
+    """开工前对齐架构铁律与工程红线 (SSOT)。全项目共享。支持按领域 category 精准过滤。"""
+    rules = await db.query_rules(keyword=keyword, category=category)
     return [r.model_dump(mode="json") for r in rules]
 
 

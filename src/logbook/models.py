@@ -87,12 +87,16 @@ class Task(BaseModel):
     task_type: TaskType = Field(default=TaskType.FIX)
     priority: TaskPriority = Field(default=TaskPriority.P2)
     status: TaskStatus = Field(default=TaskStatus.PLANNED)
+    assignee: str | None = Field(default="agy", max_length=64, description="责任主体/Agent，如 agy, yupeng")
+    parent_id: str | None = Field(default=None, max_length=32, description="父任务短编号，支持两级树形解耦")
     commit_hash: str | None = Field(default=None, max_length=128)
     proof_link: str | None = Field(default=None, max_length=512)
     notes: str | None = None
+    tags: list[str] = Field(default_factory=list, description="业务与技术领域打标")
     batch_id: str | None = Field(default=None, max_length=32)
 
     created_at: datetime = Field(default_factory=get_beijing_now)
+    updated_at: datetime = Field(default_factory=get_beijing_now)
     started_at: datetime | None = None
     closed_at: datetime | None = None
     duration_seconds: int | None = None
@@ -121,6 +125,7 @@ class Finding(BaseModel):
     severity: FindingSeverity = Field(default=FindingSeverity.P2)
     status: FindingStatus = Field(default=FindingStatus.OPEN)
     task_id: str | None = Field(default=None, max_length=32, description="处置责任任务 ID")
+    reporter: str = Field(default="audit", max_length=64, description="发现人或工具来源")
     summary: str = Field(..., description="缺陷现象与机理描述")
     resolution: str | None = Field(default=None, description="处置说明与备案结论")
     discovered_at: datetime = Field(default_factory=get_beijing_now)
@@ -131,6 +136,7 @@ class Waiting(BaseModel):
     id: str = Field(..., max_length=32, description="待办编号，如 WAIT-F320, CLOSE-1")
     category: WaitingCategory = Field(default=WaitingCategory.USER)
     status: WaitingStatus = Field(default=WaitingStatus.OPEN)
+    owner: str = Field(default="user", max_length=64, description="等待裁决责任人或外部主体")
     description: str = Field(..., description="事项描述")
     resolution: str | None = Field(default=None, description="裁决与办结记录")
     blocked_at: datetime = Field(default_factory=get_beijing_now)
@@ -153,6 +159,7 @@ class DevLog(BaseModel):
     project_id: str = Field(..., max_length=32)
     task_id: str | None = Field(default=None, max_length=32)
     title: str = Field(..., max_length=256)
+    author: str = Field(default="agy", max_length=64, description="记录者 Agent 或人类专家")
     # 根因四要素 (必填)
     problem: str = Field(..., description="故障现象与具体复现路径")
     root_cause: str = Field(..., description="机理定位与内核/代码行穿透分析")
@@ -163,10 +170,12 @@ class DevLog(BaseModel):
     embedding: list[float] | None = None
     occurred_at: datetime = Field(default_factory=get_beijing_now)
     created_at: datetime = Field(default_factory=get_beijing_now)
+    updated_at: datetime = Field(default_factory=get_beijing_now)
 
 
 class Rule(BaseModel):
     id: str = Field(..., max_length=64)
+    category: str = Field(default="general", max_length=32, description="领域分类: network, kernel, database, security 等")
     title: str = Field(..., max_length=256)
     summary: str = Field(..., description="一句话核心原则")
     bad_practice: str = Field(..., description="错误示范 (Anti-Pattern)")
