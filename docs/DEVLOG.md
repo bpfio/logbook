@@ -13,7 +13,7 @@
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
-| L06 | ✅ closed | feat | MCP 协议自解释Schema升级、Brix 项目全量结构化对齐与向量化灌库 | HEAD | scripts/import_brix.py |
+| L06 | ✅ closed | feat | MCP 协议自解释Schema升级、Brix 项目全量结构化对齐与向量化灌库 | f9edaf0 | scripts/import_brix.py |
 | L05.4 | ✅ closed | deploy | QNAP 生产容器内存配额再平衡与全维度基准联测 | d27ac5f | deploy/qnap/compose.yaml |
 | L05.3 | ✅ closed | fix | SSH MCP 孤儿子进程泄漏与内存膨胀根因定位与修复 | d27ac5f | src/logbook/ssh_server.py |
 | L05.2 | ✅ closed | feat | 代码模型层与 MCP 工具全量对齐及测试套件扩充 | 04eab61 | tests/test_logbook.py |
