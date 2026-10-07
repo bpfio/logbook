@@ -1,0 +1,60 @@
+# ==============================================================================
+# Logbook QNAP 生产环境服务编排配置模板 (Compose Example)
+# 适用宿主机: QNAP Container Station / 嵌入式 Linux NAS
+# ==============================================================================
+
+services:
+  logbook-app:
+    image: logbook:latest
+    container_name: logbook-app
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    environment:
+      - PYTHONUNBUFFERED=1
+      - APP_ENV=production
+      - DATABASE_URL=postgresql://postgres:${LOGBOOK_DB_PASSWORD}@127.0.0.1:5432/logbook
+      - EMBEDDING_PROVIDER=openai
+      - EMBEDDING_API_URL=https://maas-api.cn-huabei-1.xf-yun.com/v2/embeddings
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
+      - EMBEDDING_MODEL_NAME=xop3qwen8bembedding
+      - EMBEDDING_DIM=512
+      - SSH_USER=sysadmin
+      - SSH_PASSWORD=${SSH_PASSWORD:-logbook}
+      - SSH_AUTHORIZED_KEYS=${SSH_AUTHORIZED_KEYS}
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/app/data
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      qnet_lan:
+        ipv4_address: 192.0.2.68  # 替换为您的 NAS macvlan 静态 IP
+
+  logbook-postgres:
+    image: pgvector/pgvector:pg18
+    container_name: logbook-postgres
+    restart: unless-stopped
+    network_mode: "service:logbook-app"
+    depends_on:
+      - logbook-app
+    deploy:
+      resources:
+        limits:
+          memory: 80M
+    environment:
+      - POSTGRES_DB=logbook
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${LOGBOOK_DB_PASSWORD}
+      - TZ=Asia/Shanghai
+    command: postgres -c shared_buffers=32MB -c max_connections=20 -c timezone=Asia/Shanghai
+    volumes:
+      - ./pgdata:/var/lib/postgresql
+      - ./init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - /etc/localtime:/etc/localtime:ro
+
+networks:
+  qnet_lan:
+    name: qnet-static-eth1-79e6cc  # 替换为您的 QNAP macvlan 网络名称
+    external: true

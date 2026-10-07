@@ -9,10 +9,11 @@
 
 ---
 
-## 一、 任务台账 (3)
+## 一、 任务台账 (4)
 
 | ID | 状态 | 优先级 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|---|
+| L04 | closed | P1 | feat | QNAP 生产环境无缝上线、Rekall 彻底下线与星火向量生产验证 | pending | PG18+pgvector 实测内存 63MB，SSH MCP 与星火向量端到端全绿 |
 | L03 | closed | P1 | feat | 强制项目显式传参、三级交互协商自愈与全维 MCP 2.x 升级 | 5031c53 | 单元测试全绿 (14/14)，含 briz 纠错与越权阻断 |
 | L02 | closed | P1 | feat | 双平面隔离底座、PostgreSQL 18+pgvector、FastMCP 与 CLI 看板落地 | c51bbd7 | 测试 10/10 全绿，Brix 数据无损导入导出核销 |
 | L01 | closed | P1 | feat | Logbook 创世纪立项、规则制定与基础脚手架建立 | main | 仓库创建与 AGENTS.md / README / DEVLOG 初始化 |
@@ -36,6 +37,25 @@
 ---
 
 ## 四、 批次演进记录
+
+### [DEV-2026-10-07-04] Logbook QNAP 生产环境部署与全栈替换上线 — ✅ 闭环
+
+- **任务源**: 用户指令经正式审批（路线 A：彻底替换升级为 Logbook，回收 192.168.1.68 IP，配置讯飞星火向量，绝对保障 QNAP 其他服务安全）。
+- **已交付**:
+  1. **生产镜像容器化**: 编写 `Dockerfile`（基于 `python:3.13-slim` + `uv` 极速构建 + 纯 Python `asyncssh`），本地秒级构建出纯净轻量镜像 `logbook:latest` 并流式载入 QNAP Docker；
+  2. **Rekall 优雅下线**: 优雅停止并移除旧 `rekall-app` 与 `rekall-postgres` 容器，释放 IP `192.168.1.68` 及端口；
+  3. **绝对隔离与零冲击**: QNAP 上原有服务（`gitea`、`fastapi-dls-1`、`kms-1`）全程 100% 隔离运行未受干扰；
+  4. **Logbook 生产双容器 Pod 上线**:
+     - 在 QNAP `/share/CACHEDEV1_DATA/Container/logbook/` 部署 `compose.yaml` 与 `01_init.sql`；
+     - 宿主机双容器常驻实测仅 **~63MB 物理内存**（`logbook-app` 41MB，`logbook-postgres` 22MB），远低于配置的 144MB 配额；
+  5. **Brix 数据全量无损迁移**: 成功将 Brix DEVLOG 历史数据（20 任务、91 发现、14 待办）全量导入 QNAP PostgreSQL 18.6 生产底座；
+  6. **MCP 管道与星火向量生产验证**:
+     - 本地 `~/.gemini/config/mcp_config.json` 免密 SSH 管道全通；
+     - 端到端实测 `devlog_record` 与 `devlog_search`：调用讯飞星火 MaaS API（端点 `maas-api.cn-huabei-1.xf-yun.com`，模型 `xop3qwen8bembedding`）生成 512 维向量，入库与语义召回匹配度达 0.8144，全流程全绿。
+- **判据与实测**:
+  - `ssh sysadmin@192.168.1.68 "logbook doctor"`: PG 18.6 连接正常、Asia/Shanghai 时区正常、pgvector 扩展就绪；
+  - `devlog_record` -> `vector_source: "spark_maas"`, `isError: false`；
+  - `devlog_search` -> 精确召回目标手记，得分 0.8144。
 
 ### [DEV-2026-10-07-03] Logbook V2 全维优化与智能协商自愈闭环 — ✅ 闭环
 

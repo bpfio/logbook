@@ -33,6 +33,7 @@ env/
 *.pem
 *.key
 host_key*
+deploy/qnap/compose.yaml
 
 # Testing & Caches
 .pytest_cache/

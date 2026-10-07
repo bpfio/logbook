@@ -24,11 +24,21 @@ from .time_sync import get_beijing_now
 
 class Database:
     def __init__(self):
-        self.host = os.getenv("LOGBOOK_PG_HOST", "127.0.0.1")
-        self.port = int(os.getenv("LOGBOOK_PG_PORT", "5432"))
-        self.user = os.getenv("LOGBOOK_PG_USER", "logbook")
-        self.password = os.getenv("LOGBOOK_PG_PASSWORD", "logbook_dev_secret")
-        self.database = os.getenv("LOGBOOK_PG_DB", "logbook")
+        db_url = os.getenv("DATABASE_URL")
+        if db_url:
+            from urllib.parse import urlparse
+            u = urlparse(db_url)
+            self.host = u.hostname or "127.0.0.1"
+            self.port = u.port or 5432
+            self.user = u.username or "postgres"
+            self.password = u.password or ""
+            self.database = u.path.lstrip("/") or "logbook"
+        else:
+            self.host = os.getenv("LOGBOOK_PG_HOST", "127.0.0.1")
+            self.port = int(os.getenv("LOGBOOK_PG_PORT", "5432"))
+            self.user = os.getenv("LOGBOOK_PG_USER", os.getenv("POSTGRES_USER", "logbook"))
+            self.password = os.getenv("LOGBOOK_PG_PASSWORD", os.getenv("POSTGRES_PASSWORD", "logbook_dev_secret"))
+            self.database = os.getenv("LOGBOOK_PG_DB", os.getenv("POSTGRES_DB", "logbook"))
         self._pool: asyncpg.Pool | None = None
 
     async def connect(self):
