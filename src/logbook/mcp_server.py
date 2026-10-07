@@ -20,6 +20,7 @@ from .models import (
     Task, TaskStatus, TaskPriority, TaskType,
     Finding, FindingStatus, FindingSeverity,
     Waiting, WaitingStatus, WaitingCategory,
+    Batch, BatchStatus,
     DevLog, DevLogVisibility, Rule
 )
 from .sanitizer import sanitize_text
@@ -345,6 +346,46 @@ async def export_markdown(project: str, output_path: str = "docs/DEVLOG.md") -> 
     out_p.parent.mkdir(parents=True, exist_ok=True)
     out_p.write_text(md, encoding="utf-8")
     return f"已成功将项目 {proj} 的最新状态导出至 {output_path} (行数: {len(md.splitlines())})"
+
+
+@mcp.tool()
+async def batch_upsert(
+    project: str,
+    id: str,
+    title: str,
+    status: str = "completed",
+    branch_name: str | None = None,
+    summary: str | None = None,
+    methodology_notes: str | None = None,
+) -> dict:
+    """登记或更新研发批次演进记录与排障方法论。强制要求显式提供 project 参数。"""
+    try:
+        proj = await validate_and_negotiate_project(project)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    batch = Batch(
+        id=id,
+        title=title,
+        status=BatchStatus(status),
+        branch_name=branch_name,
+        summary=summary,
+        methodology_notes=methodology_notes,
+    )
+    saved = await db.upsert_batch(proj, batch)
+    return {"success": True, "project": proj, "batch": saved.model_dump(mode="json")}
+
+
+@mcp.tool()
+async def batch_query(project: str, limit: int = 20) -> list[dict] | dict:
+    """查询项目历史研发批次演进记录与讨论复盘。强制要求显式提供 project 参数。"""
+    try:
+        proj = await validate_and_negotiate_project(project)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    batches = await db.query_batches(proj, limit=limit)
+    return [b.model_dump(mode="json") for b in batches]
 
 
 def run_stdio():

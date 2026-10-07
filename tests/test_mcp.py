@@ -10,6 +10,8 @@ from logbook.mcp_server import (
     devlog_record,
     devlog_search,
     rule_query,
+    batch_upsert,
+    batch_query,
     export_markdown
 )
 from logbook.db import db
@@ -132,3 +134,22 @@ async def test_mcp_rule_and_export():
     finally:
         if os.path.exists(export_path):
             os.remove(export_path)
+
+
+@pytest.mark.asyncio
+async def test_mcp_batch_flow():
+    """测试 MCP batch_upsert 与 batch_query。"""
+    res = await batch_upsert(
+        project="logbook",
+        id="DEV-TEST-01",
+        title="测试研发批次演进记录",
+        status="completed",
+        summary="完成核心模块构建与测试验证",
+        methodology_notes="排障方法论三则与会话收口经验"
+    )
+    assert res["success"] is True
+    assert res["batch"]["id"] == "DEV-TEST-01"
+
+    batches = await batch_query(project="logbook")
+    assert len(batches) >= 1
+    assert any(b["id"] == "DEV-TEST-01" for b in batches)
