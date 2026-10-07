@@ -340,8 +340,10 @@ async def export_markdown(project: str, output_path: str = "docs/DEVLOG.md") -> 
         return e.message
 
     md = await export_devlog_markdown(proj)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(md)
+    from pathlib import Path
+    out_p = Path(output_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    out_p.write_text(md, encoding="utf-8")
     return f"已成功将项目 {proj} 的最新状态导出至 {output_path} (行数: {len(md.splitlines())})"
 
 

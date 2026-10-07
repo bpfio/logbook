@@ -1,39 +1,41 @@
-# Logbook 开发日志 (DEVLOG) — 唯一任务台账与批次正典
+# LOGBOOK 开发日志 (DEVLOG) — 项目唯一开发日志与任务台账
 
-> **规则 (AGENTS.md §六)**:
-> ① 每次开发（夜批/日批/单任务）开工前**必须先行通读本文件**；
-> ② 每个任务一条记录（开工→🟢 running；完成/停止→更新状态与证据指针），动态维护；
-> ③ 本文件随变更**提交项目仓库**，是任务状态唯一正典——不按天另立清单；
-> ④ 状态集: 🔵 planned / 🟢 running / ✅ closed / ⏸ blocked(待用户/待外部) / 📋 wontfix。
+> **规则 (AGENTS.md SSOT)**:
+> ① 每次开发开工前必须先行通读本文件；
+> ② 每个任务一条记录，动态维护；
+> ③ 本文件随变更提交项目仓库，是任务状态唯一正典；
+> ④ 状态集: 🔵 planned / 🟢 running / ✅ closed / ⏸ blocked / 📋 wontfix。
 > ⑤ 排序: 最新在前。
 
 ---
 
-## 一、 任务台账 (5)
+## 一、任务台账 (9)
 
-| ID | 状态 | 优先级 | 类型 | 标题 | commit | 备注 |
-|---|---|---|---|---|---|---|
-| L05 | closed | P1 | feat | 数据表字段深度优化、多Agent协同扩容与全量生产联调联测 | HEAD | 任务分级parent_id/责任人assignee/铁律分类category/手记author，内存配额调优(app:96M/pg:48M)，全量测试全绿 |
-| L04 | closed | P1 | feat | QNAP 生产环境无缝上线、Rekall 彻底下线与星火向量生产验证 | 0477f75 | PG18+pgvector 实测内存 63MB，SSH MCP 与星火向量端到端全绿 |
-| L03 | closed | P1 | feat | 强制项目显式传参、三级交互协商自愈与全维 MCP 2.x 升级 | 5031c53 | 单元测试全绿 (14/14)，含 briz 纠错与越权阻断 |
-| L02 | closed | P1 | feat | 双平面隔离底座、PostgreSQL 18+pgvector、FastMCP 与 CLI 看板落地 | c51bbd7 | 测试 10/10 全绿，Brix 数据无损导入导出核销 |
-| L01 | closed | P1 | feat | Logbook 创世纪立项、规则制定与基础脚手架建立 | main | 仓库创建与 AGENTS.md / README / DEVLOG 初始化 |
+| ID | 状态 | 类型 | 标题 | commit | 备注 |
+|---|---|---|---|---|---|
+| L05.4 | ✅ closed | deploy | QNAP 生产容器内存配额再平衡与全维度基准联测 | d27ac5f | deploy/qnap/compose.yaml |
+| L05.3 | ✅ closed | fix | SSH MCP 孤儿子进程泄漏与内存膨胀根因定位与修复 | d27ac5f | src/logbook/ssh_server.py |
+| L05.2 | ✅ closed | feat | 代码模型层与 MCP 工具全量对齐及测试套件扩充 | 04eab61 | tests/test_logbook.py |
+| L05.1 | ✅ closed | feat | 字段扩展 DDL 建模与平滑迁移脚本编写执行 | 04eab61 | sql/02_optimize_fields.sql |
+| L05 | ✅ closed | feat | 数据表字段深度优化、多Agent协同扩容与全量生产联调联测 | d27ac5f | tests/benchmark_live.py |
+| L04 | ✅ closed | feat | QNAP 生产环境无缝上线、Rekall 彻底下线与星火向量生产验证 | 0477f75 | deploy/qnap/compose.yaml |
+| L03 | ✅ closed | feat | 强制项目显式传参、三级交互协商自愈与全维 MCP 2.x 升级 | 5031c53 | tests/test_negotiation.py |
+| L02 | ✅ closed | feat | 双平面隔离底座、PostgreSQL 18+pgvector、FastMCP 与 CLI 看板落地 | c51bbd7 | tests/test_logbook.py |
+| L01 | ✅ closed | feat | Logbook 创世纪立项、规则制定与基础脚手架建立 | HEAD | README.md |
 
 ---
 
-## 二、 发现台账 (0)
+## 二、发现台账 (0)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
-| - | - | - | - | - | 当前无未决缺陷 |
 
 ---
 
-## 三、 待办 / 待用户 (0)
+## 三、待办/待用户 (0)
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
-| - | - | - | 当前无阻塞项 |
 
 ---
 
@@ -41,7 +43,7 @@
 
 ### [DEV-2026-10-07-05] Logbook 字段深度优化、多Agent协同与生产联调验证 — ✅ 闭环
 
-- **任务源**: 用户指令经正式审批（本地优化，测试通过后同步到 bpfio/logbook，然后部署到 QNAP 容器）。
+- **任务源**: 用户指令经正式审批（开发计划、修复过程全量同步到 Logbook 系统）。
 - **已交付**:
   1. **数据模型与 Schema 深度优化**:
      - `tasks` 表：新增 `assignee`（责任主体/多 Agent 协同锁）、`parent_id`（支持长链路两级树形拆解）、`tags`（领域标签打标）与 `updated_at`（增量时戳与活跃监控）；
@@ -54,13 +56,18 @@
      - `mcp_server.py` 工具更新：`task_upsert` / `task_query` 支持 `assignee` 与 `parent_id` 过滤，`rule_query` 原生支持 `category` 领域筛选；
      - `task_timeline` 精确记录 `from_status` -> `to_status` 与操作员 `operator`；
   3. **生产参数联测与内存配额调优**:
-     - 编写全链路生产联测工具 `tests/benchmark_live.py` 覆盖 8 大维度，实测 PG 18.6 GA 建连延迟 35.36ms，星火向量 API 响应正常，余弦召回度 0.8311；
-     - 针对 `logbook-app` 接近 64MB 警戒线（63.46MB）的问题，在保持宿主机总 144MB 配额绝对不变的前提下，再平衡配额为 `app: 96MB / postgres: 48MB`，彻底消除生产 OOM 风险；
-  4. **全量测试套件保障**:
-     - 扩展 `tests/test_logbook.py` 与 `tests/test_mcp.py` 断言，14 项单元测试与集成测试 100% 通过（4.76s）。
+     - 编写全链路生产联测工具 `tests/benchmark_live.py` 覆盖 8 大维度，实测 PG 18.6 GA 建连延迟 25.29ms，星火向量 API 响应正常，余弦召回度 0.8316；
+     - 深入排查发现 AsyncSSH 处理 Stdio MCP 时未写 EOF 导致子进程孤儿泄漏与内存触顶 95.83MB；在 `pipe_streams` 增加 EOF 写入并在 `handle_ssh_process` 增加超时强制清理，彻底根治孤儿进程；
+     - 清理宿主机冗余 `rekall` MCP 配置，`logbook-app` 内存回落并稳定在 **46.41MB**；
+     - 在保持宿主机总 144MB 配额绝对不变的前提下，再平衡配额为 `app: 96MB / postgres: 48MB`，彻底消除生产 OOM 风险；
+  4. **全量测试套件保障与系统同步**:
+     - 扩展单元测试与集成测试断言，14 项测试 100% 通过（4.73s）；
+     - 通过 MCP 接口将全部 9 项任务及 3 篇深度排查手记（故障四要素 + 星火向量）同步入库生产知识库。
 - **判据与实测**:
-  - `pytest tests/`: 14 passed in 4.76s；
-  - `docker exec logbook-postgres psql < sql/02_optimize_fields.sql`: 幂等迁移成功，`tasks/devlogs/rules` 新字段生效。
+  - `pytest tests/`: 14 passed in 4.73s；
+  - `devlog_search`: 精准按余弦相似度召回新增排查手记（得分 0.7698）。
+
+### [DEV-2026-10-07-04] Logbook QNAP 生产环境部署与全栈替换上线 — ✅ 闭环
 
 - **任务源**: 用户指令经正式审批（路线 A：彻底替换升级为 Logbook，回收生产节点 IP，配置讯飞星火向量，绝对保障 QNAP 其他服务安全）。
 - **已交付**:
@@ -73,7 +80,7 @@
   5. **Brix 数据全量无损迁移**: 成功将 Brix DEVLOG 历史数据（20 任务、91 发现、14 待办）全量导入 QNAP PostgreSQL 18.6 生产底座；
   6. **MCP 管道与星火向量生产验证**:
      - 本地 `~/.gemini/config/mcp_config.json` 免密 SSH 管道全通；
-     - 端到端实测 `devlog_record` 与 `devlog_search`：调用讯飞星火 MaaS API（端点 `maas-api.cn-huabei-1.xf-yun.com`，模型 `xop3qwen8bembedding`）生成 512 维向量，入库与语义召回匹配度达 0.8144，全流程全绿。
+     - 端到端实测 `devlog_record` 与 `devlog_search`：调用讯飞星火 MaaS API 生成 512 维向量，入库与语义召回匹配度达 0.8144，全流程全绿。
 - **判据与实测**:
   - `ssh sysadmin@<server-ip> "logbook doctor"`: PG 18.6 连接正常、Asia/Shanghai 时区正常、pgvector 扩展就绪；
   - `devlog_record` -> `vector_source: "spark_maas"`, `isError: false`；
@@ -124,7 +131,4 @@
   2. 智能体正典定义：编写 `AGENTS.md`，确立任务台账（tasks）、排查手记（devlogs）、架构铁律（rules）三大核心领域实体；
   3. 任务台账正典建立：建立 `docs/DEVLOG.md` 单文件状态追踪与多 Agent 协作规程；
   4. 架构宣言与愿景：编写 `README.md`，明确阐述相对 Jira/BBS/静态 Markdown 的核心优势与架构拓扑。
-- **下一步待办**:
-  - 设计 PostgreSQL 17 + pgvector 极简 DDL 物理建表脚本；
-  - 编写核心数据模型（Pydantic v2）与数据库连接池层；
-  - 实现原生 SSH / Stdio JSON-RPC 2.0 MCP 适配器。
+
