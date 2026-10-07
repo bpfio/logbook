@@ -20,7 +20,7 @@ from logbook.models import Rule
 async def test_mcp_task_flow():
     """测试 MCP task_upsert 与 task_query。"""
     res = await task_upsert(
-        project="mcp_test",
+        project="logbook",
         id="MCP-01",
         title="测试 MCP 任务流水",
         status="running",
@@ -31,13 +31,13 @@ async def test_mcp_task_flow():
     assert res["task"]["status"] == "running"
 
     # 查询
-    query_res = await task_query(project="mcp_test", status=["running"])
+    query_res = await task_query(project="logbook", status=["running"])
     assert len(query_res) >= 1
     assert query_res[0]["id"] == "MCP-01"
 
     # 闭环推进
     close_res = await task_upsert(
-        project="mcp_test",
+        project="logbook",
         id="MCP-01",
         title="测试 MCP 任务流水",
         status="closed",
@@ -53,7 +53,7 @@ async def test_mcp_task_flow():
 async def test_mcp_finding_and_waiting():
     """测试 MCP finding_record 与 waiting_query。"""
     f_res = await finding_record(
-        project="mcp_test",
+        project="logbook",
         id="FIND-01",
         summary="发现一个连接超时缺陷",
         severity="P2",
@@ -67,7 +67,7 @@ async def test_mcp_finding_and_waiting():
 async def test_mcp_devlog_and_search():
     """测试 MCP devlog_record 录入与 devlog_search 检索。"""
     rec_res = await devlog_record(
-        project="mcp_test",
+        project="logbook",
         title="TCP 重传丢包排查手记",
         problem="客户端在大包发送时遭遇 14B 截断",
         root_cause="MSS clamp 缺位与 MTU 不对称",
@@ -78,7 +78,7 @@ async def test_mcp_devlog_and_search():
     assert rec_res["devlog_id"] is not None
 
     # 检索手记
-    hits = await devlog_search(project="mcp_test", query="TCP 重传与截断问题", limit=3)
+    hits = await devlog_search(project="logbook", query="TCP 重传与截断问题", limit=3)
     assert len(hits) >= 1
     assert "截断" in hits[0]["title"] or "截断" in hits[0]["solution"]
 
@@ -104,7 +104,7 @@ async def test_mcp_rule_and_export():
     # 导出 markdown 测试
     export_path = "tests/test_export.md"
     try:
-        msg = await export_markdown("mcp_test", output_path=export_path)
+        msg = await export_markdown(project="logbook", output_path=export_path)
         assert os.path.exists(export_path)
         with open(export_path, "r", encoding="utf-8") as f:
             content = f.read()

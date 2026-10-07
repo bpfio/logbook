@@ -9,10 +9,11 @@
 
 ---
 
-## 一、 任务台账 (2)
+## 一、 任务台账 (3)
 
 | ID | 状态 | 优先级 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|---|
+| L03 | closed | P1 | feat | 强制项目显式传参、三级交互协商自愈与全维 MCP 2.x 升级 | pending | 单元测试全绿 (14/14)，含 briz 纠错与越权阻断 |
 | L02 | closed | P1 | feat | 双平面隔离底座、PostgreSQL 18+pgvector、FastMCP 与 CLI 看板落地 | c51bbd7 | 测试 10/10 全绿，Brix 数据无损导入导出核销 |
 | L01 | closed | P1 | feat | Logbook 创世纪立项、规则制定与基础脚手架建立 | main | 仓库创建与 AGENTS.md / README / DEVLOG 初始化 |
 
@@ -35,6 +36,23 @@
 ---
 
 ## 四、 批次演进记录
+
+### [DEV-2026-10-07-03] Logbook V2 全维优化与智能协商自愈闭环 — ✅ 闭环
+
+- **任务源**: 用户指令与审定 V2 方案，落实强制显式项目传参、三级交互协商自愈引擎、全维 MCP 2.x 规范升级。
+- **已交付**:
+  1. **智能交互协商引擎**: 编写 `src/logbook/negotiation.py`，实现 `difflib` 智能模糊纠错与工作区事实核对。当用户或 Agent 错传 `briz` 时，自动返回包含相近候选 `['brix']` 与物理工作区证据的结构化拒绝响应，驱动 Agent 0 人工干预自愈重试；若跨项目越权（在 `logbook` 工作区操作 `brix`）坚决触发 `PermissionError` 熔断拦截；
+  2. **强制显式传参契约**: 重构 `src/logbook/mcp_server.py`，所有 8 个核心工具中 `project: str` 必须作为第一入参，彻底消灭隐式脑补；
+  3. **全维 MCP 2.x 原语引入**:
+     - Resources（只读上下文）: 注册 `logbook://{project}/tasks/active`、`logbook://{project}/waitings/open` 与 `logbook://rules/engineering` URI，Agent 0 工具开销挂载直读；
+     - Prompts（规程模板）: 注册 `/start_batch`（开工必读台账）与 `/record_devlog`（根因四要素）标准模板；
+  4. **脱敏引擎加固**: `src/logbook/sanitizer.py` 扩充私有 IPv6（ULA / Link-local）自动转换为 RFC 3849 保留地址（`2001:db8::x`）；
+  5. **CLI 看板体验升维**: `src/logbook/cli.py` 增加交互式模糊纠错提示；
+  6. **测试套件扩充与全绿**: 编写 `tests/test_negotiation.py`，全量测试套件增至 14 项，100% 通过（耗时 4.70s）。
+- **判据与实测**:
+  - `pytest tests/`: 14 passed in 4.70s；
+  - `logbook status briz`: 正确提示相近合法项目 `['logbook', 'brix']`；
+  - `logbook doctor`: 数据库时区 Asia/Shanghai 正常、时钟漂移 -0.337s 正常、内存 43.7MiB / 80MiB 正常。
 
 ### [DEV-2026-10-07-02] Logbook 双平面架构实现与核心功能落地 — ✅ 闭环
 

@@ -25,6 +25,10 @@ RE_CREDENTIALS = [
 ]
 
 
+# 正则匹配私有/链路本地 IPv6 (ULA fd00::/8, Link-local fe80::/10)
+RE_PRIVATE_IPV6 = re.compile(r"\b(?:fd[0-9a-fA-F]{2}|fe80):[0-9a-fA-F:]+\b")
+
+
 class SanitizeResult(NamedTuple):
     clean_text: str
     redacted_count: int
@@ -50,5 +54,11 @@ def sanitize_text(text: str) -> SanitizeResult:
     if ip_matches:
         count += len(ip_matches)
         clean = RE_PRIVATE_IPV4.sub("192.0.2.x", clean)
+
+    # 3. 私有 IPv6 清洗 (统一转换为 RFC 3849 文档保留段 2001:db8::x)
+    ip6_matches = RE_PRIVATE_IPV6.findall(clean)
+    if ip6_matches:
+        count += len(ip6_matches)
+        clean = RE_PRIVATE_IPV6.sub("2001:db8::x", clean)
 
     return SanitizeResult(clean_text=clean, redacted_count=count)

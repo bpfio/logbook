@@ -21,6 +21,8 @@ from .models import Task, TaskStatus, TaskPriority, TaskType
 from .time_sync import check_clock_drift, get_beijing_now, format_beijing
 from .converter import import_devlog_markdown, export_devlog_markdown
 
+from .negotiation import validate_and_negotiate_project, ProjectNegotiationError
+
 console = Console()
 
 
@@ -35,17 +37,29 @@ def main():
 
 
 @main.command()
-@click.argument("project", default="brix")
+@click.argument("project")
 def status(project: str):
-    """打印项目任务台账与阻塞项看板。"""
+    """打印项目任务台账与阻塞项看板。强制显式提供项目名称。"""
     async def _status():
-        await db.ensure_project(project)
-        tasks = await db.query_tasks(project, limit=30)
-        waitings = await db.query_waitings(project, status=None)
-        findings = await db.query_findings(project, limit=20)
+        try:
+            proj = await validate_and_negotiate_project(project)
+        except ProjectNegotiationError as e:
+            console.print(f"[bold red]✘ 未找到项目 '{e.requested_project}'[/bold red]")
+            if e.suggestions:
+                console.print(f"  [yellow]?[/yellow] 您是否意指相近项目: [bold cyan]{e.suggestions}[/bold cyan]？")
+            if e.workspace_project:
+                console.print(f"  [dim]• 检测到当前终端物理工作区为: {e.workspace_project}[/dim]")
+            return
+        except PermissionError as e:
+            console.print(f"[bold red]{e}[/bold red]")
+            return
+
+        tasks = await db.query_tasks(proj, limit=30)
+        waitings = await db.query_waitings(proj, status=None)
+        findings = await db.query_findings(proj, limit=20)
 
         # 1. 任务看板
-        table = Table(title=f"【{project.upper()} 任务台账 (最新 30 项)】", show_header=True, header_style="bold cyan")
+        table = Table(title=f"【{proj.upper()} 任务台账 (最新 30 项)】", show_header=True, header_style="bold cyan")
         table.add_column("ID", style="bold yellow", width=10)
         table.add_column("状态", width=12)
         table.add_column("优先级", width=8)
