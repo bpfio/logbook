@@ -54,7 +54,8 @@
 2. **Agent 原生自开户原语 (`project_init`)**: 新增 `project_init(repo, title, description)` MCP 工具，为 Agent 提供自开立与幂等建库能力，物理 Schema 自动规范化派生；
 3. **两态智能协商自愈**: 优化 `negotiation.py`，智能区分高相似度手滑纠偏 (`CORRECT_PROJECT_PARAMETER`) 与新项目开户指引 (`PROJECT_INIT_NEEDED`)；
 4. **工作区守卫与装饰器架构修复**: 修复无 Git 目录（如容器内 `/app`）工作区误锁定问题；将 FastMCP 工具装饰器顺序调整为 `@mcp.tool()` 在外、`@tool_shell` 在内，实现 100% 结构化错误兜底；
-5. **生产验证与回归**: 全量测试套件 41/41 全绿通过；QNAP 生产容器完成热重建与热重载；现场通过 SSH MCP 验证 `project_init(repo="io/TS")` 与 `task_upsert` / `task_query` 闭环。
+5. **生产验证与回归**: 全量测试套件 41/41 全绿通过；QNAP 生产容器完成热重建与热重载；现场通过 SSH MCP 验证 `project_init(repo="io/TS")` 与 `task_upsert` / `task_query` 闭环；
+6. **跨目录写入规则与防护机制**: 确立跨项目目录写入三场景规则：① 非 Git 仓库目录（如 home/临时目录）：未绑定特定工作区，显式指定 `project` 即可直接写入；② 处于其他 Git 仓库目录：默认物理防呆拦截，显式传入 `allow_cross_project=True` 或环境变量 `LOGBOOK_ALLOW_CROSS_PROJECT=1` 放行；③ 远程 SSH MCP 模式：服务端沙盒隔离，原生支持按需向任意合法项目跨目录写入。
 
 ---
 

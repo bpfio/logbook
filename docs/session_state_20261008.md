@@ -31,6 +31,11 @@
    - 本地全量测试 41/41 100% 全绿通过；
    - QNAP 生产镜像完成重建与热重载，真实调用 `project_init(repo="io/TS")` 成功开辟物理 Schema `ts` 并写入任务。
 
+5. **跨目录写入支持与安全边界**：
+   - **非 Git 仓库目录**（如 home、临时脚本）：未绑定特定工作区，只要显式传入目标 `project` 即可直接写入；
+   - **处于另一独立 Git 仓库目录**：默认启用防呆守卫，传入 `allow_cross_project=True` 或环境变量 `LOGBOOK_ALLOW_CROSS_PROJECT=1` 安全放行；
+   - **远程 SSH MCP 模式**：服务端沙盒隔离，原生支持按需向任意合法项目跨目录写入。
+
 ---
 
 ## 二、 节点拓扑与环境映射 (Host & MCP SSOT)
