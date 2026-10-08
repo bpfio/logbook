@@ -22,7 +22,31 @@ from .models import (
 from .time_sync import get_beijing_now
 
 
+# LIMIT 统一钳制上限 (P1-4: 防 f-string 注入面 + 防 token 肥胖)
+MAX_LIMIT = 200
+
+
+class DevLogRecordResult(DevLog):
+    """record_devlog 返回值: DevLog 全字段 + action 盖戳标记 (P0-1)。
+
+    action: 'created' 全新入库 / 'updated' 四要素有变已更新 (调用方需重嵌入) /
+            'cached' 内容未变 (向量缓存复用，勿重嵌入)。
+    """
+    action: str = "created"
+
+
 class Database:
+    @staticmethod
+    def _clamp_limit(limit: int | None, default: int = 50) -> int:
+        """钳制 LIMIT 到 [1, MAX_LIMIT]，非法值回落 default。"""
+        try:
+            n = int(limit)
+        except (TypeError, ValueError):
+            return default
+        if n < 1:
+            return default
+        return min(n, MAX_LIMIT)
+
     def __init__(self):
         db_url = os.getenv("DATABASE_URL")
         if db_url:
@@ -89,7 +113,8 @@ class Database:
             INSERT INTO "{project}".tasks (
                 id, batch_id, parent_id, title, task_type, priority, status,
                 assignee, commit_hash, proof_link, notes, tags, created_at, updated_at, started_at, closed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, COALESCE($15, CASE WHEN $17 = 'closed' THEN NOW() END), $16)
             ON CONFLICT (id) DO UPDATE SET
                 batch_id = EXCLUDED.batch_id,
                 parent_id = EXCLUDED.parent_id,
@@ -103,8 +128,12 @@ class Database:
                 notes = EXCLUDED.notes,
                 tags = EXCLUDED.tags,
                 updated_at = EXCLUDED.updated_at,
-                started_at = COALESCE("{project}".tasks.started_at, EXCLUDED.started_at),
-                closed_at = EXCLUDED.closed_at
+                started_at = COALESCE(
+                    "{project}".tasks.started_at,
+                    EXCLUDED.started_at,
+                    CASE WHEN EXCLUDED.status = 'closed' THEN NOW() END
+                ),
+                closed_at = COALESCE("{project}".tasks.closed_at, EXCLUDED.closed_at)
             RETURNING id, batch_id, parent_id, title, task_type, priority, status,
                       assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
                       started_at, closed_at, duration_seconds;
@@ -113,7 +142,8 @@ class Database:
             row = await conn.fetchrow(
                 query,
                 task.id, task.batch_id, task.parent_id, task.title, task.task_type.value, task.priority.value, task.status.value,
-                task.assignee, task.commit_hash, task.proof_link, task.notes, task.tags, task.created_at, task.updated_at, task.started_at, task.closed_at
+                task.assignee, task.commit_hash, task.proof_link, task.notes, task.tags, task.created_at, task.updated_at, task.started_at, task.closed_at,
+                task.status.value
             )
             # 记录时间线流 (精确记录 from_status -> to_status)
             await conn.execute(
@@ -158,6 +188,9 @@ class Database:
             params.append(parent_id)
             idx += 1
 
+        # P1-4: LIMIT 参数化 + 钳制上限，杜绝 f-string 注入面
+        limit = self._clamp_limit(limit)
+        params.append(limit)
         query = f"""
             SELECT id, batch_id, parent_id, title, task_type, priority, status,
                    assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
@@ -165,7 +198,7 @@ class Database:
             FROM "{project}".tasks
             WHERE {" AND ".join(conditions)}
             ORDER BY created_at DESC
-            LIMIT {limit};
+            LIMIT ${idx};
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
@@ -195,7 +228,8 @@ class Database:
                 assignee, commit_hash, proof_link, notes, tags,
                 created_at, updated_at, started_at, closed_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, COALESCE($15, CASE WHEN $17 = 'closed' THEN NOW() END), $16
             )
             ON CONFLICT (id) DO UPDATE SET
                 batch_id = COALESCE(EXCLUDED.batch_id, "{project}".tasks.batch_id),
@@ -210,8 +244,12 @@ class Database:
                 notes = COALESCE(EXCLUDED.notes, "{project}".tasks.notes),
                 tags = EXCLUDED.tags,
                 updated_at = EXCLUDED.updated_at,
-                started_at = COALESCE("{project}".tasks.started_at, EXCLUDED.started_at),
-                closed_at = EXCLUDED.closed_at
+                started_at = COALESCE(
+                    "{project}".tasks.started_at,
+                    EXCLUDED.started_at,
+                    CASE WHEN EXCLUDED.status = 'closed' THEN NOW() END
+                ),
+                closed_at = COALESCE("{project}".tasks.closed_at, EXCLUDED.closed_at)
             RETURNING id, batch_id, parent_id, title, task_type, priority, status,
                       assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
                       started_at, closed_at, duration_seconds;
@@ -224,7 +262,8 @@ class Database:
                         query,
                         t.id, t.batch_id, t.parent_id, t.title, t.task_type.value, t.priority.value, t.status.value,
                         t.assignee, t.commit_hash, t.proof_link, t.notes, t.tags,
-                        t.created_at, t.updated_at, t.started_at, t.closed_at
+                        t.created_at, t.updated_at, t.started_at, t.closed_at,
+                        t.status.value
                     )
                     results.append(Task(**dict(row)))
         return results
@@ -247,7 +286,11 @@ class Database:
                 reporter = EXCLUDED.reporter,
                 summary = EXCLUDED.summary,
                 resolution = EXCLUDED.resolution,
-                resolved_at = EXCLUDED.resolved_at
+                resolved_at = CASE
+                    WHEN EXCLUDED.status = 'fixed'
+                        THEN COALESCE("{project}".findings.resolved_at, EXCLUDED.resolved_at, NOW())
+                    ELSE NULL
+                END
             RETURNING id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at;
         """
         async with self._pool.acquire() as conn:
@@ -280,16 +323,55 @@ class Database:
             params.append([p.value for p in severity])
             idx += 1
 
+        limit = self._clamp_limit(limit)
+        params.append(limit)
         query = f"""
             SELECT id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at
             FROM "{project}".findings
             WHERE {" AND ".join(conditions)}
             ORDER BY discovered_at DESC
-            LIMIT {limit};
+            LIMIT ${idx};
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [Finding(**dict(r)) for r in rows]
+
+    async def bulk_upsert_findings(self, project: str, items: list[Finding]) -> list[Finding]:
+        """在单个事务中原子批量插入或更新多条发现 (P1-3，盖戳语义与 upsert_finding 一致)。"""
+        await self.ensure_project(project)
+        if not items:
+            return []
+        query = f"""
+            INSERT INTO "{project}".findings (
+                id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (id) DO UPDATE SET
+                source = EXCLUDED.source,
+                severity = EXCLUDED.severity,
+                status = EXCLUDED.status,
+                task_id = EXCLUDED.task_id,
+                reporter = EXCLUDED.reporter,
+                summary = EXCLUDED.summary,
+                resolution = EXCLUDED.resolution,
+                resolved_at = CASE
+                    WHEN EXCLUDED.status = 'fixed'
+                        THEN COALESCE("{project}".findings.resolved_at, EXCLUDED.resolved_at, NOW())
+                    ELSE NULL
+                END
+            RETURNING id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at;
+        """
+        results = []
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for f in items:
+                    row = await conn.fetchrow(
+                        query,
+                        f.id, f.source, f.severity.value, f.status.value,
+                        f.task_id, f.reporter, f.summary, f.resolution,
+                        f.discovered_at, f.resolved_at
+                    )
+                    results.append(Finding(**dict(row)))
+        return results
 
     # =========================================================================
     # 待办与阻塞台账 (waitings)
@@ -307,7 +389,11 @@ class Database:
                 owner = EXCLUDED.owner,
                 description = EXCLUDED.description,
                 resolution = EXCLUDED.resolution,
-                resolved_at = EXCLUDED.resolved_at
+                resolved_at = CASE
+                    WHEN EXCLUDED.status = 'closed'
+                        THEN COALESCE("{project}".waitings.resolved_at, EXCLUDED.resolved_at, NOW())
+                    ELSE NULL
+                END
             RETURNING id, category, status, owner, description, resolution, blocked_at, resolved_at;
         """
         async with self._pool.acquire() as conn:
@@ -318,23 +404,67 @@ class Database:
             )
             return Waiting(**dict(row))
 
-    async def query_waitings(self, project: str, status: WaitingStatus | None = None) -> list[Waiting]:
+    async def query_waitings(
+        self,
+        project: str,
+        status: WaitingStatus | None = None,
+        limit: int = 50
+    ) -> list[Waiting]:
         await self.ensure_project(project)
         conditions = ["1=1"]
         params = []
+        idx = 1
         if status:
-            conditions.append("status = $1")
+            conditions.append(f"status = ${idx}")
             params.append(status.value)
+            idx += 1
 
+        limit = self._clamp_limit(limit)
+        params.append(limit)
         query = f"""
             SELECT id, category, status, owner, description, resolution, blocked_at, resolved_at
             FROM "{project}".waitings
             WHERE {" AND ".join(conditions)}
-            ORDER BY blocked_at DESC;
+            ORDER BY blocked_at DESC
+            LIMIT ${idx};
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [Waiting(**dict(r)) for r in rows]
+
+    async def bulk_upsert_waitings(self, project: str, items: list[Waiting]) -> list[Waiting]:
+        """在单个事务中原子批量插入或更新多条待办 (P1-3，盖戳语义与 upsert_waiting 一致)。"""
+        await self.ensure_project(project)
+        if not items:
+            return []
+        query = f"""
+            INSERT INTO "{project}".waitings (
+                id, category, status, owner, description, resolution, blocked_at, resolved_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (id) DO UPDATE SET
+                category = EXCLUDED.category,
+                status = EXCLUDED.status,
+                owner = EXCLUDED.owner,
+                description = EXCLUDED.description,
+                resolution = EXCLUDED.resolution,
+                resolved_at = CASE
+                    WHEN EXCLUDED.status = 'closed'
+                        THEN COALESCE("{project}".waitings.resolved_at, EXCLUDED.resolved_at, NOW())
+                    ELSE NULL
+                END
+            RETURNING id, category, status, owner, description, resolution, blocked_at, resolved_at;
+        """
+        results = []
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for w in items:
+                    row = await conn.fetchrow(
+                        query,
+                        w.id, w.category.value, w.status.value, w.owner,
+                        w.description, w.resolution, w.blocked_at, w.resolved_at
+                    )
+                    results.append(Waiting(**dict(row)))
+        return results
 
     # =========================================================================
     # 研发批次 (batches)
@@ -365,6 +495,7 @@ class Database:
 
     async def query_batches(self, project: str, limit: int = 20) -> list[Batch]:
         await self.ensure_project(project)
+        limit = self._clamp_limit(limit, default=20)
         query = f"""
             SELECT id, title, status, branch_name, summary, methodology_notes, created_at, closed_at
             FROM "{project}".batches
@@ -379,9 +510,16 @@ class Database:
     # 共享知识库：排查手记 (shared.devlogs)
     # =========================================================================
 
-    async def record_devlog(self, devlog: DevLog) -> DevLog:
+    async def record_devlog(self, devlog: DevLog) -> DevLogRecordResult:
+        """入库排障手记 (P0-1: ON CONFLICT upsert，幂等键 = uq_devlogs_proj_task_title)。
+
+        幂等键: (project_id, COALESCE(task_id,''), title)，task_id 允许 NULL。
+        返回 DevLogRecordResult (DevLog + action 字段):
+          - action='created': 全新手记入库
+          - action='updated': 同键手记四要素有变，已更新内容 (调用方需重嵌入)
+          - action='cached':  同键手记内容未变，向量缓存复用 (勿重嵌入)
+        """
         await self.connect()
-        # 向量值转换
         vec_literal = None
         if devlog.embedding:
             vec_literal = f"[{','.join(str(x) for x in devlog.embedding)}]"
@@ -391,20 +529,45 @@ class Database:
                 project_id, task_id, title, author, problem, root_cause, solution, evidence,
                 visibility, tags, embedding, occurred_at, created_at, updated_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::vector, $12, $13, $14)
+            ON CONFLICT (project_id, COALESCE(task_id, ''), title) DO UPDATE SET
+                author = EXCLUDED.author,
+                problem = EXCLUDED.problem,
+                root_cause = EXCLUDED.root_cause,
+                solution = EXCLUDED.solution,
+                evidence = EXCLUDED.evidence,
+                visibility = EXCLUDED.visibility,
+                tags = EXCLUDED.tags,
+                embedding = COALESCE(EXCLUDED.embedding, shared.devlogs.embedding),
+                updated_at = NOW()
             RETURNING id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
                       visibility, tags, occurred_at, created_at, updated_at;
         """
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query,
-                devlog.project_id, devlog.task_id, devlog.title, devlog.author,
-                devlog.problem, devlog.root_cause, devlog.solution, devlog.evidence,
-                devlog.visibility.value, devlog.tags, vec_literal,
-                devlog.occurred_at, devlog.created_at, devlog.updated_at
-            )
+            async with conn.transaction():
+                # 先取旧四要素判定内容是否变化 (RETURNING 拿不到更新前值)
+                old = await conn.fetchrow(
+                    """SELECT problem, root_cause, solution, evidence, author FROM shared.devlogs
+                       WHERE project_id = $1 AND COALESCE(task_id, '') = COALESCE($2, '') AND title = $3
+                       FOR UPDATE;""",
+                    devlog.project_id, devlog.task_id, devlog.title
+                )
+                row = await conn.fetchrow(
+                    query,
+                    devlog.project_id, devlog.task_id, devlog.title, devlog.author,
+                    devlog.problem, devlog.root_cause, devlog.solution, devlog.evidence,
+                    devlog.visibility.value, devlog.tags, vec_literal,
+                    devlog.occurred_at, devlog.created_at, devlog.updated_at
+                )
             res = dict(row)
             res["embedding"] = devlog.embedding
-            return DevLog(**res)
+            if old is None:
+                action = "created"
+            elif (old["problem"], old["root_cause"], old["solution"], old["evidence"]) == \
+                 (devlog.problem, devlog.root_cause, devlog.solution, devlog.evidence):
+                action = "cached"
+            else:
+                action = "updated"
+            return DevLogRecordResult(**res, action=action)
 
     async def find_existing_devlog(
         self,
@@ -492,6 +655,9 @@ class Database:
         limit: int = 5
     ) -> list[dict]:
         await self.connect()
+        # P0-4: 超采后按 (task_id, title) 分组取 top-1，兜底吸收重复副本
+        limit = self._clamp_limit(limit, default=5)
+        fetch_limit = min(limit * 3, MAX_LIMIT)
         async with self._pool.acquire() as conn:
             # 严格密级防线：只能查本项目手记 或 明确为 public_safe 的手记
             vis_cond = "(project_id = $1 OR visibility = 'public_safe')"
@@ -507,7 +673,7 @@ class Database:
                     ORDER BY embedding <=> $2::vector
                     LIMIT $3;
                 """
-                rows = await conn.fetch(sql, project, vec_literal, limit)
+                rows = await conn.fetch(sql, project, vec_literal, fetch_limit)
             elif query_text:
                 sql = f"""
                     SELECT id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
@@ -518,7 +684,7 @@ class Database:
                     ORDER BY score DESC
                     LIMIT $3;
                 """
-                rows = await conn.fetch(sql, project, query_text, limit)
+                rows = await conn.fetch(sql, project, query_text, fetch_limit)
             else:
                 sql = f"""
                     SELECT id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
@@ -528,9 +694,71 @@ class Database:
                     ORDER BY occurred_at DESC
                     LIMIT $2;
                 """
-                rows = await conn.fetch(sql, project, limit)
+                rows = await conn.fetch(sql, project, fetch_limit)
 
-            return [dict(r) for r in rows]
+            # P0-4 去重兜底: 同 (task_id, title) 分组仅保留得分最高副本
+            seen: dict[tuple, dict] = {}
+            for r in rows:
+                d = dict(r)
+                key = (d.get("task_id"), d.get("title"))
+                if key not in seen or (d.get("score") or 0) > (seen[key].get("score") or 0):
+                    seen[key] = d
+            return list(seen.values())[:limit]
+
+    # =========================================================================
+    # P1-1: 项目简报 digest (供 mcp brief 工具消费，单包 ≤2K token)
+    # =========================================================================
+
+    async def brief_project(self, project_id: str, devlog_limit: int = 5) -> dict:
+        """一次查询拼装项目全貌简报。
+
+        返回 dict，键固定 (跨线接口契约，不得更改):
+          - tasks_open:     未结任务 (planned/running/blocked) 精简列 list[dict]
+          - findings_open:  未闭环发现 (open/infix/blocked) 精简列 list[dict]
+          - waitings_open:  待办/阻塞中 (open) 精简列 list[dict]
+          - batch_running:  running 批次 list[dict]
+          - recent_devlogs: 最近 N 条手记 (id/task_id/title/updated_at) list[dict]
+        """
+        await self.ensure_project(project_id)
+        n = self._clamp_limit(devlog_limit, default=5)
+        async with self._pool.acquire() as conn:
+            tasks_open = await conn.fetch(f"""
+                SELECT id, title, status, priority, assignee, updated_at
+                FROM "{project_id}".tasks
+                WHERE status IN ('planned', 'running', 'blocked')
+                ORDER BY updated_at DESC;
+            """)
+            findings_open = await conn.fetch(f"""
+                SELECT id, severity, status, task_id, summary
+                FROM "{project_id}".findings
+                WHERE status IN ('open', 'infix', 'blocked')
+                ORDER BY discovered_at DESC;
+            """)
+            waitings_open = await conn.fetch(f"""
+                SELECT id, category, owner, description
+                FROM "{project_id}".waitings
+                WHERE status = 'open'
+                ORDER BY blocked_at DESC;
+            """)
+            batch_running = await conn.fetch(f"""
+                SELECT id, title FROM "{project_id}".batches WHERE status = 'running'
+                ORDER BY created_at DESC;
+            """)
+            recent_devlogs = await conn.fetch(
+                """SELECT id, task_id, title, updated_at
+                   FROM shared.devlogs
+                   WHERE project_id = $1
+                   ORDER BY updated_at DESC
+                   LIMIT $2;""",
+                project_id, n
+            )
+        return {
+            "tasks_open": [dict(r) for r in tasks_open],
+            "findings_open": [dict(r) for r in findings_open],
+            "waitings_open": [dict(r) for r in waitings_open],
+            "batch_running": [dict(r) for r in batch_running],
+            "recent_devlogs": [dict(r) for r in recent_devlogs],
+        }
 
     # =========================================================================
     # 共享知识库：架构铁律 (shared.rules)

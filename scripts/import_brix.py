@@ -133,11 +133,23 @@ async def run_import(target: str = "local"):
         await db.upsert_task("brix", t)
     print(f"   已更新 {len(tasks)} 项任务的精细属性。")
 
-    # 4. 深度排障手记沉淀与 512 维向量生成
+    # 4. 深度排障手记沉淀与 512 维向量生成 (P0-1: 统一走 record_devlog upsert 路径，消灭旁路)
     print("4. 沉淀核心排障手记并计算讯飞星火 512 维向量...")
     for item in DEVLOGS_TO_RECORD:
-        full_text = f"{item['title']} {item['problem']} {item['root_cause']} {item['solution']}"
-        embed_res = await get_embedding(full_text)
+        # 幂等查重: 同 (project, task_id, title) 已存在且四要素未变 → 复用向量缓存，不重复嵌入
+        existing = await db.find_existing_devlog("brix", task_id=item["task_id"], title=item["title"])
+        embedding = None
+        if existing is None or any(
+            existing.get(k) != item[k]
+            for k in ("title", "problem", "root_cause", "solution", "evidence")
+        ):
+            full_text = f"{item['title']} {item['problem']} {item['root_cause']} {item['solution']}"
+            embed_res = await get_embedding(full_text)
+            embedding = embed_res.embedding
+            vec_source = embed_res.source
+        else:
+            vec_source = "cached_skip"
+
         devlog = DevLog(
             project_id="brix",
             task_id=item["task_id"],
@@ -149,10 +161,10 @@ async def run_import(target: str = "local"):
             evidence=item["evidence"],
             visibility=DevLogVisibility.PUBLIC_SAFE,
             tags=item["tags"],
-            embedding=embed_res.embedding
+            embedding=embedding
         )
         saved = await db.record_devlog(devlog)
-        print(f"   ✔ 手记入库: ID={saved.id} [{saved.task_id}] {saved.title[:30]} (向量源: {embed_res.source})")
+        print(f"   ✔ 手记 upsert [{saved.action}]: ID={saved.id} [{saved.task_id}] {saved.title[:30]} (向量源: {vec_source})")
 
     print("\n=== 导入与对齐圆满完成！ ===")
 
