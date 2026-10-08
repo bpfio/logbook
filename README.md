@@ -101,15 +101,29 @@
 
 Logbook 原生实现全套 MCP 2.x 规范，兼备工具、上下文资源与规程提示词模板：
 
-### 1. 核心 Tools (8项)
+### 1. 核心 Tools
+
+**台账类**
 * `task_upsert(project, ...)`：原子登记/推进任务状态机
-* `task_query(project, ...)`：多维查询任务列表（按状态/优先级）
-* `task_detail(project, task_id)`：查询任务详情与排查手记
-* `devlog_record(project, ...)`：结构化录入排查手记（四要素+自动向量化）
-* `devlog_search(project, query, ...)`：全文 + 向量语义混合召回
-* `rule_query(rule_id=None)`：读取研发规程与架构红线
-* `project_list()`：列出所有已注册项目与健康状态
-* `project_init(project, description)`：显式注册新项目及其专属 Schema
+* `tasks_bulk_upsert(project, tasks, ...)`：单事务批量落库
+* `task_query / task_detail`：多维查询任务列表与详情
+* `finding_record / finding_query`：缺陷登记与查询（`findings_bulk_upsert` 批量原语将随 0.2.0 上线）
+* `waiting_record / waiting_query`：待决/阻塞项登记与查询（`waitings_bulk_upsert` 批量原语将随 0.2.0 上线）
+* `batch_upsert / batch_query`：研发批次演进记录
+
+**手记与规程类**
+* `devlog_record(project, ...)`：结构化录入排查手记（四要素+自动向量化，幂等去重）
+* `devlog_search(project, query, ...)`：全文 + 向量语义混合召回（结果按笔去重）
+* `rule_query`：读取研发规程与架构红线
+* `project_list / project_init`：项目注册中心与健康状态
+
+**效率端点（0.2.0 将上线）**
+* `logbook_brief(project)`：一次调用返回全项目 open tasks/findings/waitings + running 批次 + 最近 devlog 标题的 brief digest，单包目标 ≤2K token
+
+**响应与错误契约（0.2.0）**
+* 写响应瘦身：`*_record` / `*_upsert` 缺省仅回 `{ok, id, status}`，`full=true` 才回显全对象
+* 字段投影：查询工具支持 `fields` 参数，缺省精简列集
+* 结构化错误：全部工具异常统一返回 `{isError, error_type, detail}`（含 `TASK_NOT_FOUND` 预检），杜绝 "Error executing tool X" 裸包装
 
 ### 2. 上下文 Resources (只读 URI)
 * `logbook://{project}/tasks/active`：该项目当前活跃/进行中任务
@@ -149,6 +163,10 @@ logbook mcp
 ## ⚡ 极速启动与配置
 
 ### 1. 启动轻量 PostgreSQL 18 底座 (内存硬限制 80MB)
+
+> QNAP / NAS 生产部署与升级（PG 备份、镜像重建、SQL 迁移、MCP 回归、回滚）
+> 见 [`deploy/qnap/DEPLOY.md`](./deploy/qnap/DEPLOY.md)；服务编排模板见
+> `deploy/qnap/compose.yaml.example`（密钥经 `.env` 注入，不入仓库）。
 ```bash
 docker compose up -d
 ```

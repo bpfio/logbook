@@ -95,3 +95,5 @@
 
 ## L09 | 优化设计开账 (2026-10-08, 用户令启动) — 🟢 设计正典
 - 设计正典 = docs/PLAN_OPT_2026-10-08.md (六病一根图 / P0 正确性五件 / P1 效率五件 / P2 安全五件 / 三波实施+验证门)。依据=两份深探报告 (架构 17 切入点+数据层 7 节根因) + brix 夜11/12 真实调用 25+ 次体感。实施待用户令逐波发车。
+## L10 | 优化升级批开账 (2026-10-08, 用户令启动) — 🟢 五线并行
+- 升级批按 PLAN_OPT_2026-10-08 三波实施，五线 A1-A5 并行: A1 数据/去重/盖戳、A2 错误面/协商、A3 部署/安全面、A4 brief/bulk/效率面、A5 文档与发布。验收门 = 每波 gate (pytest + 真机 MCP 回归 + QNAP 重建)；A5 本批交付 README 工具清单更新、CHANGELOG.md 新建 (Unreleased 按 P0/P1/P2 预填，建议版本 0.2.0)、deploy/qnap/DEPLOY.md 升级 runbook。文档中依赖 A1-A3 落地项 (sql/03_dedup、scripts/replay_brix_writes.py、brief 端点实测 token 数) 标注为待定稿。
