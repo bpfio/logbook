@@ -66,7 +66,7 @@ async def measure(project: str, strict: bool, target: int) -> int:
     baseline_tok = count_tokens(baseline_text)
 
     # ---- 对照: logbook_brief 单调用 (P1-1 落地后存在) ----
-    brief_fn = getattr(ms, "logbook_brief", None)
+    brief_fn = getattr(ms, "logbook_brief", None) or getattr(ms, "brief", None)
     brief_tok = None
     brief_note = ""
     if brief_fn is None:

@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (11)
+## 一、任务台账 (12)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L10 | closed | deploy | 优化升级全量落地、03_dedup迁移与QNAP生产环境0.2.0发布 | HEAD | 36测试全绿, 18笔重放通过, 生产内存71MB |
 | L08 | closed | ops | Brix全量核验、讯飞768维MRL评测与zcode生产MCP接入落地 |  | ~/.zcode/cli/setting.json |
 | L07 | closed | feat | 6大工程优化全量落地(统一返回包装/批量原语/向量缓存去重/参数归一化防呆) | f3a6599 | scripts/mcp_ingest_brix.py |
 | L05.4 | closed | deploy | QNAP 生产容器内存配额再平衡与全维度基准联测 | d27ac5f | deploy/qnap/compose.yaml |
@@ -97,4 +98,9 @@
 - 设计正典 = docs/PLAN_OPT_2026-10-08.md (六病一根图 / P0 正确性五件 / P1 效率五件 / P2 安全五件 / 三波实施+验证门)。依据=两份深探报告 (架构 17 切入点+数据层 7 节根因) + brix 夜11/12 真实调用 25+ 次体感。实施待用户令逐波发车。
 ## L10 | 优化升级批开账 (2026-10-08, 用户令启动) — 🟢 五线并行
 - 升级批按 PLAN_OPT_2026-10-08 三波实施，五线 A1-A5 并行: A1 数据/去重/盖戳、A2 错误面/协商、A3 部署/安全面、A4 brief/bulk/效率面、A5 文档与发布。验收门 = 每波 gate (pytest + 真机 MCP 回归 + QNAP 重建)；A5 本批交付 README 工具清单更新、CHANGELOG.md 新建 (Unreleased 按 P0/P1/P2 预填，建议版本 0.2.0)、deploy/qnap/DEPLOY.md 升级 runbook。文档中依赖 A1-A3 落地项 (sql/03_dedup、scripts/replay_brix_writes.py、brief 端点实测 token 数) 标注为待定稿。
-- **L10 收口 (10-08 00:5x)**: 五线 (A1 数据层/A2 工具壳错误面/A3 安全包/A4 Harness/A5 文档) 全部交卷入库推送 (HEAD=fe24f20, 36 pytest + gate.sh 四 harness 全绿, 18 笔重放幂等通过)。**部署 gated**: QNAP 宿主入口缺失 (1.68 容器 ssh 仅放行 mcp 命令, shell 被关) — runbook=deploy/qnap/DEPLOY.md 六步, 待用户提供 QNAP 宿主 ssh 或经 Container Station UI 按 runbook 执行。0.2.0 待部署。
+- **L10 收口 (10-08 12:26)**: 五线 (A1 数据层/A2 工具壳错误面/A3 安全包/A4 Harness/A5 文档) 全量落地并完成生产发布。
+  1. **QNAP 生产部署**: 宿主机备份先行 (`logbook_pre_20261008_041759.dump`, 96KB)；构建 `logbook:0.2.0` 镜像并流式加载；`compose.yaml` / `.env` 配置同步平滑重拉双容器；
+  2. **数据迁移**: `sql/03_dedup.sql` 成功清洗 12 条存量副本，创建 `uq_devlogs_proj_task_title` 唯一表达式索引，实测幂等；
+  3. **真实回归**: 端到端生产 SSH MCP 通道重放 18 笔真实写入 (23 笔判定 100% PASS，0 副本产生)；`logbook_brief` 生产端点实测 224~825 Token (省 93%)；`TASK_NOT_FOUND` 写前预检拦截实测通过；
+  4. **宿主隔离**: QNAP 宿主现有容器 (Gitea 等) 100% 隔离运行不受影响；双容器总内存实测压制在 71.4MB。0.2.0 正式上线闭环。
+
