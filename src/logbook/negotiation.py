@@ -12,6 +12,7 @@ import subprocess
 import difflib
 from pathlib import Path
 from .db import db
+from .errors import NegotiationPermissionError, NegotiationValueError
 
 
 class ProjectNegotiationError(ValueError):
@@ -92,7 +93,9 @@ async def validate_and_negotiate_project(
 ) -> str:
     """强制核验项目身份。若存在拼写错误或写操作越权，触发结构化协商。"""
     if not project or not project.strip():
-        raise ValueError("【语法错误】project 参数为必填项，禁止为空！请显式指定目标项目名称。")
+        raise NegotiationValueError(
+            "【语法错误】project 参数为必填项，禁止为空！请显式指定目标项目名称。"
+        )
 
     req = project.strip().lower()
     registered = await get_registered_projects()
@@ -127,9 +130,11 @@ async def validate_and_negotiate_project(
     cross_allowed = allow_cross_project or (os.getenv("LOGBOOK_ALLOW_CROSS_PROJECT") == "1")
     if is_write and workspace_proj and workspace_proj in registered and req != workspace_proj:
         if not cross_allowed:
-            raise PermissionError(
+            raise NegotiationPermissionError(
                 f"【Logbook 隔离拦截】越权阻断：当前物理工作区锁定为 [{workspace_proj}]，"
-                f"禁止跨项目向 [{req}] 执行写操作或敏感操作！如确认用户显式要求跨项目操作，请显式传入 allow_cross_project=True。"
+                f"禁止跨项目向 [{req}] 执行写操作或敏感操作！如确认用户显式要求跨项目操作，请显式传入 allow_cross_project=True。",
+                workspace_project=workspace_proj,
+                requested_project=req,
             )
 
     return req

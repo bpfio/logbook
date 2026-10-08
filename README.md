@@ -119,6 +119,7 @@ Logbook 原生实现全套 MCP 2.x 规范，兼备工具、上下文资源与规
 
 **效率端点（0.2.0 将上线）**
 * `logbook_brief(project)`：一次调用返回全项目 open tasks/findings/waitings + running 批次 + 最近 devlog 标题的 brief digest，单包目标 ≤2K token
+> **0.2.0 契约 (2026-10-08)**: ①`logbook_brief(project, devlog_limit=5)` 返回 `text`（紧凑行文本，优先消费）+ `brief`（结构化）。②写工具缺省瘦身响应 `{ok,id,status}`，要全对象传 `full=true`。③查询工具支持 `fields` 投影与 `limit` 钳制（≤200）；`waiting_query` 支持多 status 数组。④错误统一 `{isError:true, error_type, detail}`，错误码集：INVALID_ARGUMENT / CROSS_PROJECT_FORBIDDEN / TASK_NOT_FOUND / DUPLICATE_KEY / FK_VIOLATION / CHECK_VIOLATION / NOT_NULL_VIOLATION / DB_ERROR / INTERNAL_ERROR / BRIEF_UNAVAILABLE。⑤`export_markdown` 缺省只返内容不落盘，落盘需显式 `output_path`。
 
 **响应与错误契约（0.2.0）**
 * 写响应瘦身：`*_record` / `*_upsert` 缺省仅回 `{ok, id, status}`，`full=true` 才回显全对象

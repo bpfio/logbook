@@ -10,6 +10,8 @@
 import sys
 import os
 import asyncio
+import functools
+import asyncpg
 from typing import Any, Literal
 try:
     from mcp.server.mcpserver import MCPServer
@@ -28,11 +30,15 @@ from .time_sync import get_beijing_now, format_beijing
 from .vector import get_embedding
 from .converter import export_devlog_markdown
 from .negotiation import validate_and_negotiate_project, ProjectNegotiationError
+from .errors import tool_error, ToolError, pg_tool_error
 from .normalizer import (
     normalize_status, normalize_task_type, normalize_priority,
     normalize_severity, normalize_waiting_category
 )
 from .db import db
+# P1-1: brief digest 端点 (A1 并行开发中, 接口契约已锁 db.brief_project(project_id, devlog_limit=5) -> dict,
+# 键 tasks_open/findings_open/waitings_open/batch_running/recent_devlogs; A1 未落地期间取不到属预期)
+brief_project = getattr(db, "brief_project", None)
 from typing import Annotated
 from pydantic import BeforeValidator
 
@@ -44,6 +50,54 @@ WaitingCategoryArg = Annotated[WaitingCategory, BeforeValidator(normalize_waitin
 
 # 创建 MCP Server 实例
 mcp = MCPServer("logbook-mcp-server")
+
+
+# =============================================================================
+# 零、统一结构化错误外壳 (P0-2) + 通用工具函数
+# =============================================================================
+
+QUERY_LIMIT_MAX = 200
+
+
+def tool_shell(fn):
+    """P0-2 结构化错误面: 工具体任何异常统一转 {isError, error_type, detail, ...}。
+
+    - ProjectNegotiationError / ToolError (含 negotiation 收编的 ValueError/PermissionError): 原样结构化
+    - asyncpg.PostgresError: 映射约束名与诊断 detail
+    - 其余异常: INTERNAL_ERROR 兜底 (保留类型名与消息，杜绝 SDK 零细节裸包装)
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except ProjectNegotiationError as e:
+            return e.to_dict()
+        except ToolError as e:
+            return e.to_dict()
+        except asyncpg.PostgresError as e:
+            return pg_tool_error(e, tool=fn.__name__)
+        except Exception as e:
+            return tool_error("INTERNAL_ERROR", f"[{fn.__name__}] {type(e).__name__}: {e}", tool=fn.__name__)
+    return wrapper
+
+
+def clamp_limit(limit: int, maximum: int = QUERY_LIMIT_MAX) -> int:
+    """P1-4: LIMIT 参数化钳制 (下限 1, 上限 200)。"""
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        return 50
+    return max(1, min(n, maximum))
+
+
+def project_fields(items: list[dict], fields: list[str] | None) -> list[dict]:
+    """P1-5: 查询结果 MCP 层键投影 (fields=None 返回全列)。"""
+    if not fields:
+        return items
+    keys = [f.strip() for f in fields if isinstance(f, str) and f.strip()]
+    return [{k: it[k] for k in keys if k in it} for it in items]
 
 
 # =============================================================================
@@ -184,6 +238,7 @@ def prompt_record_devlog(project: str, task_id: str) -> str:
 # 三、 Tools (动作执行面 - 强制显式传参 + 智能协商自愈)
 # =============================================================================
 
+@tool_shell
 @mcp.tool()
 async def task_upsert(
     project: str,
@@ -200,6 +255,7 @@ async def task_upsert(
     tags: list[str] | None = None,
     batch_id: str | None = None,
     allow_cross_project: bool = False,
+    full: bool = False,
 ) -> dict:
     """原子登记或推进任务状态机。强制要求显式提供 project 参数。支持 assignee 责任归属与 parent_id 分级解耦。
 
@@ -221,6 +277,7 @@ async def task_upsert(
     - proof_link: 报告或证据指针 (如 '报告 dfc50ef')。
     - batch_id: 归属研发批次号 (如 'DEV-2026-10-07-02')。
     - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
+    - full: 可选。True 时回显任务全对象 (缺省 False 仅回瘦身 {ok, id, status})。
     """
     try:
         proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
@@ -254,19 +311,20 @@ async def task_upsert(
         batch_id=batch_id,
     )
     saved = await db.upsert_task(proj, task)
-    return {
-        "success": True,
-        "project": proj,
-        "task": saved.model_dump(mode="json")
-    }
+    slim = {"success": True, "ok": True, "project": proj, "id": id, "status": st_val}
+    if full:
+        slim["task"] = saved.model_dump(mode="json")
+    return slim
 
 
+@tool_shell
 @mcp.tool()
 async def tasks_bulk_upsert(
     project: str,
     tasks: list[dict],
     batch_id: str | None = None,
     allow_cross_project: bool = False,
+    full: bool = False,
 ) -> dict:
     """原子批量登记或更新任务台账 (单事务批量落库，大幅压减网络 RTT 往返开销)。
 
@@ -275,6 +333,7 @@ async def tasks_bulk_upsert(
     - tasks: 必填。任务字典列表，单项包含 id, title, status 等。
     - batch_id: 可选。统一归属研发批次号 (若任务项本身未指定，则以此默认填充)。
     - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
+    - full: 可选。True 时回显 items 全对象列表 (缺省 False 仅回瘦身 {ok, total, ids})。
     """
     try:
         proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
@@ -317,14 +376,19 @@ async def tasks_bulk_upsert(
         ))
 
     saved_tasks = await db.bulk_upsert_tasks(proj, task_objs)
-    return {
+    slim = {
         "success": True,
+        "ok": True,
         "project": proj,
         "total": len(saved_tasks),
-        "items": [t.model_dump(mode="json") for t in saved_tasks]
+        "ids": [t.id for t in saved_tasks],
     }
+    if full:
+        slim["items"] = [t.model_dump(mode="json") for t in saved_tasks]
+    return slim
 
 
+@tool_shell
 @mcp.tool()
 async def task_query(
     project: str,
@@ -334,13 +398,19 @@ async def task_query(
     assignee: str | None = None,
     parent_id: str | None = None,
     limit: int = 50,
+    fields: list[str] | None = None,
 ) -> dict:
-    """多维查询任务看板。强制要求显式提供 project 参数。返回标准化包装对象。"""
+    """多维查询任务看板。强制要求显式提供 project 参数。返回标准化包装对象。
+
+    - limit: 返回条数上限 (1..200, 缺省 50, 超界自动钳制)。
+    - fields: 可选列投影 (如 ['id','status','priority','title'])，缺省回全列。
+    """
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    limit = clamp_limit(limit)
     st_enums = [TaskStatus(normalize_status(s)) for s in status] if status else None
     pr_enums = [TaskPriority(normalize_priority(p)) for p in priority] if priority else None
     tasks = await db.query_tasks(
@@ -352,7 +422,7 @@ async def task_query(
         parent_id=parent_id,
         limit=limit
     )
-    items = [t.model_dump(mode="json") for t in tasks]
+    items = project_fields([t.model_dump(mode="json") for t in tasks], fields)
     return {
         "success": True,
         "project": proj,
@@ -361,6 +431,7 @@ async def task_query(
     }
 
 
+@tool_shell
 @mcp.tool()
 async def finding_record(
     project: str,
@@ -373,6 +444,7 @@ async def finding_record(
     reporter: str = "audit",
     resolution: str | None = None,
     allow_cross_project: bool = False,
+    full: bool = False,
 ) -> dict:
     """登记或更新缺陷/审计发现项。强制要求显式提供 project 参数。支持 reporter 责任归属。
 
@@ -387,11 +459,25 @@ async def finding_record(
     - reporter: 报告者 Agent。
     - resolution: 处置结果或修复 Commit 标识。
     - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
+    - task_id 写前预检: 关联任务不存在时回 TASK_NOT_FOUND 结构化错。
+    - full: 可选。True 时回显发现项全对象 (缺省 False 仅回瘦身 {ok, id, status})。
     """
     try:
         proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     except ProjectNegotiationError as e:
         return e.to_dict()
+
+    # P0-2: task_id 写前预检 (今晚 F-243 实锤形态: 静默写入悬空外键)
+    if task_id:
+        async with db._pool.acquire() as conn:
+            hit = await conn.fetchrow(f'SELECT 1 FROM "{proj}".tasks WHERE id = $1', task_id)
+        if not hit:
+            return tool_error(
+                "TASK_NOT_FOUND",
+                f"关联任务 [{task_id}] 在项目 [{proj}] 的任务台账中不存在，拒绝写入悬空关联。"
+                f"请先 task_upsert 登记该任务或修正 task_id。",
+                project=proj, task_id=task_id, finding_id=id,
+            )
 
     s_summary = sanitize_text(summary).clean_text
     s_resolution = sanitize_text(resolution).clean_text if resolution else None
@@ -409,26 +495,36 @@ async def finding_record(
         resolution=s_resolution,
     )
     saved = await db.upsert_finding(proj, finding)
-    return {"success": True, "project": proj, "finding": saved.model_dump(mode="json")}
+    slim = {"success": True, "ok": True, "project": proj, "id": id, "status": status}
+    if full:
+        slim["finding"] = saved.model_dump(mode="json")
+    return slim
 
 
+@tool_shell
 @mcp.tool()
 async def finding_query(
     project: str,
     status: list[Literal["open", "infix", "fixed", "wontfix", "blocked"]] | None = None,
     severity: list[Literal["P1", "P2", "P3"]] | None = None,
     limit: int = 50,
+    fields: list[str] | None = None,
 ) -> dict:
-    """查询缺陷与审计发现项。强制要求显式提供 project 参数。返回标准化包装对象。"""
+    """查询缺陷与审计发现项。强制要求显式提供 project 参数。返回标准化包装对象。
+
+    - limit: 返回条数上限 (1..200, 缺省 50, 超界自动钳制)。
+    - fields: 可选列投影 (如 ['id','severity','status','summary'])，缺省回全列。
+    """
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    limit = clamp_limit(limit)
     st_enums = [FindingStatus(s) for s in status] if status else None
     sev_enums = [FindingSeverity(normalize_severity(s)) for s in severity] if severity else None
     findings = await db.query_findings(proj, status=st_enums, severity=sev_enums, limit=limit)
-    items = [f.model_dump(mode="json") for f in findings]
+    items = project_fields([f.model_dump(mode="json") for f in findings], fields)
     return {
         "success": True,
         "project": proj,
@@ -437,20 +533,41 @@ async def finding_query(
     }
 
 
+@tool_shell
 @mcp.tool()
 async def waiting_query(
     project: str,
-    status: Literal["open", "closed"] = "open"
+    status: list[Literal["open", "closed"]] | Literal["open", "closed"] | None = "open",
+    limit: int = 50,
+    fields: list[str] | None = None,
 ) -> dict:
-    """查询待办与阻塞项 (如待用户决策事项)。强制要求显式提供 project 参数。返回标准化包装对象。"""
+    """查询待办与阻塞项 (如待用户决策事项)。强制要求显式提供 project 参数。返回标准化包装对象。
+
+    - status: 支持 'open'/'closed' 单值或多状态数组 (如 ['open','closed'])，None 查全部。
+    - limit: 返回条数上限 (1..200, 缺省 50, 超界自动钳制)。
+    - fields: 可选列投影 (如 ['id','category','description'])，缺省回全列。
+    """
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
-    st = WaitingStatus(status)
-    waitings = await db.query_waitings(proj, status=st)
-    items = [w.model_dump(mode="json") for w in waitings]
+    limit = clamp_limit(limit)
+    if status is None:
+        st_list: list[WaitingStatus] | None = None
+    elif isinstance(status, str):
+        st_list = [WaitingStatus(status)]
+    else:
+        st_list = [WaitingStatus(s) for s in status]
+
+    if st_list is None or len(st_list) == 1:
+        rows = await db.query_waitings(proj, status=st_list[0] if st_list else None)
+    else:
+        # P1-4 多状态: db 层仅支持单 status，MCP 层全量拉取后过滤 (不依赖 db 改动)
+        rows = [w for w in await db.query_waitings(proj) if w.status in st_list]
+
+    rows = sorted(rows, key=lambda w: w.blocked_at or 0, reverse=True)[:limit]
+    items = project_fields([w.model_dump(mode="json") for w in rows], fields)
     return {
         "success": True,
         "project": proj,
@@ -459,6 +576,7 @@ async def waiting_query(
     }
 
 
+@tool_shell
 @mcp.tool()
 async def waiting_record(
     project: str,
@@ -469,6 +587,7 @@ async def waiting_record(
     owner: str = "user",
     resolution: str | None = None,
     allow_cross_project: bool = False,
+    full: bool = False,
 ) -> dict:
     """登记或更新待办与阻塞项。强制要求显式提供 project 参数。
 
@@ -481,6 +600,7 @@ async def waiting_record(
     - owner: 责任人 (默认 'user')。
     - resolution: 解决结论。
     - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
+    - full: 可选。True 时回显待办全对象 (缺省 False 仅回瘦身 {ok, id, status})。
     """
     try:
         proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
@@ -498,9 +618,13 @@ async def waiting_record(
         resolution=sanitize_text(resolution).clean_text if resolution else None,
     )
     saved = await db.upsert_waiting(proj, waiting)
-    return {"success": True, "project": proj, "waiting": saved.model_dump(mode="json")}
+    slim = {"success": True, "ok": True, "project": proj, "id": id, "status": status}
+    if full:
+        slim["waiting"] = saved.model_dump(mode="json")
+    return slim
 
 
+@tool_shell
 @mcp.tool()
 async def devlog_record(
     project: str,
@@ -570,6 +694,7 @@ async def devlog_record(
             )
             return {
                 "success": True,
+                "ok": True,
                 "devlog_id": updated["id"],
                 "project": proj,
                 "vector_source": "cached_skip",
@@ -594,6 +719,7 @@ async def devlog_record(
             )
             return {
                 "success": True,
+                "ok": True,
                 "devlog_id": updated["id"],
                 "project": proj,
                 "vector_source": embed_res.source,
@@ -620,6 +746,7 @@ async def devlog_record(
     saved = await db.record_devlog(devlog)
     return {
         "success": True,
+        "ok": True,
         "devlog_id": saved.id,
         "project": proj,
         "vector_source": embed_res.source,
@@ -627,43 +754,56 @@ async def devlog_record(
     }
 
 
+@tool_shell
 @mcp.tool()
 async def devlog_search(
     project: str,
     query: str,
     limit: int = 5,
+    fields: list[str] | None = None,
 ) -> dict:
-    """语义向量与全文混合检索跨 Agent 长期记忆。优先当前项目私密经验 + 全局开源安全经验。返回标准化包装对象。"""
+    """语义向量与全文混合检索跨 Agent 长期记忆。优先当前项目私密经验 + 全局开源安全经验。返回标准化包装对象。
+
+    - limit: 返回条数上限 (1..200, 缺省 5, 超界自动钳制)。
+    - fields: 可选列投影 (如 ['id','title','root_cause'])，缺省回全列。
+    """
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    limit = clamp_limit(limit, maximum=QUERY_LIMIT_MAX)
     s_query = sanitize_text(query).clean_text
     embed_res = await get_embedding(s_query)
-    
+
     results = await db.search_devlogs(
         project=proj,
         query_vector=embed_res.embedding,
         query_text=s_query if not embed_res.embedding else None,
         limit=limit
     )
+    items = project_fields([dict(r) for r in results], fields)
     return {
         "success": True,
         "project": proj,
-        "total": len(results),
-        "items": results
+        "total": len(items),
+        "items": items
     }
 
 
+@tool_shell
 @mcp.tool()
 async def rule_query(
     keyword: str | None = None,
-    category: Literal["general", "network", "kernel", "database", "security", "engineering", "governance", "resource"] | None = None
+    category: Literal["general", "network", "kernel", "database", "security", "engineering", "governance", "resource"] | None = None,
+    fields: list[str] | None = None
 ) -> dict:
-    """开工前对齐架构铁律与工程红线 (SSOT)。全项目共享。支持按领域 category 精准过滤。返回标准化包装对象。"""
+    """开工前对齐架构铁律与工程红线 (SSOT)。全项目共享。支持按领域 category 精准过滤。返回标准化包装对象。
+
+    - fields: 可选列投影 (如 ['id','title','summary'])，缺省回全列。
+    """
     rules = await db.query_rules(keyword=keyword, category=category)
-    items = [r.model_dump(mode="json") for r in rules]
+    items = project_fields([r.model_dump(mode="json") for r in rules], fields)
     return {
         "success": True,
         "total": len(items),
@@ -671,22 +811,32 @@ async def rule_query(
     }
 
 
+@tool_shell
 @mcp.tool()
-async def export_markdown(project: str, output_path: str = "docs/DEVLOG.md") -> str:
-    """从数据库生成完全兼容 brix 格式的 DEVLOG.md。强制要求显式提供 project 参数。"""
+async def export_markdown(project: str, output_path: str | None = None) -> str:
+    """从数据库生成完全兼容 brix 格式的 DEVLOG.md，以内容字符串返回 (调用方自行落盘)。
+
+    P2-4: 服务端缺省不再写任意服务器路径。output_path 参数保留向后兼容:
+    显式传入时服务端仍代写该文件并返回摘要 (旧客户端零破坏)。
+    强制要求显式提供 project 参数。
+    """
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.message
 
     md = await export_devlog_markdown(proj)
-    from pathlib import Path
-    out_p = Path(output_path)
-    out_p.parent.mkdir(parents=True, exist_ok=True)
-    out_p.write_text(md, encoding="utf-8")
-    return f"已成功将项目 {proj} 的最新状态导出至 {output_path} (行数: {len(md.splitlines())})"
+    if output_path:
+        # 向后兼容: 旧客户端显式指定路径时保留服务端落盘行为
+        from pathlib import Path
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(md, encoding="utf-8")
+        return f"已成功将项目 {proj} 的最新状态导出至 {output_path} (行数: {len(md.splitlines())})"
+    return md
 
 
+@tool_shell
 @mcp.tool()
 async def batch_upsert(
     project: str,
@@ -697,6 +847,7 @@ async def batch_upsert(
     summary: str | None = None,
     methodology_notes: str | None = None,
     allow_cross_project: bool = False,
+    full: bool = False,
 ) -> dict:
     """登记或更新研发批次演进记录与排障方法论。强制要求显式提供 project 参数。
 
@@ -709,6 +860,7 @@ async def batch_upsert(
     - summary: 批次任务源与方案总结。
     - methodology_notes: 排障方法论、未办结复作入口与讨论过程。
     - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
+    - full: 可选。True 时回显批次全对象 (缺省 False 仅回瘦身 {ok, id, status})。
     """
     try:
         proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
@@ -724,24 +876,89 @@ async def batch_upsert(
         methodology_notes=methodology_notes,
     )
     saved = await db.upsert_batch(proj, batch)
-    return {"success": True, "project": proj, "batch": saved.model_dump(mode="json")}
+    slim = {"success": True, "ok": True, "project": proj, "id": id, "status": status}
+    if full:
+        slim["batch"] = saved.model_dump(mode="json")
+    return slim
 
 
+@tool_shell
 @mcp.tool()
-async def batch_query(project: str, limit: int = 20) -> dict:
-    """查询项目历史研发批次演进记录与讨论复盘。强制要求显式提供 project 参数。返回标准化包装对象。"""
+async def batch_query(project: str, limit: int = 20, fields: list[str] | None = None) -> dict:
+    """查询项目历史研发批次演进记录与讨论复盘。强制要求显式提供 project 参数。返回标准化包装对象。
+
+    - limit: 返回条数上限 (1..200, 缺省 20, 超界自动钳制)。
+    - fields: 可选列投影 (如 ['id','title','status'])，缺省回全列。
+    """
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    limit = clamp_limit(limit)
     batches = await db.query_batches(proj, limit=limit)
-    items = [b.model_dump(mode="json") for b in batches]
+    items = project_fields([b.model_dump(mode="json") for b in batches], fields)
     return {
         "success": True,
         "project": proj,
         "total": len(items),
         "items": items
+    }
+
+
+@tool_shell
+@mcp.tool(name="logbook_brief")
+async def brief(project: str, devlog_limit: int = 5) -> dict:
+    """一次调用返回项目开工简报 digest：open tasks/findings/waitings + running 批次 + 最近 N 条 devlog 标题。单包目标 ≤2K token。
+
+    - project: 必填。项目代号。
+    - devlog_limit: 最近手记条数 (缺省 5)。
+    - text 字段为 token 友好的紧凑行文本，优先消费；brief 字段为结构化原始数据。
+    """
+    proj = await validate_and_negotiate_project(project, is_write=False)
+
+    if brief_project is None:
+        return tool_error(
+            "BRIEF_UNAVAILABLE",
+            "db 层 brief_project 尚未落地 (A1 并行开发中)，请暂用 task_query/finding_query/waiting_query/batch_query/devlog_search 组合。",
+        )
+
+    data = await brief_project(proj, devlog_limit=clamp_limit(devlog_limit, maximum=QUERY_LIMIT_MAX))
+
+    t_open = data.get("tasks_open") or []
+    f_open = data.get("findings_open") or []
+    w_open = data.get("waitings_open") or []
+    b_run = data.get("batch_running")
+    devlogs = data.get("recent_devlogs") or []
+
+    # token 友好格式: 紧凑行文本优先 (batch_running 兼容 dict / list[dict] / str)
+    if isinstance(b_run, dict):
+        b_list = [b_run]
+    elif isinstance(b_run, list):
+        b_list = [b for b in b_run if isinstance(b, dict)]
+    else:
+        b_list = []
+    b_head = b_list[0]["id"] if b_list else "-"
+
+    lines = [f"# [{proj}] 开工简报 | tasks_open={len(t_open)} findings_open={len(f_open)} waitings_open={len(w_open)} batch_running={b_head}"]
+    for t in t_open:
+        lines.append(f"T: {t.get('id')} {t.get('status')} {t.get('priority')} {t.get('title')}")
+    for f in f_open:
+        lines.append(f"F: {f.get('id')} {f.get('severity')} {f.get('status')} {(f.get('summary') or '')[:80]}")
+    for w in w_open:
+        lines.append(f"W: {w.get('id')} {w.get('category')} {(w.get('description') or '')[:80]}")
+    for b in b_list:
+        lines.append(f"B: {b.get('id')} {b.get('title')}")
+    for d in devlogs:
+        if isinstance(d, dict):
+            lines.append(f"D: [{d.get('id')}] {d.get('title')}")
+
+    return {
+        "success": True,
+        "ok": True,
+        "project": proj,
+        "text": "\n".join(lines),
+        "brief": data,
     }
 
 
