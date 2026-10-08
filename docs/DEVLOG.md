@@ -13,7 +13,7 @@
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
-| L12 | closed | feat | Git仓库坐标权威锚定、双轨项目协商与自愈开户原语落地 | 892a9b5 | sql/04_project_registry.sql + project_init MCP原语 + 双轨寻址41测试全绿 |
+| L12 | closed | feat | Git仓库坐标权威锚定、双轨项目协商与自愈开户原语落地 | 0448a89 | sql/04_project_registry.sql + project_init MCP原语 + 双轨寻址41测试全绿 |
 | L11 | closed | ops | cliserver开发机识别与agy生产logbook MCP配置核验归档 | - | 确证cliserver即xhub; 全局mcp_config.json已生效; logbook_brief RPC验证PASS |
 | L10 | closed | deploy | 优化升级全量落地、03_dedup迁移与QNAP生产环境0.2.0发布 | HEAD | 36测试全绿, 18笔重放通过, 生产内存71MB |
 | L08 | closed | ops | Brix全量核验、讯飞768维MRL评测与zcode生产MCP接入落地 |  | ~/.zcode/cli/setting.json |
