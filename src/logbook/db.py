@@ -17,7 +17,8 @@ from .models import (
     Waiting, WaitingStatus, WaitingCategory,
     Batch, BatchStatus,
     DevLog, DevLogVisibility,
-    Rule
+    Rule,
+    Project, slug_to_schema_name
 )
 from .time_sync import get_beijing_now
 
@@ -98,6 +99,126 @@ class Database:
         await self.connect()
         async with self._pool.acquire() as conn:
             await conn.execute("SELECT shared.init_project_schema($1)", project)
+
+    async def register_project(
+        self,
+        slug: str,
+        title: str,
+        description: str | None = None,
+        schema_name: str | None = None
+    ) -> Project:
+        """注册新项目：初始化物理 Schema 并登记至 shared.projects 元数据中心。"""
+        await self.connect()
+        s_name = schema_name or slug_to_schema_name(slug)
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS shared.projects (
+                    slug VARCHAR(64) PRIMARY KEY,
+                    schema_name VARCHAR(32) NOT NULL UNIQUE,
+                    title VARCHAR(256) NOT NULL,
+                    description TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_projects_schema ON shared.projects(schema_name);
+            """)
+            await conn.execute("SELECT shared.init_project_schema($1)", s_name)
+            row = await conn.fetchrow("""
+                INSERT INTO shared.projects (slug, schema_name, title, description)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (slug) DO UPDATE
+                SET schema_name = EXCLUDED.schema_name,
+                    title = EXCLUDED.title,
+                    description = COALESCE(EXCLUDED.description, shared.projects.description),
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING slug, schema_name, title, description, created_at, updated_at;
+            """, slug, s_name, title, description)
+            return Project(**dict(row))
+
+    async def get_project(self, identifier: str) -> Project | None:
+        """按 slug (如 bpfio/brix) 或 schema_name (如 brix) 获取项目元数据。"""
+        await self.connect()
+        async with self._pool.acquire() as conn:
+            has_table = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'shared' AND table_name = 'projects'
+                );
+            """)
+            if has_table:
+                row = await conn.fetchrow("""
+                    SELECT slug, schema_name, title, description, created_at, updated_at
+                    FROM shared.projects
+                    WHERE slug = $1 OR schema_name = $1
+                    LIMIT 1;
+                """, identifier)
+                if row:
+                    return Project(**dict(row))
+
+            # 兼容模式：若 shared.projects 未登记该 slug，但已存在同名物理 Schema
+            # 或者根据 slug_to_schema_name 派生的 schema 存在，则向下兼容映射
+            candidates = [identifier.lower()]
+            try:
+                cand = slug_to_schema_name(identifier)
+                if cand not in candidates:
+                    candidates.append(cand)
+            except Exception:
+                pass
+
+            for sch in candidates:
+                has_schema = await conn.fetchval("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.schemata
+                        WHERE schema_name = $1
+                    );
+                """, sch)
+                if has_schema:
+                    return Project(
+                        slug=identifier,
+                        schema_name=sch,
+                        title=identifier,
+                        description="系统内置/历史初始化项目"
+                    )
+            return None
+
+    async def list_projects(self) -> list[Project]:
+        """获取所有已注册项目元数据列表。"""
+        await self.connect()
+        async with self._pool.acquire() as conn:
+            projects: dict[str, Project] = {}
+            has_table = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'shared' AND table_name = 'projects'
+                );
+            """)
+            if has_table:
+                rows = await conn.fetch("""
+                    SELECT slug, schema_name, title, description, created_at, updated_at
+                    FROM shared.projects
+                    ORDER BY created_at ASC;
+                """)
+                for r in rows:
+                    p = Project(**dict(r))
+                    projects[p.schema_name] = p
+
+            schemata = await conn.fetch("""
+                SELECT schema_name 
+                FROM information_schema.schemata 
+                WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'shared', 'public')
+                  AND schema_name NOT LIKE 'pg_%'
+                ORDER BY schema_name;
+            """)
+            for s in schemata:
+                s_name = s["schema_name"].lower()
+                if s_name not in projects:
+                    projects[s_name] = Project(
+                        slug=s_name,
+                        schema_name=s_name,
+                        title=s_name,
+                        description="物理 Schema (未登记 Git 坐标)"
+                    )
+            return list(projects.values())
 
     # =========================================================================
     # 任务台账 (tasks)

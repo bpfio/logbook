@@ -59,7 +59,7 @@ async def test_mcp_tool_negotiation_response():
     # 模拟 Agent 接收建议后自省修正，重新调用 project='brix' (需匹配当前工作区或无工作区冲突)
     # 本测试目录为 logbook，若要写入 brix，需保证物理工作区放行或无冲突
     curr_ws = detect_current_workspace_project()
-    if curr_ws == "logbook":
+    if curr_ws in ("logbook", "bpfio/logbook"):
         # 在 logbook 目录下尝试写入 logbook 正确项目
         correct_resp = await task_upsert(
             project="logbook",
@@ -75,7 +75,7 @@ async def test_mcp_tool_negotiation_response():
 async def test_cross_project_permission_boundary():
     """测试跨项目越权物理拦截与显式授权放行。"""
     curr_ws = detect_current_workspace_project()
-    assert curr_ws == "logbook"  # 当前物理工作区正是 logbook
+    assert curr_ws in ("logbook", "bpfio/logbook")  # 当前物理工作区正是 logbook / bpfio/logbook
 
     # 1. 默认无授权阻断
     with pytest.raises(PermissionError, match="越权阻断"):

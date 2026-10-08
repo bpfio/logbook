@@ -6,10 +6,11 @@
 - 密级防线与故障四要素强类型
 """
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 from .time_sync import get_beijing_now
 
 
@@ -187,3 +188,50 @@ class Rule(BaseModel):
     constraints: str | None = Field(default=None, description="边界约束与红线说明")
     created_at: datetime = Field(default_factory=get_beijing_now)
     updated_at: datetime = Field(default_factory=get_beijing_now)
+
+
+def slug_to_schema_name(slug: str) -> str:
+    """将 Git 仓库标识 (如 bpfio/logbook, io/TS) 安全映射为 PostgreSQL 物理 Schema 名。"""
+    if not slug or not slug.strip():
+        raise ValueError("项目坐标禁止为空！")
+    if not any(c.isalnum() for c in slug):
+        raise ValueError(f"项目坐标 '{slug}' 格式非法，必须包含有效英文字母或数字！")
+    parts = slug.strip().split("/")
+    valid_parts = [p for p in parts if p]
+    if not valid_parts:
+        raise ValueError(f"项目坐标 '{slug}' 格式非法！")
+    repo_name = valid_parts[-1].lower()
+    sanitized = re.sub(r"[^a-z0-9_]", "_", repo_name)
+    sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+    if not sanitized:
+        raise ValueError(f"项目坐标 '{slug}' 无法转换为有效 Schema 名称！")
+    if not sanitized[0].isalpha():
+        sanitized = f"p_{sanitized}"
+    return sanitized[:32]
+
+
+class Project(BaseModel):
+    """权威项目注册实体 (SSOT: Git 仓库坐标与物理 Schema 映射)。"""
+    slug: str = Field(..., max_length=64, description="权威 Git 坐标，如 bpfio/logbook, io/TS, brix")
+    schema_name: str = Field(..., max_length=32, description="物理 PostgreSQL Schema 名称")
+    title: str = Field(..., max_length=256, description="项目全称或中文名称")
+    description: str | None = Field(default=None, description="项目描述与定位")
+    created_at: datetime = Field(default_factory=get_beijing_now)
+    updated_at: datetime = Field(default_factory=get_beijing_now)
+
+    @field_validator("slug")
+    @classmethod
+    def validate_slug(cls, v: str) -> str:
+        s = v.strip()
+        if not re.match(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", s):
+            raise ValueError(f"项目标识符格式非法: '{v}'，必须符合 'owner/repo' 或 'repo' 规范！")
+        return s
+
+    @field_validator("schema_name")
+    @classmethod
+    def validate_schema_name(cls, v: str) -> str:
+        s = v.strip().lower()
+        if not re.match(r"^[a-z0-9_]{2,32}$", s):
+            raise ValueError(f"物理 Schema 名称非法: '{v}'，必须由 2~32 位小写字母、数字或下划线组成！")
+        return s
+

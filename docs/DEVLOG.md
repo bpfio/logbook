@@ -9,10 +9,12 @@
 
 ---
 
-## 一、任务台账 (12)
+## 一、任务台账 (14)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L12 | closed | feat | Git仓库坐标权威锚定、双轨项目协商与自愈开户原语落地 | 892a9b5 | sql/04_project_registry.sql + project_init MCP原语 + 双轨寻址41测试全绿 |
+| L11 | closed | ops | cliserver开发机识别与agy生产logbook MCP配置核验归档 | - | 确证cliserver即xhub; 全局mcp_config.json已生效; logbook_brief RPC验证PASS |
 | L10 | closed | deploy | 优化升级全量落地、03_dedup迁移与QNAP生产环境0.2.0发布 | HEAD | 36测试全绿, 18笔重放通过, 生产内存71MB |
 | L08 | closed | ops | Brix全量核验、讯飞768维MRL评测与zcode生产MCP接入落地 |  | ~/.zcode/cli/setting.json |
 | L07 | closed | feat | 6大工程优化全量落地(统一返回包装/批量原语/向量缓存去重/参数归一化防呆) | f3a6599 | scripts/mcp_ingest_brix.py |
@@ -44,6 +46,27 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+## [DEV-2026-10-08-12] Git仓库坐标权威锚定、双轨项目协商与自愈开户原语落地 — ✅ 闭环
+
+完成 Git 仓库坐标权威锚定、多项目双轨协商与 Agent 原生自愈开户原语落地与 QNAP 生产发布：
+1. **权威注册中心 (SSOT) 与双轨解析**: `sql/04_project_registry.sql` 建立 `shared.projects` 登记中心，支持权威 Git 坐标 (`bpfio/brix`, `bpfio/logbook`, `io/TS`) 与物理 Schema (`brix`, `logbook`, `ts`) 双轨互通解析；
+2. **Agent 原生自开户原语 (`project_init`)**: 新增 `project_init(repo, title, description)` MCP 工具，为 Agent 提供自开立与幂等建库能力，物理 Schema 自动规范化派生；
+3. **两态智能协商自愈**: 优化 `negotiation.py`，智能区分高相似度手滑纠偏 (`CORRECT_PROJECT_PARAMETER`) 与新项目开户指引 (`PROJECT_INIT_NEEDED`)；
+4. **工作区守卫与装饰器架构修复**: 修复无 Git 目录（如容器内 `/app`）工作区误锁定问题；将 FastMCP 工具装饰器顺序调整为 `@mcp.tool()` 在外、`@tool_shell` 在内，实现 100% 结构化错误兜底；
+5. **生产验证与回归**: 全量测试套件 41/41 全绿通过；QNAP 生产容器完成热重建与热重载；现场通过 SSH MCP 验证 `project_init(repo="io/TS")` 与 `task_upsert` / `task_query` 闭环。
+
+---
+
+## [DEV-2026-10-08-11] cliserver 本地开发机识别与 agy 全局 logbook MCP 配置核验归档 — ✅ 闭环
+
+完成 cliserver 主机身份确证与 agy 全局 logbook MCP 连通性生产核验：
+1. **主机身份确证**: 当前运行宿主机 `xhub`（`192.168.1.22` / `192.168.200.22`）即网络正典中定义的本地开发机 `cliserver`（`~/.ssh/id_ed25519.pub` 注释为 `yupeng@cliserver`，`openwrt/AGENTS.md` 明确映射 `xhub / cliserver`），当前 Agent 已原生处于该环境，本地免密互信与 sshd 均正常；
+2. **全局 MCP 配置与就绪**: `agy` 通过 `~/.gemini/config/mcp_config.json` 全局挂载 `logbook` SSH stdio 管道（`sysadmin@192.168.1.68 mcp`），状态为 `enabled`，14 个正典 MCP 原语就绪；
+3. **端到端生产 RPC 验证**: 现场调用 `logbook_brief(project='logbook')`，耗时 15ms 成功返回生产数据库简报与历史手记，证实通道 100% 可用；
+4. **状态与手记闭环**: 成功通过 `batch_upsert`、`task_upsert` (L11) 与 `devlog_record` (#27) 沉淀至生产 pgvector 向量库并完成会话存档。
+
+---
 
 ## [DEV-2026-10-08-10] Logbook 0.2.0 六病一根优化全量落地与 QNAP 生产发布验证 — ✅ 闭环
 

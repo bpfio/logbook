@@ -136,6 +136,21 @@ async def get_open_waitings_resource(project: str) -> str:
         return f"读取阻塞待办失败: {e}"
 
 
+@mcp.resource("logbook://projects")
+async def get_projects_resource() -> str:
+    """提供所有已注册项目的清单与 Git 仓库坐标。"""
+    try:
+        projs = await db.list_projects()
+        if not projs:
+            return "当前暂无已注册项目。"
+        lines = ["# Logbook 已注册项目中心", "", "| Git 仓库坐标 | 物理 Schema | 项目全称 |", "|---|---|---|"]
+        for p in projs:
+            lines.append(f"| {p.slug} | {p.schema_name} | {p.title} |")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"读取项目列表失败: {e}"
+
+
 @mcp.resource("logbook://rules/engineering")
 async def get_engineering_rules_resource() -> str:
     """提供跨项目全局统一的架构铁律与工程红线 (SSOT)。"""
@@ -238,8 +253,48 @@ def prompt_record_devlog(project: str, task_id: str) -> str:
 # 三、 Tools (动作执行面 - 强制显式传参 + 智能协商自愈)
 # =============================================================================
 
-@tool_shell
 @mcp.tool()
+@tool_shell
+async def project_init(
+    repo: str,
+    title: str,
+    description: str | None = None,
+    schema_name: str | None = None,
+) -> dict:
+    """初始化并开立新项目的 Logbook 研发台账空间 (DDL Schema 幂等创建)。
+
+    字段说明:
+    - repo: 必填。权威 Git 仓库标识 (如 'bpfio/brix', 'bpfio/logbook', 'io/TS') 或项目短名。
+    - title: 必填。项目全称或中文名称 (如 '出口退税涉税风险穿透分析与研判')。
+    - description: 可选。项目背景与核心职责简述。
+    - schema_name: 可选。指定物理 Schema 名称 (缺省由 repo 尾部名称自动安全派生)。
+    """
+    clean_repo = sanitize_text(repo).clean_text.strip()
+    clean_title = sanitize_text(title).clean_text.strip()
+    clean_desc = sanitize_text(description).clean_text.strip() if description else None
+
+    if not clean_repo or not clean_title:
+        return tool_error("INVALID_ARGUMENT", "repo 与 title 参数均为必填项，禁止为空！", tool="project_init")
+
+    proj = await db.register_project(
+        slug=clean_repo,
+        title=clean_title,
+        description=clean_desc,
+        schema_name=schema_name
+    )
+
+    return {
+        "success": True,
+        "ok": True,
+        "project": proj.schema_name,
+        "repo": proj.slug,
+        "title": proj.title,
+        "message": f"项目 [{proj.slug}] 研发台账空间已成功开通！物理 Schema: [{proj.schema_name}]"
+    }
+
+
+@mcp.tool()
+@tool_shell
 async def task_upsert(
     project: str,
     id: str,
@@ -317,8 +372,8 @@ async def task_upsert(
     return slim
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def tasks_bulk_upsert(
     project: str,
     tasks: list[dict],
@@ -388,8 +443,8 @@ async def tasks_bulk_upsert(
     return slim
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def task_query(
     project: str,
     status: list[Literal["planned", "running", "blocked", "closed", "wontfix"]] | None = None,
@@ -431,8 +486,8 @@ async def task_query(
     }
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def finding_record(
     project: str,
     id: str,
@@ -501,8 +556,8 @@ async def finding_record(
     return slim
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def finding_query(
     project: str,
     status: list[Literal["open", "infix", "fixed", "wontfix", "blocked"]] | None = None,
@@ -533,8 +588,8 @@ async def finding_query(
     }
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def waiting_query(
     project: str,
     status: list[Literal["open", "closed"]] | Literal["open", "closed"] | None = "open",
@@ -576,8 +631,8 @@ async def waiting_query(
     }
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def waiting_record(
     project: str,
     id: str,
@@ -624,8 +679,8 @@ async def waiting_record(
     return slim
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def devlog_record(
     project: str,
     title: str,
@@ -754,8 +809,8 @@ async def devlog_record(
     }
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def devlog_search(
     project: str,
     query: str,
@@ -791,8 +846,8 @@ async def devlog_search(
     }
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def rule_query(
     keyword: str | None = None,
     category: Literal["general", "network", "kernel", "database", "security", "engineering", "governance", "resource"] | None = None,
@@ -811,8 +866,8 @@ async def rule_query(
     }
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def export_markdown(project: str, output_path: str | None = None) -> str:
     """从数据库生成完全兼容 brix 格式的 DEVLOG.md，以内容字符串返回 (调用方自行落盘)。
 
@@ -836,8 +891,8 @@ async def export_markdown(project: str, output_path: str | None = None) -> str:
     return md
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def batch_upsert(
     project: str,
     id: str,
@@ -882,8 +937,8 @@ async def batch_upsert(
     return slim
 
 
-@tool_shell
 @mcp.tool()
+@tool_shell
 async def batch_query(project: str, limit: int = 20, fields: list[str] | None = None) -> dict:
     """查询项目历史研发批次演进记录与讨论复盘。强制要求显式提供 project 参数。返回标准化包装对象。
 
@@ -906,8 +961,8 @@ async def batch_query(project: str, limit: int = 20, fields: list[str] | None = 
     }
 
 
-@tool_shell
 @mcp.tool(name="logbook_brief")
+@tool_shell
 async def brief(project: str, devlog_limit: int = 5) -> dict:
     """一次调用返回项目开工简报 digest：open tasks/findings/waitings + running 批次 + 最近 N 条 devlog 标题。单包目标 ≤2K token。
 
