@@ -14,13 +14,15 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 COPY pyproject.toml README.md ./
 
 # Install dependencies into system Python
+# (与 pyproject.toml dependencies 保持一致, 新增依赖两处同步)
 RUN uv pip install --system \
     "pydantic>=2.10.0" \
     "asyncpg>=0.30.0" \
     "mcp>=1.0.0" \
     "rich>=13.8.0" \
     "httpx>=0.28.0" \
-    "asyncssh>=2.20.0"
+    "asyncssh>=2.20.0" \
+    "click>=8.1.0"
 
 # Copy application source
 COPY src/ /app/src/

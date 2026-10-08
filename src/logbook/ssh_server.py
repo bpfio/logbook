@@ -52,7 +52,7 @@ class LogbookSSHServer(asyncssh.SSHServer):
         return True
 
     async def validate_password(self, username: str, password: str) -> bool:
-        if username == DEFAULT_USER and password in (DEFAULT_PASSWORD, "rekall"):
+        if username == DEFAULT_USER and password == DEFAULT_PASSWORD:
             logger.info(f"Password authentication succeeded for '{username}'")
             return True
         logger.warning(f"Password authentication failed for '{username}'")

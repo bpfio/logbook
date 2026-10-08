@@ -33,6 +33,9 @@ env/
 *.pem
 *.key
 host_key*
+deploy/qnap/.env
+deploy/qnap/pgdata/
+deploy/qnap/data/
 deploy/qnap/compose.yaml
 
 # Testing & Caches
