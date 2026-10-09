@@ -1074,6 +1074,25 @@ class Database:
                 return None
             return AgentMessage(**dict(row))
 
+    async def get_mailbox_summary(
+        self,
+        project_id: str,
+    ) -> list[dict]:
+        """获取项目内对讲信箱的未读信件概况与最新时间戳。"""
+        await self.ensure_messaging_schema()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT to_agent,
+                       COUNT(*)::int AS unread_count,
+                       MAX(created_at) AS latest_at,
+                       array_agg(id ORDER BY id DESC) AS unread_ids
+                FROM shared.agent_messages
+                WHERE project_id = $1 AND is_read = FALSE
+                GROUP BY to_agent
+                ORDER BY latest_at DESC;
+            """, project_id)
+            return [dict(r) for r in rows]
+
     async def acquire_file_lease(
         self,
         project_id: str,
