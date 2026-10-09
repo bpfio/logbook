@@ -54,9 +54,15 @@ DECLARE
 BEGIN
     FOR r IN SELECT schema_name FROM information_schema.schemata 
              WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'public', 'shared')
+               AND schema_name NOT LIKE 'pg_%'
     LOOP
         s_name := r.schema_name;
         
+        -- 仅当目标 Schema 存在 tasks 表时执行
+        IF NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = s_name AND table_name = 'tasks') THEN
+            CONTINUE;
+        END IF;
+
         -- 追加 reviewer 字段 (默认由 zcode 验收)
         EXECUTE format('ALTER TABLE %I.tasks ADD COLUMN IF NOT EXISTS reviewer VARCHAR(64) DEFAULT ''zcode'';', s_name);
         
