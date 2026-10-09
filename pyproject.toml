@@ -1,6 +1,6 @@
 [project]
 name = "logbook"
-version = "0.3.1"
+version = "0.4.0"
 description = "Agent-Native Industrial Task Ledger, Root Cause DevLog, and Long-Term Memory Engine"
 readme = "README.md"
 requires-python = ">=3.12"

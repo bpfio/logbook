@@ -165,3 +165,61 @@ def normalize_waiting_category(val: Any, default: str = "user") -> str:
     """将输入待办类别归一化为 user/external/closing。"""
     c = clean_text(val)
     return WAITING_CATEGORY_MAP.get(c, default)
+
+
+RESEARCH_CATEGORY_MAP = {
+    "architecture": "architecture",
+    "arch": "architecture",
+    "design": "architecture",
+    "framework": "architecture",
+    "database": "database",
+    "db": "database",
+    "storage": "database",
+    "sql": "database",
+    "network": "network",
+    "net": "network",
+    "protocol": "network",
+    "kernel": "kernel",
+    "os": "kernel",
+    "bpf": "kernel",
+    "ebpf": "kernel",
+    "security": "security",
+    "sec": "security",
+    "auth": "security",
+    "library": "library",
+    "lib": "library",
+    "pkg": "library",
+    "package": "library",
+    "tooling": "tooling",
+    "tool": "tooling",
+    "tools": "tooling",
+    "ops": "tooling",
+    "deploy": "tooling",
+}
+
+RESEARCH_STATUS_MAP = {
+    "completed": "completed",
+    "done": "completed",
+    "finish": "completed",
+    "finished": "completed",
+    "in_progress": "in_progress",
+    "running": "in_progress",
+    "wip": "in_progress",
+    "active": "in_progress",
+    "deprecated": "deprecated",
+    "abandoned": "deprecated",
+    "obsolete": "deprecated",
+}
+
+
+def normalize_research_category(val: Any, default: str = "architecture") -> str:
+    """将输入调研分类归一化为正典合法的 ResearchCategory。"""
+    c = clean_text(val)
+    return RESEARCH_CATEGORY_MAP.get(c, default)
+
+
+def normalize_research_status(val: Any, default: str = "completed") -> str:
+    """将输入调研状态归一化为正典合法的 ResearchStatus。"""
+    c = clean_text(val)
+    return RESEARCH_STATUS_MAP.get(c, default)
+

@@ -79,6 +79,22 @@ class DevLogVisibility(str, Enum):
     PUBLIC_SAFE = "public_safe"          # 开源安全 (无任何私有细节)
 
 
+class ResearchCategory(str, Enum):
+    ARCHITECTURE = "architecture"
+    DATABASE = "database"
+    NETWORK = "network"
+    KERNEL = "kernel"
+    SECURITY = "security"
+    LIBRARY = "library"
+    TOOLING = "tooling"
+
+
+class ResearchStatus(str, Enum):
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    DEPRECATED = "deprecated"
+
+
 # ============================================================================
 # 实体模型
 # ============================================================================
@@ -282,4 +298,42 @@ class FileLease(BaseModel):
     file_path: str
     lease_expires_at: datetime
     created_at: datetime = Field(default_factory=get_beijing_now)
+
+
+# ============================================================================
+# 研发调研知识库模型 (0.4.0)
+# ============================================================================
+
+class Research(BaseModel):
+    id: int | None = None
+    project_id: str = Field(..., max_length=32, description="归属项目代号")
+    task_id: str | None = Field(default=None, max_length=32, description="关联任务短编号")
+    batch_id: str | None = Field(default=None, max_length=32, description="关联研发批次号")
+    title: str = Field(..., max_length=256, description="调研主题")
+    category: ResearchCategory = Field(default=ResearchCategory.ARCHITECTURE, description="技术分类")
+    author: str = Field(default="agy", max_length=64, description="调研者 Agent 或人类专家")
+    agent_ip: str = Field(default="0.0.0.0", max_length=45, description="节点 IP 溯源审计")
+    status: ResearchStatus = Field(default=ResearchStatus.COMPLETED, description="调研状态")
+
+    # 调研结构化五要素 (必填，贯彻铁律三与铁律四)
+    objective: str = Field(..., description="调研目标、问题边界与资源指标")
+    market_landscape: str = Field(..., description="成熟方案全景，主流开源库/成熟产品对比")
+    tradeoffs: str = Field(..., description="自研 vs 引入成本对比，待对抗的默认行为清单与代价")
+    decision: str = Field(..., description="最终选型结论，为什么不用自己写，设计哲学冲突规避")
+    references: str | None = Field(default=None, description="官方文档、Benchmark 数据源锚点")
+
+    visibility: DevLogVisibility = Field(default=DevLogVisibility.PROJECT_PRIVATE)
+    tags: list[str] = Field(default_factory=list)
+    embedding: list[float] | None = None
+    created_at: datetime = Field(default_factory=get_beijing_now)
+    updated_at: datetime = Field(default_factory=get_beijing_now)
+
+    @model_validator(mode="after")
+    def validate_invariants(self) -> "Research":
+        # 铁律断言：completed 状态必须具备清晰的选型决策和对抗代价评估
+        if self.status == ResearchStatus.COMPLETED:
+            if not self.decision or len(self.decision.strip()) < 10 or not self.tradeoffs or len(self.tradeoffs.strip()) < 10:
+                raise ValueError("调研铁律：标记为 completed 的调研必须具备详实的选型决策 (decision) 与对抗代价评估 (tradeoffs)！")
+        return self
+
 

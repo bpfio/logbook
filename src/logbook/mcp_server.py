@@ -25,7 +25,8 @@ from .models import (
     Waiting, WaitingStatus, WaitingCategory,
     Batch, BatchStatus,
     DevLog, DevLogVisibility, Rule,
-    AgentMessage, FileLease
+    AgentMessage, FileLease,
+    Research, ResearchCategory, ResearchStatus
 )
 from .sanitizer import sanitize_text
 from .time_sync import get_beijing_now, format_beijing
@@ -35,7 +36,8 @@ from .negotiation import validate_and_negotiate_project, ProjectNegotiationError
 from .errors import tool_error, ToolError, pg_tool_error
 from .normalizer import (
     normalize_status, normalize_task_type, normalize_priority,
-    normalize_severity, normalize_waiting_category
+    normalize_severity, normalize_waiting_category,
+    normalize_research_category, normalize_research_status
 )
 from .db import db
 # P1-1: brief digest 端点 (A1 并行开发中, 接口契约已锁 db.brief_project(project_id, devlog_limit=5) -> dict,
@@ -49,6 +51,8 @@ TaskTypeArg = Annotated[TaskType, BeforeValidator(normalize_task_type)]
 TaskPriorityArg = Annotated[TaskPriority, BeforeValidator(normalize_priority)]
 FindingSeverityArg = Annotated[FindingSeverity, BeforeValidator(normalize_severity)]
 WaitingCategoryArg = Annotated[WaitingCategory, BeforeValidator(normalize_waiting_category)]
+ResearchCategoryArg = Annotated[ResearchCategory, BeforeValidator(normalize_research_category)]
+ResearchStatusArg = Annotated[ResearchStatus, BeforeValidator(normalize_research_status)]
 
 # 创建 MCP Server 实例
 mcp = MCPServer("logbook-mcp-server")
@@ -1351,6 +1355,253 @@ async def lease_query(
         "total": len(leases),
         "leases": [l.model_dump(mode="json") for l in leases],
     }
+
+
+# =============================================================================
+# 八、 研发调研知识库工具集 (0.4.0)
+# =============================================================================
+
+@mcp.tool()
+@tool_shell
+async def research_record(
+    project: str,
+    title: str,
+    objective: str,
+    market_landscape: str,
+    tradeoffs: str,
+    decision: str,
+    references: str | None = None,
+    category: ResearchCategoryArg = ResearchCategory.ARCHITECTURE,
+    status: ResearchStatusArg = ResearchStatus.COMPLETED,
+    author: str = "agy",
+    agent_ip: str | None = None,
+    task_id: str | None = None,
+    batch_id: str | None = None,
+    visibility: Literal["project_private", "public_safe"] = "project_private",
+    tags: list[str] | None = None,
+    id: int | None = None,
+    allow_cross_project: bool = False,
+    full: bool = False,
+) -> dict:
+    """结构化录入或更新研发调研知识库 (支持语义向量与全文检索 + 强制调研五要素 + 自动脱敏)。强制要求显式提供 project 参数。支持 author 与 IP 溯源。
+
+    调研结构化五要素必填项:
+    - project: 必填。项目代号。
+    - title: 必填。调研主题 (如 'Python 高性能异步 SSH 客户端选型')。
+    - objective: 必填。【调研目标】业务诉求、问题边界与资源底线。
+    - market_landscape: 必填。【成熟方案全景】社区已有开源方案/成熟产品对比 (Star数/维护度/生产验证)。
+    - tradeoffs: 必填。【两路线评估与对抗成本】引入 vs 自研代价；对抗默认行为清单与代价。
+    - decision: 必填。【最终选型决策】选了什么、为什么不用自己写、设计哲学冲突规避策略。
+    - references: 可选。【事实依据与文献】官方文档、评测 Benchmark 链接、代码仓库锚点。
+    - category: 分类 ('architecture', 'database', 'network', 'kernel', 'security', 'library', 'tooling')。
+    - status: 调研状态 ('in_progress', 'completed', 'deprecated')。
+    - author: 调研人或责任 Agent (默认 'agy')。
+    - agent_ip: 可选。节点 IP 地址 (缺省自动探测填充)。
+    - task_id: 可选。关联任务编号。
+    - batch_id: 可选。关联批次编号。
+    - visibility: 密级 ('project_private'=项目私有, 'public_safe'=全局开源脱敏)。
+    - id: 可选。指定调研编号进行更新。
+    - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
+    - full: 可选。True 时回显全量实体。
+    """
+    try:
+        proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    caller_ip = detect_caller_ip(agent_ip)
+
+    # 强制脱敏
+    s_title = sanitize_text(title).clean_text
+    s_obj = sanitize_text(objective).clean_text
+    s_ml = sanitize_text(market_landscape).clean_text
+    s_to = sanitize_text(tradeoffs).clean_text
+    s_dec = sanitize_text(decision).clean_text
+    s_ref = sanitize_text(references).clean_text if references else None
+
+    cat_val = category.value if isinstance(category, ResearchCategory) else normalize_research_category(category)
+    st_val = status.value if isinstance(status, ResearchStatus) else normalize_research_status(status)
+
+    # 1. 检查是否存在同任务/同主题调研 (幂等查重与向量缓存复用)
+    existing = await db.find_existing_research(proj, research_id=id, task_id=task_id, title=s_title)
+    if existing:
+        content_unchanged = (
+            existing.get("title") == s_title and
+            existing.get("objective") == s_obj and
+            existing.get("market_landscape") == s_ml and
+            existing.get("tradeoffs") == s_to and
+            existing.get("decision") == s_dec
+        )
+        if content_unchanged:
+            updated = await db.update_research(
+                research_id=existing["id"],
+                title=s_title,
+                category=cat_val,
+                author=author,
+                status=st_val,
+                objective=s_obj,
+                market_landscape=s_ml,
+                tradeoffs=s_to,
+                decision=s_dec,
+                references=s_ref,
+                visibility=visibility,
+                tags=tags or [],
+                embedding=None,
+                task_id=task_id,
+                batch_id=batch_id,
+                agent_ip=caller_ip,
+            )
+            return {
+                "success": True,
+                "ok": True,
+                "research_id": updated["id"],
+                "project": proj,
+                "vector_source": "cached_skip",
+                "message": f"调研记录 [{updated['id']}] 内容未变化，已更新元数据并复用已有向量缓存"
+            }
+        else:
+            full_text = f"{s_title} {s_obj} {s_ml} {s_dec}"
+            embed_res = await get_embedding(full_text)
+            updated = await db.update_research(
+                research_id=existing["id"],
+                title=s_title,
+                category=cat_val,
+                author=author,
+                status=st_val,
+                objective=s_obj,
+                market_landscape=s_ml,
+                tradeoffs=s_to,
+                decision=s_dec,
+                references=s_ref,
+                visibility=visibility,
+                tags=tags or [],
+                embedding=embed_res.embedding,
+                task_id=task_id,
+                batch_id=batch_id,
+                agent_ip=caller_ip,
+            )
+            return {
+                "success": True,
+                "ok": True,
+                "research_id": updated["id"],
+                "project": proj,
+                "vector_source": embed_res.source,
+                "message": f"调研记录 [{updated['id']}] 内容已更新并重新生成向量索引"
+            }
+
+    # 2. 全新调研入库
+    full_text = f"{s_title} {s_obj} {s_ml} {s_dec}"
+    embed_res = await get_embedding(full_text)
+
+    research = Research(
+        project_id=proj,
+        task_id=task_id,
+        batch_id=batch_id,
+        title=s_title,
+        category=ResearchCategory(cat_val),
+        author=author,
+        agent_ip=caller_ip,
+        status=ResearchStatus(st_val),
+        objective=s_obj,
+        market_landscape=s_ml,
+        tradeoffs=s_to,
+        decision=s_dec,
+        references=s_ref,
+        visibility=DevLogVisibility(visibility),
+        tags=tags or [],
+        embedding=embed_res.embedding,
+    )
+    saved = await db.record_research(research)
+    slim = {
+        "success": True,
+        "ok": True,
+        "research_id": saved.id,
+        "project": proj,
+        "vector_source": embed_res.source,
+        "message": f"研发调研知识已成功入库 [{proj}] 并生成 512 维向量索引"
+    }
+    if full:
+        slim["research"] = saved.model_dump(mode="json")
+    return slim
+
+
+@mcp.tool()
+@tool_shell
+async def research_search(
+    project: str,
+    query: str,
+    category: Literal["architecture", "database", "network", "kernel", "security", "library", "tooling"] | None = None,
+    limit: int = 5,
+    fields: list[str] | None = None,
+) -> dict:
+    """语义向量与全文混合检索跨项目研发调研知识。开工前必查，避免重复调研。返回标准化包装对象。
+
+    - project: 必填。当前项目代号。
+    - query: 必填。检索关键词或技术问题。
+    - category: 可选。按技术分类过滤。
+    - limit: 返回条数上限 (1..200, 缺省 5, 超界自动钳制)。
+    - fields: 可选列投影，缺省回全列。
+    """
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    limit = clamp_limit(limit, maximum=QUERY_LIMIT_MAX)
+    s_query = sanitize_text(query).clean_text
+    embed_res = await get_embedding(s_query)
+
+    results = await db.search_researches(
+        project=proj,
+        query_vector=embed_res.embedding,
+        query_text=s_query if not embed_res.embedding else None,
+        category=category,
+        limit=limit
+    )
+    items = project_fields([dict(r) for r in results], fields)
+    return {
+        "success": True,
+        "project": proj,
+        "total": len(items),
+        "items": items
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def research_query(
+    project: str,
+    status: Literal["in_progress", "completed", "deprecated"] | None = None,
+    category: Literal["architecture", "database", "network", "kernel", "security", "library", "tooling"] | None = None,
+    limit: int = 20,
+    fields: list[str] | None = None,
+) -> dict:
+    """列表与看板查询研发调研记录。返回标准化包装对象。
+
+    - project: 必填。项目代号。
+    - status: 可选。调研状态过滤。
+    - category: 可选。技术分类过滤。
+    - limit: 返回条数上限 (1..200, 缺省 20, 超界自动钳制)。
+    - fields: 可选列投影，缺省回全列。
+    """
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    limit = clamp_limit(limit)
+    st_enum = ResearchStatus(normalize_research_status(status)) if status else None
+    cat_enum = ResearchCategory(normalize_research_category(category)) if category else None
+
+    researches = await db.query_researches(proj, status=st_enum, category=cat_enum, limit=limit)
+    items = project_fields([r.model_dump(mode="json") for r in researches], fields)
+    return {
+        "success": True,
+        "project": proj,
+        "total": len(items),
+        "items": items
+    }
+
 
 
 def run_stdio():

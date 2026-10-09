@@ -19,7 +19,8 @@ from .models import (
     DevLog, DevLogVisibility,
     Rule,
     Project, slug_to_schema_name,
-    AgentMessage, FileLease
+    AgentMessage, FileLease,
+    Research, ResearchCategory, ResearchStatus
 )
 from .time_sync import get_beijing_now
 
@@ -1139,5 +1140,284 @@ class Database:
             """, project_id)
             return [FileLease(**dict(r)) for r in rows]
 
+    # =========================================================================
+    # 研发调研知识库 (0.4.0)
+    # =========================================================================
+
+    async def ensure_researches_schema(self):
+        """确保 shared.researches 物理表及索引存在 (幂等自愈)。"""
+        await self.connect()
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                CREATE EXTENSION IF NOT EXISTS vector;
+                CREATE EXTENSION IF NOT EXISTS pg_trgm;
+                CREATE TABLE IF NOT EXISTS shared.researches (
+                    id BIGSERIAL PRIMARY KEY,
+                    project_id VARCHAR(32) NOT NULL,
+                    task_id VARCHAR(32),
+                    batch_id VARCHAR(32),
+                    title VARCHAR(256) NOT NULL,
+                    category VARCHAR(32) NOT NULL DEFAULT 'architecture',
+                    author VARCHAR(64) NOT NULL DEFAULT 'agy',
+                    agent_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0',
+                    status VARCHAR(16) NOT NULL DEFAULT 'completed',
+                    objective TEXT NOT NULL,
+                    market_landscape TEXT NOT NULL,
+                    tradeoffs TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    "references" TEXT,
+                    visibility VARCHAR(16) NOT NULL DEFAULT 'project_private',
+                    tags VARCHAR(32)[] DEFAULT '{}',
+                    embedding vector(512),
+                    tsv_content tsvector GENERATED ALWAYS AS (
+                        to_tsvector('simple', title || ' ' || objective || ' ' || market_landscape || ' ' || decision)
+                    ) STORED,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS agent_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
+                ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS batch_id VARCHAR(32);
+                ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS "references" TEXT;
+                CREATE INDEX IF NOT EXISTS idx_researches_project_vis ON shared.researches(project_id, visibility);
+                CREATE INDEX IF NOT EXISTS idx_researches_agent_ip ON shared.researches(project_id, agent_ip);
+                CREATE INDEX IF NOT EXISTS idx_researches_category ON shared.researches(category);
+                CREATE INDEX IF NOT EXISTS idx_researches_status ON shared.researches(status);
+                CREATE INDEX IF NOT EXISTS idx_researches_tsv ON shared.researches USING gin(tsv_content);
+                CREATE INDEX IF NOT EXISTS idx_researches_vector_hnsw ON shared.researches USING hnsw (embedding vector_cosine_ops)
+                    WITH (m = 16, ef_construction = 64);
+            """)
+
+    async def find_existing_research(
+        self,
+        project_id: str,
+        research_id: int | None = None,
+        task_id: str | None = None,
+        title: str | None = None
+    ) -> dict | None:
+        """根据 id / task_id / title 查找现有调研记录 (幂等查重与向量缓存复用)。"""
+        await self.ensure_researches_schema()
+        async with self._pool.acquire() as conn:
+            if research_id:
+                row = await conn.fetchrow("SELECT * FROM shared.researches WHERE id = $1;", research_id)
+                if row:
+                    return dict(row)
+            if task_id:
+                row = await conn.fetchrow(
+                    "SELECT * FROM shared.researches WHERE project_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1;",
+                    project_id, task_id
+                )
+                if row:
+                    return dict(row)
+            if title:
+                row = await conn.fetchrow(
+                    "SELECT * FROM shared.researches WHERE project_id = $1 AND title = $2 ORDER BY id DESC LIMIT 1;",
+                    project_id, title
+                )
+                if row:
+                    return dict(row)
+            return None
+
+    async def record_research(self, research: Research) -> Research:
+        """持久化全新调研知识 (支持 512 维向量索引)。"""
+        await self.ensure_researches_schema()
+        vec_literal = None
+        if research.embedding:
+            vec_literal = f"[{','.join(str(x) for x in research.embedding)}]"
+        query = """
+            INSERT INTO shared.researches (
+                project_id, task_id, batch_id, title, category, author, agent_ip, status,
+                objective, market_landscape, tradeoffs, decision, "references",
+                visibility, tags, embedding, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::vector, $17, $18)
+            RETURNING id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
+                      objective, market_landscape, tradeoffs, decision, "references",
+                      visibility, tags, created_at, updated_at;
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                query,
+                research.project_id, research.task_id, research.batch_id, research.title,
+                research.category.value if isinstance(research.category, ResearchCategory) else str(research.category),
+                research.author, research.agent_ip,
+                research.status.value if isinstance(research.status, ResearchStatus) else str(research.status),
+                research.objective, research.market_landscape, research.tradeoffs, research.decision, research.references,
+                research.visibility.value if isinstance(research.visibility, DevLogVisibility) else str(research.visibility),
+                research.tags, vec_literal, research.created_at, research.updated_at
+            )
+            res = dict(row)
+            res["embedding"] = research.embedding
+            return Research(**res)
+
+    async def update_research(
+        self,
+        research_id: int,
+        title: str,
+        category: str,
+        author: str,
+        status: str,
+        objective: str,
+        market_landscape: str,
+        tradeoffs: str,
+        decision: str,
+        references: str | None,
+        visibility: str,
+        tags: list[str],
+        embedding: list[float] | None = None,
+        task_id: str | None = None,
+        batch_id: str | None = None,
+        agent_ip: str = "0.0.0.0",
+    ) -> dict:
+        """更新已有调研手记。若 embedding 为 None，保留原有向量。"""
+        await self.ensure_researches_schema()
+        async with self._pool.acquire() as conn:
+            if embedding is not None:
+                vec_literal = f"[{','.join(str(x) for x in embedding)}]"
+                sql = """
+                    UPDATE shared.researches
+                    SET title = $2, category = $3, author = $4, status = $5, objective = $6,
+                        market_landscape = $7, tradeoffs = $8, decision = $9, "references" = $10,
+                        visibility = $11, tags = $12, task_id = $13, batch_id = $14,
+                        embedding = $15::vector, agent_ip = $16, updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
+                              objective, market_landscape, tradeoffs, decision, "references",
+                              visibility, tags, created_at, updated_at;
+                """
+                row = await conn.fetchrow(
+                    sql, research_id, title, category, author, status, objective,
+                    market_landscape, tradeoffs, decision, references, visibility, tags,
+                    task_id, batch_id, vec_literal, agent_ip
+                )
+            else:
+                sql = """
+                    UPDATE shared.researches
+                    SET title = $2, category = $3, author = $4, status = $5, objective = $6,
+                        market_landscape = $7, tradeoffs = $8, decision = $9, "references" = $10,
+                        visibility = $11, tags = $12, task_id = $13, batch_id = $14,
+                        agent_ip = $15, updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
+                              objective, market_landscape, tradeoffs, decision, "references",
+                              visibility, tags, created_at, updated_at;
+                """
+                row = await conn.fetchrow(
+                    sql, research_id, title, category, author, status, objective,
+                    market_landscape, tradeoffs, decision, references, visibility, tags,
+                    task_id, batch_id, agent_ip
+                )
+            return dict(row)
+
+    async def search_researches(
+        self,
+        project: str,
+        query_vector: list[float] | None = None,
+        query_text: str | None = None,
+        category: str | None = None,
+        limit: int = 5
+    ) -> list[dict]:
+        """语义向量与全文混合检索跨项目调研经验。受 visibility 密级防线保护。"""
+        await self.ensure_researches_schema()
+        limit = self._clamp_limit(limit, default=5)
+        fetch_limit = min(limit * 3, MAX_LIMIT)
+        async with self._pool.acquire() as conn:
+            conditions = ["(project_id = $1 OR visibility = 'public_safe')"]
+            params: list[Any] = [project]
+
+            if category:
+                params.append(category)
+                conditions.append(f"category = ${len(params)}")
+
+            where_clause = " AND ".join(conditions)
+
+            if query_vector:
+                vec_literal = f"[{','.join(str(x) for x in query_vector)}]"
+                params.append(vec_literal)
+                vec_idx = len(params)
+                params.append(fetch_limit)
+                lim_idx = len(params)
+                sql = f"""
+                    SELECT id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
+                           objective, market_landscape, tradeoffs, decision, "references",
+                           visibility, tags, created_at, updated_at,
+                           (1 - (embedding <=> ${vec_idx}::vector)) AS score
+                    FROM shared.researches
+                    WHERE {where_clause} AND embedding IS NOT NULL
+                    ORDER BY embedding <=> ${vec_idx}::vector
+                    LIMIT ${lim_idx};
+                """
+                rows = await conn.fetch(sql, *params)
+            elif query_text:
+                params.append(query_text)
+                txt_idx = len(params)
+                params.append(fetch_limit)
+                lim_idx = len(params)
+                sql = f"""
+                    SELECT id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
+                           objective, market_landscape, tradeoffs, decision, "references",
+                           visibility, tags, created_at, updated_at,
+                           ts_rank_cd(tsv_content, plainto_tsquery('simple', ${txt_idx})) AS score
+                    FROM shared.researches
+                    WHERE {where_clause} AND tsv_content @@ plainto_tsquery('simple', ${txt_idx})
+                    ORDER BY score DESC
+                    LIMIT ${lim_idx};
+                """
+                rows = await conn.fetch(sql, *params)
+            else:
+                params.append(fetch_limit)
+                lim_idx = len(params)
+                sql = f"""
+                    SELECT id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
+                           objective, market_landscape, tradeoffs, decision, "references",
+                           visibility, tags, created_at, updated_at, 1.0 AS score
+                    FROM shared.researches
+                    WHERE {where_clause}
+                    ORDER BY updated_at DESC
+                    LIMIT ${lim_idx};
+                """
+                rows = await conn.fetch(sql, *params)
+
+            seen: dict[tuple, dict] = {}
+            for r in rows:
+                d = dict(r)
+                key = (d.get("task_id"), d.get("title"))
+                if key not in seen or (d.get("score") or 0) > (seen[key].get("score") or 0):
+                    seen[key] = d
+            return list(seen.values())[:limit]
+
+    async def query_researches(
+        self,
+        project: str,
+        status: ResearchStatus | None = None,
+        category: ResearchCategory | None = None,
+        limit: int = 20
+    ) -> list[Research]:
+        """列表查询项目调研项。"""
+        await self.ensure_researches_schema()
+        limit = self._clamp_limit(limit, default=20)
+        conditions = ["(project_id = $1 OR visibility = 'public_safe')"]
+        params: list[Any] = [project]
+
+        if status:
+            params.append(status.value if isinstance(status, ResearchStatus) else str(status))
+            conditions.append(f"status = ${len(params)}")
+        if category:
+            params.append(category.value if isinstance(category, ResearchCategory) else str(category))
+            conditions.append(f"category = ${len(params)}")
+
+        params.append(limit)
+        query = f"""
+            SELECT id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
+                   objective, market_landscape, tradeoffs, decision, "references",
+                   visibility, tags, created_at, updated_at
+            FROM shared.researches
+            WHERE {" AND ".join(conditions)}
+            ORDER BY created_at DESC
+            LIMIT ${len(params)};
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [Research(**dict(r)) for r in rows]
+
 
 db = Database()
+
