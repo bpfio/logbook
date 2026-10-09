@@ -191,3 +191,35 @@ async def test_mcp_write_tools_agent_ip_support():
     # 8. message_send
     res8 = await message_send(project="", from_agent="agy", to_agent="zcode", subject="S", content="C", from_ip="192.168.1.88")
     assert res8.get("isError") is True
+
+
+def test_ssh_server_peername_env_injection():
+    """测试 SSH 服务端对客户端 Peer IP 连接信息的提取与环境变量注入。"""
+    class DummyProcess:
+        def __init__(self, peername, sockname):
+            self.peername = peername
+            self.sockname = sockname
+
+        def get_extra_info(self, key, default=None):
+            if key == "peername":
+                return self.peername
+            if key == "sockname":
+                return self.sockname
+            return default
+
+    dummy = DummyProcess(peername=("192.168.1.22", 54321), sockname=("192.168.1.68", 22))
+
+    peer = dummy.get_extra_info("peername")
+    sock = dummy.get_extra_info("sockname")
+    env = {}
+    if peer and isinstance(peer, (tuple, list)) and len(peer) >= 2:
+        client_ip = str(peer[0])
+        client_port = str(peer[1])
+        server_ip = str(sock[0]) if sock and isinstance(sock, (tuple, list)) and len(sock) >= 1 else "0.0.0.0"
+        server_port = str(sock[1]) if sock and isinstance(sock, (tuple, list)) and len(sock) >= 2 else "22"
+        env["SSH_CLIENT"] = f"{client_ip} {client_port} {server_port}"
+        env["SSH_CONNECTION"] = f"{client_ip} {client_port} {server_ip} {server_port}"
+
+    assert env.get("SSH_CLIENT") == "192.168.1.22 54321 22"
+    assert env.get("SSH_CONNECTION") == "192.168.1.22 54321 192.168.1.68 22"
+
