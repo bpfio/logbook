@@ -91,6 +91,7 @@ class Task(BaseModel):
     status: TaskStatus = Field(default=TaskStatus.PLANNED)
     assignee: str | None = Field(default="agy", max_length=64, description="责任主体/Agent，如 agy, yupeng")
     reviewer: str | None = Field(default="zcode", max_length=64, description="质检/验收 Agent，如 zcode, agy")
+    agent_ip: str = Field(default="0.0.0.0", max_length=45, description="操作/登记该任务的 Agent 节点 IP")
     parent_id: str | None = Field(default=None, max_length=32, description="父任务短编号，支持两级树形解耦")
     commit_hash: str | None = Field(default=None, max_length=128)
     proof_link: str | None = Field(default=None, max_length=512)
@@ -133,6 +134,7 @@ class Finding(BaseModel):
     status: FindingStatus = Field(default=FindingStatus.OPEN)
     task_id: str | None = Field(default=None, max_length=32, description="处置责任任务 ID")
     reporter: str = Field(default="audit", max_length=64, description="发现人或工具来源")
+    agent_ip: str = Field(default="0.0.0.0", max_length=45, description="上报该缺陷的 Agent 节点 IP")
     summary: str = Field(..., description="缺陷现象与机理描述")
     resolution: str | None = Field(default=None, description="处置说明与备案结论")
     discovered_at: datetime = Field(default_factory=get_beijing_now)
@@ -144,6 +146,7 @@ class Waiting(BaseModel):
     category: WaitingCategory = Field(default=WaitingCategory.USER)
     status: WaitingStatus = Field(default=WaitingStatus.OPEN)
     owner: str = Field(default="user", max_length=64, description="等待裁决责任人或外部主体")
+    agent_ip: str = Field(default="0.0.0.0", max_length=45, description="登记/更新该待办的 Agent 节点 IP")
     description: str = Field(..., description="事项描述")
     resolution: str | None = Field(default=None, description="裁决与办结记录")
     blocked_at: datetime = Field(default_factory=get_beijing_now)
@@ -155,6 +158,7 @@ class Batch(BaseModel):
     title: str = Field(..., max_length=256)
     status: BatchStatus = Field(default=BatchStatus.RUNNING)
     branch_name: str | None = Field(default=None, max_length=128)
+    agent_ip: str = Field(default="0.0.0.0", max_length=45, description="开立/维护该批次的 Agent 节点 IP")
     summary: str | None = None
     methodology_notes: str | None = Field(default=None, description="排障方法论三则与会话收口经验")
     created_at: datetime = Field(default_factory=get_beijing_now)
@@ -167,6 +171,7 @@ class DevLog(BaseModel):
     task_id: str | None = Field(default=None, max_length=32)
     title: str = Field(..., max_length=256)
     author: str = Field(default="agy", max_length=64, description="记录者 Agent 或人类专家")
+    agent_ip: str = Field(default="0.0.0.0", max_length=45, description="撰写手记的 Agent 节点 IP")
     # 根因四要素 (必填)
     problem: str = Field(..., description="故障现象与具体复现路径")
     root_cause: str = Field(..., description="机理定位与内核/代码行穿透分析")
@@ -264,6 +269,7 @@ class AgentMessage(AgentMessageSend):
 class FileLeaseAcquire(BaseModel):
     project_id: str = Field(..., max_length=32, description="归属项目代号")
     agent_name: str = Field(..., max_length=64, description="申请租约的 Agent")
+    agent_ip: str = Field(default="0.0.0.0", max_length=45, description="申请租约的节点 IP 地址")
     file_path: str = Field(..., max_length=512, description="文件相对路径")
     duration_seconds: int = Field(default=300, ge=10, le=3600, description="租约有效时长 (秒，默认 5 分钟)")
 
@@ -272,6 +278,7 @@ class FileLease(BaseModel):
     id: int
     project_id: str
     agent_name: str
+    agent_ip: str = Field(default="0.0.0.0", max_length=45, description="持锁 Agent 节点 IP")
     file_path: str
     lease_expires_at: datetime
     created_at: datetime = Field(default_factory=get_beijing_now)

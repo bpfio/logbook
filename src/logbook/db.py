@@ -234,9 +234,9 @@ class Database:
         query = f"""
             INSERT INTO "{project}".tasks (
                 id, batch_id, parent_id, title, task_type, priority, status,
-                assignee, commit_hash, proof_link, notes, tags, created_at, updated_at, started_at, closed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                $13, $14, COALESCE($15, CASE WHEN $17 = 'closed' THEN NOW() END), $16)
+                assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags, created_at, updated_at, started_at, closed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                $15, $16, COALESCE($17, CASE WHEN $19 = 'closed' THEN NOW() END), $18)
             ON CONFLICT (id) DO UPDATE SET
                 batch_id = EXCLUDED.batch_id,
                 parent_id = EXCLUDED.parent_id,
@@ -245,6 +245,8 @@ class Database:
                 priority = EXCLUDED.priority,
                 status = EXCLUDED.status,
                 assignee = EXCLUDED.assignee,
+                reviewer = EXCLUDED.reviewer,
+                agent_ip = EXCLUDED.agent_ip,
                 commit_hash = EXCLUDED.commit_hash,
                 proof_link = EXCLUDED.proof_link,
                 notes = EXCLUDED.notes,
@@ -257,20 +259,21 @@ class Database:
                 ),
                 closed_at = COALESCE("{project}".tasks.closed_at, EXCLUDED.closed_at)
             RETURNING id, batch_id, parent_id, title, task_type, priority, status,
-                      assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
+                      assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags, created_at, updated_at,
                       started_at, closed_at, duration_seconds;
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
                 task.id, task.batch_id, task.parent_id, task.title, task.task_type.value, task.priority.value, task.status.value,
-                task.assignee, task.commit_hash, task.proof_link, task.notes, task.tags, task.created_at, task.updated_at, task.started_at, task.closed_at,
+                task.assignee, task.reviewer, task.agent_ip, task.commit_hash, task.proof_link, task.notes, task.tags,
+                task.created_at, task.updated_at, task.started_at, task.closed_at,
                 task.status.value
             )
-            # 记录时间线流 (精确记录 from_status -> to_status)
+            # 记录时间线流 (精确记录 from_status -> to_status 及 operator / agent_ip)
             await conn.execute(
-                f'INSERT INTO "{project}".task_timeline (task_id, from_status, to_status, operator, occurred_at) VALUES ($1, $2, $3, $4, $5)',
-                task.id, from_status, task.status.value, operator, get_beijing_now()
+                f'INSERT INTO "{project}".task_timeline (task_id, from_status, to_status, operator, agent_ip, occurred_at) VALUES ($1, $2, $3, $4, $5, $6)',
+                task.id, from_status, task.status.value, operator, task.agent_ip, get_beijing_now()
             )
             return Task(**dict(row))
 
@@ -315,7 +318,7 @@ class Database:
         params.append(limit)
         query = f"""
             SELECT id, batch_id, parent_id, title, task_type, priority, status,
-                   assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
+                   assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags, created_at, updated_at,
                    started_at, closed_at, duration_seconds
             FROM "{project}".tasks
             WHERE {" AND ".join(conditions)}
@@ -330,7 +333,7 @@ class Database:
         await self.ensure_project(project)
         query = f"""
             SELECT id, batch_id, parent_id, title, task_type, priority, status,
-                   assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
+                   assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags, created_at, updated_at,
                    started_at, closed_at, duration_seconds
             FROM "{project}".tasks
             WHERE id = $1;
@@ -347,11 +350,11 @@ class Database:
         query = f"""
             INSERT INTO "{project}".tasks (
                 id, batch_id, parent_id, title, task_type, priority, status,
-                assignee, commit_hash, proof_link, notes, tags,
+                assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags,
                 created_at, updated_at, started_at, closed_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                $13, $14, COALESCE($15, CASE WHEN $17 = 'closed' THEN NOW() END), $16
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                $15, $16, COALESCE($17, CASE WHEN $19 = 'closed' THEN NOW() END), $18
             )
             ON CONFLICT (id) DO UPDATE SET
                 batch_id = COALESCE(EXCLUDED.batch_id, "{project}".tasks.batch_id),
@@ -361,6 +364,8 @@ class Database:
                 priority = EXCLUDED.priority,
                 status = EXCLUDED.status,
                 assignee = EXCLUDED.assignee,
+                reviewer = EXCLUDED.reviewer,
+                agent_ip = EXCLUDED.agent_ip,
                 commit_hash = COALESCE(EXCLUDED.commit_hash, "{project}".tasks.commit_hash),
                 proof_link = COALESCE(EXCLUDED.proof_link, "{project}".tasks.proof_link),
                 notes = COALESCE(EXCLUDED.notes, "{project}".tasks.notes),
@@ -373,7 +378,7 @@ class Database:
                 ),
                 closed_at = COALESCE("{project}".tasks.closed_at, EXCLUDED.closed_at)
             RETURNING id, batch_id, parent_id, title, task_type, priority, status,
-                      assignee, commit_hash, proof_link, notes, tags, created_at, updated_at,
+                      assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags, created_at, updated_at,
                       started_at, closed_at, duration_seconds;
         """
         results = []
@@ -383,7 +388,7 @@ class Database:
                     row = await conn.fetchrow(
                         query,
                         t.id, t.batch_id, t.parent_id, t.title, t.task_type.value, t.priority.value, t.status.value,
-                        t.assignee, t.commit_hash, t.proof_link, t.notes, t.tags,
+                        t.assignee, t.reviewer, t.agent_ip, t.commit_hash, t.proof_link, t.notes, t.tags,
                         t.created_at, t.updated_at, t.started_at, t.closed_at,
                         t.status.value
                     )
@@ -398,14 +403,15 @@ class Database:
         await self.ensure_project(project)
         query = f"""
             INSERT INTO "{project}".findings (
-                id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                id, source, severity, status, task_id, reporter, agent_ip, summary, resolution, discovered_at, resolved_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (id) DO UPDATE SET
                 source = EXCLUDED.source,
                 severity = EXCLUDED.severity,
                 status = EXCLUDED.status,
                 task_id = EXCLUDED.task_id,
                 reporter = EXCLUDED.reporter,
+                agent_ip = EXCLUDED.agent_ip,
                 summary = EXCLUDED.summary,
                 resolution = EXCLUDED.resolution,
                 resolved_at = CASE
@@ -413,13 +419,13 @@ class Database:
                         THEN COALESCE("{project}".findings.resolved_at, EXCLUDED.resolved_at, NOW())
                     ELSE NULL
                 END
-            RETURNING id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at;
+            RETURNING id, source, severity, status, task_id, reporter, agent_ip, summary, resolution, discovered_at, resolved_at;
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
                 finding.id, finding.source, finding.severity.value, finding.status.value,
-                finding.task_id, finding.reporter, finding.summary, finding.resolution,
+                finding.task_id, finding.reporter, finding.agent_ip, finding.summary, finding.resolution,
                 finding.discovered_at, finding.resolved_at
             )
             return Finding(**dict(row))
@@ -448,7 +454,7 @@ class Database:
         limit = self._clamp_limit(limit)
         params.append(limit)
         query = f"""
-            SELECT id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at
+            SELECT id, source, severity, status, task_id, reporter, agent_ip, summary, resolution, discovered_at, resolved_at
             FROM "{project}".findings
             WHERE {" AND ".join(conditions)}
             ORDER BY discovered_at DESC
@@ -465,14 +471,15 @@ class Database:
             return []
         query = f"""
             INSERT INTO "{project}".findings (
-                id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                id, source, severity, status, task_id, reporter, agent_ip, summary, resolution, discovered_at, resolved_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (id) DO UPDATE SET
                 source = EXCLUDED.source,
                 severity = EXCLUDED.severity,
                 status = EXCLUDED.status,
                 task_id = EXCLUDED.task_id,
                 reporter = EXCLUDED.reporter,
+                agent_ip = EXCLUDED.agent_ip,
                 summary = EXCLUDED.summary,
                 resolution = EXCLUDED.resolution,
                 resolved_at = CASE
@@ -480,7 +487,7 @@ class Database:
                         THEN COALESCE("{project}".findings.resolved_at, EXCLUDED.resolved_at, NOW())
                     ELSE NULL
                 END
-            RETURNING id, source, severity, status, task_id, reporter, summary, resolution, discovered_at, resolved_at;
+            RETURNING id, source, severity, status, task_id, reporter, agent_ip, summary, resolution, discovered_at, resolved_at;
         """
         results = []
         async with self._pool.acquire() as conn:
@@ -489,7 +496,7 @@ class Database:
                     row = await conn.fetchrow(
                         query,
                         f.id, f.source, f.severity.value, f.status.value,
-                        f.task_id, f.reporter, f.summary, f.resolution,
+                        f.task_id, f.reporter, f.agent_ip, f.summary, f.resolution,
                         f.discovered_at, f.resolved_at
                     )
                     results.append(Finding(**dict(row)))
@@ -503,12 +510,13 @@ class Database:
         await self.ensure_project(project)
         query = f"""
             INSERT INTO "{project}".waitings (
-                id, category, status, owner, description, resolution, blocked_at, resolved_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                id, category, status, owner, agent_ip, description, resolution, blocked_at, resolved_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (id) DO UPDATE SET
                 category = EXCLUDED.category,
                 status = EXCLUDED.status,
                 owner = EXCLUDED.owner,
+                agent_ip = EXCLUDED.agent_ip,
                 description = EXCLUDED.description,
                 resolution = EXCLUDED.resolution,
                 resolved_at = CASE
@@ -516,13 +524,14 @@ class Database:
                         THEN COALESCE("{project}".waitings.resolved_at, EXCLUDED.resolved_at, NOW())
                     ELSE NULL
                 END
-            RETURNING id, category, status, owner, description, resolution, blocked_at, resolved_at;
+            RETURNING id, category, status, owner, agent_ip, description, resolution, blocked_at, resolved_at;
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
                 waiting.id, waiting.category.value, waiting.status.value, waiting.owner,
-                waiting.description, waiting.resolution, waiting.blocked_at, waiting.resolved_at
+                waiting.agent_ip, waiting.description, waiting.resolution,
+                waiting.blocked_at, waiting.resolved_at
             )
             return Waiting(**dict(row))
 
@@ -544,7 +553,7 @@ class Database:
         limit = self._clamp_limit(limit)
         params.append(limit)
         query = f"""
-            SELECT id, category, status, owner, description, resolution, blocked_at, resolved_at
+            SELECT id, category, status, owner, agent_ip, description, resolution, blocked_at, resolved_at
             FROM "{project}".waitings
             WHERE {" AND ".join(conditions)}
             ORDER BY blocked_at DESC
@@ -561,12 +570,13 @@ class Database:
             return []
         query = f"""
             INSERT INTO "{project}".waitings (
-                id, category, status, owner, description, resolution, blocked_at, resolved_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                id, category, status, owner, agent_ip, description, resolution, blocked_at, resolved_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (id) DO UPDATE SET
                 category = EXCLUDED.category,
                 status = EXCLUDED.status,
                 owner = EXCLUDED.owner,
+                agent_ip = EXCLUDED.agent_ip,
                 description = EXCLUDED.description,
                 resolution = EXCLUDED.resolution,
                 resolved_at = CASE
@@ -574,7 +584,7 @@ class Database:
                         THEN COALESCE("{project}".waitings.resolved_at, EXCLUDED.resolved_at, NOW())
                     ELSE NULL
                 END
-            RETURNING id, category, status, owner, description, resolution, blocked_at, resolved_at;
+            RETURNING id, category, status, owner, agent_ip, description, resolution, blocked_at, resolved_at;
         """
         results = []
         async with self._pool.acquire() as conn:
@@ -583,7 +593,8 @@ class Database:
                     row = await conn.fetchrow(
                         query,
                         w.id, w.category.value, w.status.value, w.owner,
-                        w.description, w.resolution, w.blocked_at, w.resolved_at
+                        w.agent_ip, w.description, w.resolution,
+                        w.blocked_at, w.resolved_at
                     )
                     results.append(Waiting(**dict(row)))
         return results
@@ -596,22 +607,23 @@ class Database:
         await self.ensure_project(project)
         query = f"""
             INSERT INTO "{project}".batches (
-                id, title, status, branch_name, summary, methodology_notes, created_at, closed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                id, title, status, branch_name, summary, methodology_notes, agent_ip, created_at, closed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (id) DO UPDATE SET
                 title = EXCLUDED.title,
                 status = EXCLUDED.status,
                 branch_name = EXCLUDED.branch_name,
                 summary = EXCLUDED.summary,
                 methodology_notes = EXCLUDED.methodology_notes,
+                agent_ip = EXCLUDED.agent_ip,
                 closed_at = EXCLUDED.closed_at
-            RETURNING id, title, status, branch_name, summary, methodology_notes, created_at, closed_at;
+            RETURNING id, title, status, branch_name, summary, methodology_notes, agent_ip, created_at, closed_at;
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 query,
                 batch.id, batch.title, batch.status.value, batch.branch_name,
-                batch.summary, batch.methodology_notes, batch.created_at, batch.closed_at
+                batch.summary, batch.methodology_notes, batch.agent_ip, batch.created_at, batch.closed_at
             )
             return Batch(**dict(row))
 
@@ -619,7 +631,7 @@ class Database:
         await self.ensure_project(project)
         limit = self._clamp_limit(limit, default=20)
         query = f"""
-            SELECT id, title, status, branch_name, summary, methodology_notes, created_at, closed_at
+            SELECT id, title, status, branch_name, summary, methodology_notes, agent_ip, created_at, closed_at
             FROM "{project}".batches
             ORDER BY created_at DESC
             LIMIT {limit};
@@ -648,11 +660,12 @@ class Database:
 
         query = """
             INSERT INTO shared.devlogs (
-                project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
                 visibility, tags, embedding, occurred_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::vector, $12, $13, $14)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::vector, $13, $14, $15)
             ON CONFLICT (project_id, COALESCE(task_id, ''), title) DO UPDATE SET
                 author = EXCLUDED.author,
+                agent_ip = EXCLUDED.agent_ip,
                 problem = EXCLUDED.problem,
                 root_cause = EXCLUDED.root_cause,
                 solution = EXCLUDED.solution,
@@ -661,7 +674,7 @@ class Database:
                 tags = EXCLUDED.tags,
                 embedding = COALESCE(EXCLUDED.embedding, shared.devlogs.embedding),
                 updated_at = NOW()
-            RETURNING id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+            RETURNING id, project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
                       visibility, tags, occurred_at, created_at, updated_at;
         """
         async with self._pool.acquire() as conn:
@@ -675,7 +688,7 @@ class Database:
                 )
                 row = await conn.fetchrow(
                     query,
-                    devlog.project_id, devlog.task_id, devlog.title, devlog.author,
+                    devlog.project_id, devlog.task_id, devlog.title, devlog.author, devlog.agent_ip,
                     devlog.problem, devlog.root_cause, devlog.solution, devlog.evidence,
                     devlog.visibility.value, devlog.tags, vec_literal,
                     devlog.occurred_at, devlog.created_at, devlog.updated_at
@@ -734,6 +747,7 @@ class Database:
         tags: list[str],
         embedding: list[float] | None = None,
         task_id: str | None = None,
+        agent_ip: str = "0.0.0.0",
     ) -> dict:
         """更新已有手记。若 embedding 为 None，则保留原有向量不覆盖。"""
         await self.connect()
@@ -744,28 +758,28 @@ class Database:
                     UPDATE shared.devlogs
                     SET title = $2, author = $3, problem = $4, root_cause = $5,
                         solution = $6, evidence = $7, visibility = $8, tags = $9,
-                        task_id = $10, embedding = $11::vector, updated_at = NOW()
+                        task_id = $10, embedding = $11::vector, agent_ip = $12, updated_at = NOW()
                     WHERE id = $1
-                    RETURNING id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                    RETURNING id, project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
                               visibility, tags, occurred_at, created_at, updated_at;
                 """
                 row = await conn.fetchrow(
                     sql, devlog_id, title, author, problem, root_cause,
-                    solution, evidence, visibility, tags, task_id, vec_literal
+                    solution, evidence, visibility, tags, task_id, vec_literal, agent_ip
                 )
             else:
                 sql = """
                     UPDATE shared.devlogs
                     SET title = $2, author = $3, problem = $4, root_cause = $5,
                         solution = $6, evidence = $7, visibility = $8, tags = $9,
-                        task_id = $10, updated_at = NOW()
+                        task_id = $10, agent_ip = $11, updated_at = NOW()
                     WHERE id = $1
-                    RETURNING id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                    RETURNING id, project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
                               visibility, tags, occurred_at, created_at, updated_at;
                 """
                 row = await conn.fetchrow(
                     sql, devlog_id, title, author, problem, root_cause,
-                    solution, evidence, visibility, tags, task_id
+                    solution, evidence, visibility, tags, task_id, agent_ip
                 )
             return dict(row)
 
@@ -787,7 +801,7 @@ class Database:
             if query_vector:
                 vec_literal = f"[{','.join(str(x) for x in query_vector)}]"
                 sql = f"""
-                    SELECT id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                    SELECT id, project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
                            visibility, tags, occurred_at, created_at, updated_at,
                            (1 - (embedding <=> $2::vector)) AS score
                     FROM shared.devlogs
@@ -798,7 +812,7 @@ class Database:
                 rows = await conn.fetch(sql, project, vec_literal, fetch_limit)
             elif query_text:
                 sql = f"""
-                    SELECT id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                    SELECT id, project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
                            visibility, tags, occurred_at, created_at, updated_at,
                            ts_rank_cd(tsv_content, plainto_tsquery('simple', $2)) AS score
                     FROM shared.devlogs
@@ -809,7 +823,7 @@ class Database:
                 rows = await conn.fetch(sql, project, query_text, fetch_limit)
             else:
                 sql = f"""
-                    SELECT id, project_id, task_id, title, author, problem, root_cause, solution, evidence,
+                    SELECT id, project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
                            visibility, tags, occurred_at, created_at, updated_at, 1.0 AS score
                     FROM shared.devlogs
                     WHERE {vis_cond}
@@ -972,13 +986,17 @@ class Database:
                     id BIGSERIAL PRIMARY KEY,
                     project_id VARCHAR(32) NOT NULL,
                     agent_name VARCHAR(64) NOT NULL,
+                    agent_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0',
                     file_path VARCHAR(512) NOT NULL,
                     lease_expires_at TIMESTAMPTZ NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     CONSTRAINT uq_project_file_lease UNIQUE (project_id, file_path)
                 );
+                ALTER TABLE shared.file_leases ADD COLUMN IF NOT EXISTS agent_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
                 CREATE INDEX IF NOT EXISTS idx_file_leases_lookup
                     ON shared.file_leases (project_id, lease_expires_at);
+                CREATE INDEX IF NOT EXISTS idx_file_leases_agent_ip
+                    ON shared.file_leases (project_id, agent_ip);
             """)
 
     async def send_agent_message(
@@ -1061,13 +1079,14 @@ class Database:
         agent_name: str,
         file_path: str,
         duration_seconds: int = 300,
+        agent_ip: str = "0.0.0.0",
     ) -> tuple[bool, FileLease | None, str | None]:
         """申请代码文件租约。返回 (success, lease, conflict_agent_if_failed)。"""
         await self.ensure_messaging_schema()
         duration_seconds = max(10, min(duration_seconds, 3600))
         async with self._pool.acquire() as conn:
             existing = await conn.fetchrow("""
-                SELECT id, project_id, agent_name, file_path, lease_expires_at, created_at
+                SELECT id, project_id, agent_name, agent_ip, file_path, lease_expires_at, created_at
                 FROM shared.file_leases
                 WHERE project_id = $1 AND file_path = $2;
             """, project_id, file_path)
@@ -1079,14 +1098,15 @@ class Database:
                     return False, FileLease(**dict(existing)), existing["agent_name"]
 
             row = await conn.fetchrow("""
-                INSERT INTO shared.file_leases (project_id, agent_name, file_path, lease_expires_at, created_at)
-                VALUES ($1, $2, $3, CURRENT_TIMESTAMP + ($4 || ' seconds')::INTERVAL, CURRENT_TIMESTAMP)
+                INSERT INTO shared.file_leases (project_id, agent_name, agent_ip, file_path, lease_expires_at, created_at)
+                VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP + ($5 || ' seconds')::INTERVAL, CURRENT_TIMESTAMP)
                 ON CONFLICT (project_id, file_path) DO UPDATE SET
                     agent_name = EXCLUDED.agent_name,
-                    lease_expires_at = CURRENT_TIMESTAMP + ($4 || ' seconds')::INTERVAL,
+                    agent_ip = EXCLUDED.agent_ip,
+                    lease_expires_at = CURRENT_TIMESTAMP + ($5 || ' seconds')::INTERVAL,
                     created_at = CURRENT_TIMESTAMP
-                RETURNING id, project_id, agent_name, file_path, lease_expires_at, created_at;
-            """, project_id, agent_name, file_path, str(duration_seconds))
+                RETURNING id, project_id, agent_name, agent_ip, file_path, lease_expires_at, created_at;
+            """, project_id, agent_name, agent_ip, file_path, str(duration_seconds))
             return True, FileLease(**dict(row)), None
 
     async def release_file_lease(
@@ -1112,7 +1132,7 @@ class Database:
         await self.ensure_messaging_schema()
         async with self._pool.acquire() as conn:
             rows = await conn.fetch("""
-                SELECT id, project_id, agent_name, file_path, lease_expires_at, created_at
+                SELECT id, project_id, agent_name, agent_ip, file_path, lease_expires_at, created_at
                 FROM shared.file_leases
                 WHERE project_id = $1 AND lease_expires_at > CURRENT_TIMESTAMP
                 ORDER BY lease_expires_at ASC;

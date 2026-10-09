@@ -102,6 +102,42 @@ def project_fields(items: list[dict], fields: list[str] | None) -> list[dict]:
     return [{k: it[k] for k in keys if k in it} for it in items]
 
 
+def detect_node_ip() -> str:
+    """自动探测当前节点 IP 地址 (优先 socket.gethostbyname，故障回退 127.0.0.1)。"""
+    try:
+        ip = socket.gethostbyname(socket.gethostname())
+        if ip and ip != "127.0.0.1":
+            return ip
+    except Exception:
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+def detect_caller_ip(explicit_ip: str | None = None) -> str:
+    """自动探测调用端 Agent IP:
+    1. 优先使用显式入参 explicit_ip；
+    2. 其次从 SSH 会话环境变量 SSH_CLIENT / SSH_CONNECTION 获取远端客户端实际 IP；
+    3. 再次通过 socket/UDP 探测本地宿主 IP；
+    4. 兜底回退 127.0.0.1。
+    """
+    if explicit_ip and explicit_ip.strip():
+        return explicit_ip.strip()
+
+    ssh_client = os.environ.get("SSH_CLIENT") or os.environ.get("SSH_CONNECTION")
+    if ssh_client:
+        parts = ssh_client.strip().split()
+        if parts and parts[0]:
+            return parts[0]
+
+    return detect_node_ip()
+
+
 # =============================================================================
 # 一、 Resources (只读上下文面 - 零开销挂载)
 # =============================================================================
@@ -306,6 +342,7 @@ async def task_upsert(
     priority: TaskPriorityArg = TaskPriority.P2,
     assignee: str | None = "agy",
     reviewer: str | None = "zcode",
+    agent_ip: str | None = None,
     parent_id: str | None = None,
     commit_hash: str | None = None,
     proof_link: str | None = None,
@@ -332,6 +369,7 @@ async def task_upsert(
     - priority: 优先级 ('P0'=阻塞故障, 'P1'=核心严重, 'P2'=中度演练, 'P3'=轻微文档)。
     - assignee: 责任人锁 (防止多 Agent 争抢，如 'agy', 'agent_xxx')。
     - reviewer: 验收责任人 (如 'zcode', 'agy')。
+    - agent_ip: 可选。操作 Agent 节点 IP 地址 (缺省自动探测填充)。
     - parent_id: 父任务 ID (支持树状拆解)。
     - commit_hash: 关联提交散列。
     - proof_link: 报告或证据指针 (如 '报告 dfc50ef')。
@@ -356,6 +394,8 @@ async def task_upsert(
     if st_val == "closed" and not commit_hash and not proof_link and s_notes:
         proof_link = f"notes: {s_notes[:100]}"
 
+    caller_ip = detect_caller_ip(agent_ip)
+
     task = Task(
         id=id,
         title=s_title,
@@ -364,6 +404,7 @@ async def task_upsert(
         status=TaskStatus(st_val),
         assignee=assignee,
         reviewer=reviewer,
+        agent_ip=caller_ip,
         parent_id=parent_id,
         commit_hash=commit_hash,
         proof_link=proof_link,
@@ -371,7 +412,7 @@ async def task_upsert(
         tags=tags or [],
         batch_id=batch_id,
     )
-    saved = await db.upsert_task(proj, task)
+    saved = await db.upsert_task(proj, task, operator=assignee or "agy")
     slim = {"success": True, "ok": True, "project": proj, "id": id, "status": st_val}
     if full:
         slim["task"] = saved.model_dump(mode="json")
@@ -384,6 +425,7 @@ async def tasks_bulk_upsert(
     project: str,
     tasks: list[dict],
     batch_id: str | None = None,
+    agent_ip: str | None = None,
     allow_cross_project: bool = False,
     full: bool = False,
 ) -> dict:
@@ -393,6 +435,7 @@ async def tasks_bulk_upsert(
     - project: 必填。项目代号。
     - tasks: 必填。任务字典列表，单项包含 id, title, status 等。
     - batch_id: 可选。统一归属研发批次号 (若任务项本身未指定，则以此默认填充)。
+    - agent_ip: 可选。批量操作的 Agent 节点 IP 地址 (缺省自动探测填充)。
     - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
     - full: 可选。True 时回显 items 全对象列表 (缺省 False 仅回瘦身 {ok, total, ids})。
     """
@@ -401,9 +444,11 @@ async def tasks_bulk_upsert(
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    caller_ip = detect_caller_ip(agent_ip)
+
     # 若指定了统一批次号，自动保底确保 batches 存在以满足外键约束
     if batch_id:
-        await db.upsert_batch(proj, Batch(id=batch_id, title=f"研发批次 {batch_id}", status=BatchStatus.RUNNING))
+        await db.upsert_batch(proj, Batch(id=batch_id, title=f"研发批次 {batch_id}", status=BatchStatus.RUNNING, agent_ip=caller_ip))
 
     task_objs = []
     for t in tasks:
@@ -428,6 +473,8 @@ async def tasks_bulk_upsert(
             priority=TaskPriority(norm_pr),
             status=TaskStatus(norm_st),
             assignee=t.get("assignee", "agy"),
+            reviewer=t.get("reviewer", "zcode"),
+            agent_ip=t.get("agent_ip") or caller_ip,
             parent_id=t.get("parent_id"),
             commit_hash=c_hash,
             proof_link=p_link,
@@ -504,6 +551,7 @@ async def finding_record(
     task_id: str | None = None,
     reporter: str = "audit",
     resolution: str | None = None,
+    agent_ip: str | None = None,
     allow_cross_project: bool = False,
     full: bool = False,
 ) -> dict:
@@ -519,6 +567,7 @@ async def finding_record(
     - task_id: 关联修复任务 ID。
     - reporter: 报告者 Agent。
     - resolution: 处置结果或修复 Commit 标识。
+    - agent_ip: 可选。上报缺陷的 Agent 节点 IP 地址 (缺省自动探测填充)。
     - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
     - task_id 写前预检: 关联任务不存在时回 TASK_NOT_FOUND 结构化错。
     - full: 可选。True 时回显发现项全对象 (缺省 False 仅回瘦身 {ok, id, status})。
@@ -527,6 +576,8 @@ async def finding_record(
         proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     except ProjectNegotiationError as e:
         return e.to_dict()
+
+    caller_ip = detect_caller_ip(agent_ip)
 
     # P0-2: task_id 写前预检 (今晚 F-243 实锤形态: 静默写入悬空外键)
     if task_id:
@@ -552,6 +603,7 @@ async def finding_record(
         status=FindingStatus(status),
         task_id=task_id,
         reporter=reporter,
+        agent_ip=caller_ip,
         summary=s_summary,
         resolution=s_resolution,
     )
@@ -647,6 +699,7 @@ async def waiting_record(
     status: Literal["open", "closed"] = "open",
     owner: str = "user",
     resolution: str | None = None,
+    agent_ip: str | None = None,
     allow_cross_project: bool = False,
     full: bool = False,
 ) -> dict:
@@ -660,6 +713,7 @@ async def waiting_record(
     - status: 状态 ('open'=阻塞中, 'closed'=已解决)。
     - owner: 责任人 (默认 'user')。
     - resolution: 解决结论。
+    - agent_ip: 可选。登记或更新待办的 Agent 节点 IP 地址 (缺省自动探测填充)。
     - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
     - full: 可选。True 时回显待办全对象 (缺省 False 仅回瘦身 {ok, id, status})。
     """
@@ -668,12 +722,15 @@ async def waiting_record(
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    caller_ip = detect_caller_ip(agent_ip)
+
     cat_val = category.value if isinstance(category, WaitingCategory) else normalize_waiting_category(category)
 
     waiting = Waiting(
         id=id,
         category=WaitingCategory(cat_val),
         owner=owner,
+        agent_ip=caller_ip,
         status=WaitingStatus(status),
         description=sanitize_text(description).clean_text,
         resolution=sanitize_text(resolution).clean_text if resolution else None,
@@ -695,6 +752,7 @@ async def devlog_record(
     solution: str,
     evidence: str,
     author: str = "agy",
+    agent_ip: str | None = None,
     task_id: str | None = None,
     visibility: Literal["project_private", "public_safe"] = "project_private",
     tags: list[str] | None = None,
@@ -711,6 +769,7 @@ async def devlog_record(
     - solution: 必填。【解决方案】明确修复逻辑与架构重构。
     - evidence: 必填。【验证证据】复现与修复后的实测比对输出。
     - author: 记录者 Agent 或人类专家 (默认 'agy')。
+    - agent_ip: 可选。撰写手记的 Agent 节点 IP 地址 (缺省自动探测填充)。
     - task_id: 关联任务编号。
     - visibility: 密级 ('project_private'=项目私有, 'public_safe'=全局开源脱敏)。
     - id: 可选。指定排查手记 ID 执行幂等更新。
@@ -720,6 +779,8 @@ async def devlog_record(
         proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     except ProjectNegotiationError as e:
         return e.to_dict()
+
+    caller_ip = detect_caller_ip(agent_ip)
 
     # 强制脱敏
     s_title = sanitize_text(title).clean_text
@@ -752,6 +813,7 @@ async def devlog_record(
                 tags=tags or [],
                 embedding=None,
                 task_id=task_id,
+                agent_ip=caller_ip,
             )
             return {
                 "success": True,
@@ -777,6 +839,7 @@ async def devlog_record(
                 tags=tags or [],
                 embedding=embed_res.embedding,
                 task_id=task_id,
+                agent_ip=caller_ip,
             )
             return {
                 "success": True,
@@ -796,6 +859,7 @@ async def devlog_record(
         task_id=task_id,
         title=s_title,
         author=author,
+        agent_ip=caller_ip,
         problem=s_problem,
         root_cause=s_rc,
         solution=s_sol,
@@ -907,6 +971,7 @@ async def batch_upsert(
     branch_name: str | None = None,
     summary: str | None = None,
     methodology_notes: str | None = None,
+    agent_ip: str | None = None,
     allow_cross_project: bool = False,
     full: bool = False,
 ) -> dict:
@@ -920,6 +985,7 @@ async def batch_upsert(
     - branch_name: 关联代码分支。
     - summary: 批次任务源与方案总结。
     - methodology_notes: 排障方法论、未办结复作入口与讨论过程。
+    - agent_ip: 可选。开立或维护批次的 Agent 节点 IP 地址 (缺省自动探测填充)。
     - allow_cross_project: 显式放行跨项目写入授权 (默认 False)。
     - full: 可选。True 时回显批次全对象 (缺省 False 仅回瘦身 {ok, id, status})。
     """
@@ -928,6 +994,8 @@ async def batch_upsert(
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    caller_ip = detect_caller_ip(agent_ip)
+
     batch = Batch(
         id=id,
         title=title,
@@ -935,6 +1003,7 @@ async def batch_upsert(
         branch_name=branch_name,
         summary=summary,
         methodology_notes=methodology_notes,
+        agent_ip=caller_ip,
     )
     saved = await db.upsert_batch(proj, batch)
     slim = {"success": True, "ok": True, "project": proj, "id": id, "status": status}
@@ -1027,23 +1096,6 @@ async def brief(project: str, devlog_limit: int = 5) -> dict:
 # 七、 多 Agent 对讲信箱与代码文件租约工具集 (0.3.0)
 # =============================================================================
 
-def detect_node_ip() -> str:
-    """自动探测当前节点 IP 地址 (优先 socket.gethostbyname，故障回退 127.0.0.1)。"""
-    try:
-        ip = socket.gethostbyname(socket.gethostname())
-        if ip and ip != "127.0.0.1":
-            return ip
-    except Exception:
-        pass
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except Exception:
-        pass
-    return "127.0.0.1"
-
-
 @mcp.tool()
 @tool_shell
 async def message_send(
@@ -1077,10 +1129,7 @@ async def message_send(
     s_sub = sanitize_text(subject).clean_text
     s_cnt = sanitize_text(content).clean_text
 
-    clean_from_ip = (from_ip or "").strip()
-    if not clean_from_ip:
-        clean_from_ip = detect_node_ip()
-
+    clean_from_ip = detect_caller_ip(from_ip)
     clean_to_ip = (to_ip or "").strip()
     if not clean_to_ip:
         clean_to_ip = clean_from_ip
@@ -1209,6 +1258,7 @@ async def lease_acquire(
     agent_name: str,
     file_path: str,
     duration_seconds: int = 300,
+    agent_ip: str | None = None,
     allow_cross_project: bool = False,
 ) -> dict:
     """申请代码文件修改租约 (防并发写冲突软锁)。
@@ -1218,15 +1268,18 @@ async def lease_acquire(
     - agent_name: 必填。申请锁的 Agent 名称 (如 'codebuddy')。
     - file_path: 必填。目标代码文件相对路径 (如 'src/logbook/db.py')。
     - duration_seconds: 可选。租约持有秒数 (默认 300 秒/5分钟，上限 3600 秒)。
+    - agent_ip: 可选。申请租约的 Agent 节点 IP 地址 (缺省自动探测填充)。
     """
     proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     clean_path = file_path.strip().lstrip("/")
+    caller_ip = detect_caller_ip(agent_ip)
 
     ok, lease, conflict_agent = await db.acquire_file_lease(
         project_id=proj,
         agent_name=agent_name.strip(),
         file_path=clean_path,
         duration_seconds=duration_seconds,
+        agent_ip=caller_ip,
     )
     if not ok:
         return {
@@ -1243,6 +1296,7 @@ async def lease_acquire(
         "ok": True,
         "project": proj,
         "agent": agent_name.strip(),
+        "agent_ip": caller_ip,
         "file_path": clean_path,
         "lease_expires_at": lease.lease_expires_at.isoformat() if lease else None,
         "status": "acquired",
