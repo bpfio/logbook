@@ -54,6 +54,22 @@
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
 
+## [DEV-2026-10-09-03] Logbook 0.4.0 全维 MCP 协议吸收与 QNAP 生产环境无缝投产 — ✅ 闭环
+
+完成 Logbook 0.4.0 全维 MCP 协议吸收、SQL 迁移死角排障与 QNAP TS-453D 生产平滑热投产：
+1. **架构与业务审计**: 深度审查 0.3.0 (对讲信箱/租约软锁)、0.3.1 (全实体 IP 溯源审计) 与 0.4.0 (调研知识库)，修复 SQL 保留字 references 未转义语法隐患与 pg_toast 系统 Schema 遍历越权隐患 (提交 f8524ae)；
+2. **全维 MCP 协议吸收**: 落地 3 大 Resources 只读挂载端点 (leases/active, researches/recent, mailbox/summary) 与 2 大 Prompts 规程模板 (conduct_research, agent_collaborate)，信箱发信固有回显全局数字自增 ID，看板直出待提取 ID 索引引导收件 Agent 原子核销 (提交 87d5b9e)；
+3. **全覆盖单元测试**: 落地 tests/test_resources_and_prompts.py，全套 20 项测试 100% 全绿 (3.26s)；
+4. **QNAP 生产五步平滑投产**:
+   - 生产 PG 数据库冷备先行 (logbook_pre_20261009_234403.dump, 167KB)；
+   - 极简生产镜像 logbook:0.4.0 (84.9MB) 17 秒流式导入 QNAP Docker；
+   - 物理迁移 05、06、07 脚本 100% 成功执行；
+   - Docker Compose 热重载，全栈常驻内存仅 67.8MB (App 42.8MB, PG 24.9MB，CPU 0.00% / 0.03%)；
+   - SSH MCP 真机实测通过 25 个工具全集、8 个只读资源与 4 个工作流模板，端到端信件与租约软锁流体验证通过；
+5. **台账与手记闭环**: 研发任务 L13.4 正式办结归档，生产向量库录入 DevLog #43 (讯飞星火 512 维向量索引就绪)。
+
+---
+
 ## [DEV-2026-10-09-02] 研发调研知识库 (shared.researches) 与开工前 RAG 语义检索 — ✅ 闭环
 
 完成研发调研知识库全链路研发、测试与发布 (Logbook v0.4.0):
