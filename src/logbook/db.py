@@ -18,7 +18,8 @@ from .models import (
     Batch, BatchStatus,
     DevLog, DevLogVisibility,
     Rule,
-    Project, slug_to_schema_name
+    Project, slug_to_schema_name,
+    AgentMessage, FileLease
 )
 from .time_sync import get_beijing_now
 
@@ -932,6 +933,184 @@ class Database:
             """
             rows = await conn.fetch(query, *params)
             return [Rule(**dict(r)) for r in rows]
+
+    # =========================================================================
+    # 多 Agent 对讲信箱与代码文件租约 (0.3.0)
+    # =========================================================================
+
+    async def ensure_messaging_schema(self):
+        """确保 shared.agent_messages 与 shared.file_leases 物理表存在 (幂等自愈)。"""
+        await self.connect()
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS shared.agent_messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    project_id VARCHAR(32) NOT NULL,
+                    from_agent VARCHAR(64) NOT NULL,
+                    to_agent VARCHAR(64) NOT NULL,
+                    subject VARCHAR(256) NOT NULL,
+                    content TEXT NOT NULL,
+                    task_id VARCHAR(32),
+                    thread_id VARCHAR(64),
+                    is_read BOOLEAN NOT NULL DEFAULT FALSE,
+                    read_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_messages_inbox
+                    ON shared.agent_messages (project_id, to_agent, is_read, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_agent_messages_task
+                    ON shared.agent_messages (project_id, task_id);
+                CREATE INDEX IF NOT EXISTS idx_agent_messages_thread
+                    ON shared.agent_messages (project_id, thread_id);
+
+                CREATE TABLE IF NOT EXISTS shared.file_leases (
+                    id BIGSERIAL PRIMARY KEY,
+                    project_id VARCHAR(32) NOT NULL,
+                    agent_name VARCHAR(64) NOT NULL,
+                    file_path VARCHAR(512) NOT NULL,
+                    lease_expires_at TIMESTAMPTZ NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_project_file_lease UNIQUE (project_id, file_path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_file_leases_lookup
+                    ON shared.file_leases (project_id, lease_expires_at);
+            """)
+
+    async def send_agent_message(
+        self,
+        project_id: str,
+        from_agent: str,
+        to_agent: str,
+        subject: str,
+        content: str,
+        task_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> AgentMessage:
+        await self.ensure_messaging_schema()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO shared.agent_messages (
+                    project_id, from_agent, to_agent, subject, content, task_id, thread_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                RETURNING id, project_id, from_agent, to_agent, subject, content,
+                          task_id, thread_id, is_read, read_at, created_at;
+            """, project_id, from_agent, to_agent, subject, content, task_id, thread_id)
+            return AgentMessage(**dict(row))
+
+    async def get_agent_inbox(
+        self,
+        project_id: str | None,
+        agent_name: str,
+        unread_only: bool = True,
+        limit: int = 20,
+    ) -> list[AgentMessage]:
+        await self.ensure_messaging_schema()
+        limit = self._clamp_limit(limit, default=20)
+        conditions = ["to_agent = $1"]
+        params: list[Any] = [agent_name]
+
+        if unread_only:
+            conditions.append("is_read = FALSE")
+        if project_id:
+            params.append(project_id)
+            conditions.append(f"project_id = ${len(params)}")
+
+        where_clause = " AND ".join(conditions)
+        params.append(limit)
+        query = f"""
+            SELECT id, project_id, from_agent, to_agent, subject, content,
+                   task_id, thread_id, is_read, read_at, created_at
+            FROM shared.agent_messages
+            WHERE {where_clause}
+            ORDER BY created_at DESC
+            LIMIT ${len(params)};
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [AgentMessage(**dict(r)) for r in rows]
+
+    async def read_agent_message(
+        self,
+        message_id: int,
+        agent_name: str | None = None,
+    ) -> AgentMessage | None:
+        await self.ensure_messaging_schema()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                UPDATE shared.agent_messages
+                SET is_read = TRUE,
+                    read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
+                WHERE id = $1
+                RETURNING id, project_id, from_agent, to_agent, subject, content,
+                          task_id, thread_id, is_read, read_at, created_at;
+            """, message_id)
+            if not row:
+                return None
+            return AgentMessage(**dict(row))
+
+    async def acquire_file_lease(
+        self,
+        project_id: str,
+        agent_name: str,
+        file_path: str,
+        duration_seconds: int = 300,
+    ) -> tuple[bool, FileLease | None, str | None]:
+        """申请代码文件租约。返回 (success, lease, conflict_agent_if_failed)。"""
+        await self.ensure_messaging_schema()
+        duration_seconds = max(10, min(duration_seconds, 3600))
+        async with self._pool.acquire() as conn:
+            existing = await conn.fetchrow("""
+                SELECT id, project_id, agent_name, file_path, lease_expires_at, created_at
+                FROM shared.file_leases
+                WHERE project_id = $1 AND file_path = $2;
+            """, project_id, file_path)
+
+            now = get_beijing_now()
+            if existing:
+                exp = existing["lease_expires_at"]
+                if exp > now and existing["agent_name"] != agent_name:
+                    return False, FileLease(**dict(existing)), existing["agent_name"]
+
+            row = await conn.fetchrow("""
+                INSERT INTO shared.file_leases (project_id, agent_name, file_path, lease_expires_at, created_at)
+                VALUES ($1, $2, $3, CURRENT_TIMESTAMP + ($4 || ' seconds')::INTERVAL, CURRENT_TIMESTAMP)
+                ON CONFLICT (project_id, file_path) DO UPDATE SET
+                    agent_name = EXCLUDED.agent_name,
+                    lease_expires_at = CURRENT_TIMESTAMP + ($4 || ' seconds')::INTERVAL,
+                    created_at = CURRENT_TIMESTAMP
+                RETURNING id, project_id, agent_name, file_path, lease_expires_at, created_at;
+            """, project_id, agent_name, file_path, str(duration_seconds))
+            return True, FileLease(**dict(row)), None
+
+    async def release_file_lease(
+        self,
+        project_id: str,
+        agent_name: str,
+        file_path: str,
+    ) -> bool:
+        """释放代码文件租约。"""
+        await self.ensure_messaging_schema()
+        async with self._pool.acquire() as conn:
+            res = await conn.execute("""
+                DELETE FROM shared.file_leases
+                WHERE project_id = $1 AND file_path = $2 AND agent_name = $3;
+            """, project_id, file_path, agent_name)
+            return res == "DELETE 1"
+
+    async def query_file_leases(
+        self,
+        project_id: str,
+    ) -> list[FileLease]:
+        """查询项目内所有尚未过期的有效文件租约。"""
+        await self.ensure_messaging_schema()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, project_id, agent_name, file_path, lease_expires_at, created_at
+                FROM shared.file_leases
+                WHERE project_id = $1 AND lease_expires_at > CURRENT_TIMESTAMP
+                ORDER BY lease_expires_at ASC;
+            """, project_id)
+            return [FileLease(**dict(r)) for r in rows]
 
 
 db = Database()

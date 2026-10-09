@@ -17,6 +17,7 @@ from .time_sync import get_beijing_now
 class TaskStatus(str, Enum):
     PLANNED = "planned"
     RUNNING = "running"
+    REVIEW = "review"
     BLOCKED = "blocked"
     CLOSED = "closed"
     WONTFIX = "wontfix"
@@ -89,6 +90,7 @@ class Task(BaseModel):
     priority: TaskPriority = Field(default=TaskPriority.P2)
     status: TaskStatus = Field(default=TaskStatus.PLANNED)
     assignee: str | None = Field(default="agy", max_length=64, description="责任主体/Agent，如 agy, yupeng")
+    reviewer: str | None = Field(default="zcode", max_length=64, description="质检/验收 Agent，如 zcode, agy")
     parent_id: str | None = Field(default=None, max_length=32, description="父任务短编号，支持两级树形解耦")
     commit_hash: str | None = Field(default=None, max_length=128)
     proof_link: str | None = Field(default=None, max_length=512)
@@ -234,4 +236,41 @@ class Project(BaseModel):
         if not re.match(r"^[a-z0-9_]{2,32}$", s):
             raise ValueError(f"物理 Schema 名称非法: '{v}'，必须由 2~32 位小写字母、数字或下划线组成！")
         return s
+
+
+# ============================================================================
+# 多 Agent 对讲信箱与文件租约模型 (0.3.0)
+# ============================================================================
+
+class AgentMessageSend(BaseModel):
+    project_id: str = Field(..., max_length=32, description="归属项目代号")
+    from_agent: str = Field(..., max_length=64, description="发件人 Agent")
+    to_agent: str = Field(..., max_length=64, description="收件人 Agent")
+    subject: str = Field(..., max_length=256, description="消息主题")
+    content: str = Field(..., description="消息正文 (Markdown)")
+    task_id: str | None = Field(default=None, max_length=32, description="关联任务短编号")
+    thread_id: str | None = Field(default=None, max_length=64, description="会话线索")
+
+
+class AgentMessage(AgentMessageSend):
+    id: int
+    is_read: bool = False
+    read_at: datetime | None = None
+    created_at: datetime = Field(default_factory=get_beijing_now)
+
+
+class FileLeaseAcquire(BaseModel):
+    project_id: str = Field(..., max_length=32, description="归属项目代号")
+    agent_name: str = Field(..., max_length=64, description="申请租约的 Agent")
+    file_path: str = Field(..., max_length=512, description="文件相对路径")
+    duration_seconds: int = Field(default=300, ge=10, le=3600, description="租约有效时长 (秒，默认 5 分钟)")
+
+
+class FileLease(BaseModel):
+    id: int
+    project_id: str
+    agent_name: str
+    file_path: str
+    lease_expires_at: datetime
+    created_at: datetime = Field(default_factory=get_beijing_now)
 

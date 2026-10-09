@@ -23,7 +23,8 @@ from .models import (
     Finding, FindingStatus, FindingSeverity,
     Waiting, WaitingStatus, WaitingCategory,
     Batch, BatchStatus,
-    DevLog, DevLogVisibility, Rule
+    DevLog, DevLogVisibility, Rule,
+    AgentMessage, FileLease
 )
 from .sanitizer import sanitize_text
 from .time_sync import get_beijing_now, format_beijing
@@ -303,6 +304,7 @@ async def task_upsert(
     task_type: TaskTypeArg = TaskType.FIX,
     priority: TaskPriorityArg = TaskPriority.P2,
     assignee: str | None = "agy",
+    reviewer: str | None = "zcode",
     parent_id: str | None = None,
     commit_hash: str | None = None,
     proof_link: str | None = None,
@@ -321,12 +323,14 @@ async def task_upsert(
     - status: 必填。阶段状态机:
         * 'planned': 已规划待办
         * 'running': 进行中 (开工必标记)
+        * 'review': 待验收 (codebuddy 施工完成，等待 reviewer 检验)
         * 'blocked': 阻塞中 (等待用户裁决或外部依赖)
         * 'closed': 办结闭环 (必须带 commit_hash 或 proof_link 真实证据)
         * 'wontfix': 经评估不予修复并备案
     - task_type: 工程类型 ('feat', 'fix', 'verify', 'investigation', 'drill', 'docs', 'ops', 'deploy')。
     - priority: 优先级 ('P0'=阻塞故障, 'P1'=核心严重, 'P2'=中度演练, 'P3'=轻微文档)。
     - assignee: 责任人锁 (防止多 Agent 争抢，如 'agy', 'agent_xxx')。
+    - reviewer: 验收责任人 (如 'zcode', 'agy')。
     - parent_id: 父任务 ID (支持树状拆解)。
     - commit_hash: 关联提交散列。
     - proof_link: 报告或证据指针 (如 '报告 dfc50ef')。
@@ -358,6 +362,7 @@ async def task_upsert(
         priority=TaskPriority(pr_val),
         status=TaskStatus(st_val),
         assignee=assignee,
+        reviewer=reviewer,
         parent_id=parent_id,
         commit_hash=commit_hash,
         proof_link=proof_link,
@@ -1014,6 +1019,217 @@ async def brief(project: str, devlog_limit: int = 5) -> dict:
         "project": proj,
         "text": "\n".join(lines),
         "brief": data,
+    }
+
+
+# =============================================================================
+# 七、 多 Agent 对讲信箱与代码文件租约工具集 (0.3.0)
+# =============================================================================
+
+@mcp.tool()
+@tool_shell
+async def message_send(
+    project: str,
+    from_agent: str,
+    to_agent: str,
+    subject: str,
+    content: str,
+    task_id: str | None = None,
+    thread_id: str | None = None,
+    allow_cross_project: bool = False,
+    full: bool = False,
+) -> dict:
+    """向目标 Agent 发送对讲信件或任务指派通知。
+
+    字段说明:
+    - project: 必填。归属项目代号。
+    - from_agent: 必填。发件人 Agent 名称 (如 'codebuddy', 'agy')。
+    - to_agent: 必填。收件人 Agent 名称 (如 'zcode', 'codebuddy')。
+    - subject: 必填。信件主题 (256字符内)。
+    - content: 必填。消息正文 (支持 Markdown)。
+    - task_id: 可选。关联的具体任务编号 (如 'L13', 'T101')。
+    - thread_id: 可选。会话线索短标识。
+    - full: 可选。True 时回显全量 Message 实体。
+    """
+    proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
+    s_sub = sanitize_text(subject).clean_text
+    s_cnt = sanitize_text(content).clean_text
+
+    msg = await db.send_agent_message(
+        project_id=proj,
+        from_agent=from_agent.strip(),
+        to_agent=to_agent.strip(),
+        subject=s_sub,
+        content=s_cnt,
+        task_id=task_id.strip() if task_id else None,
+        thread_id=thread_id.strip() if thread_id else None,
+    )
+    slim = {
+        "success": True,
+        "ok": True,
+        "project": proj,
+        "id": msg.id,
+        "to_agent": msg.to_agent,
+        "status": "sent"
+    }
+    if full:
+        slim["message"] = msg.model_dump(mode="json")
+    return slim
+
+
+@mcp.tool()
+@tool_shell
+async def message_inbox(
+    agent_name: str,
+    project: str | None = None,
+    unread_only: bool = True,
+    limit: int = 20,
+    allow_cross_project: bool = True,
+) -> dict:
+    """查收指定 Agent 的独立信箱 (未读/全部消息)。
+
+    字段说明:
+    - agent_name: 必填。要查收信箱的 Agent 身份名称 (如 'zcode')。
+    - project: 可选。指定项目过滤 (缺省为查收该 Agent 的全部跨项目信箱)。
+    - unread_only: 可选。默认 True (仅查未读)。False 时查收历史全部。
+    - limit: 可选。返回条数限制 (默认 20，上限 200)。
+    """
+    proj = None
+    if project:
+        proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
+
+    msgs = await db.get_agent_inbox(
+        project_id=proj,
+        agent_name=agent_name.strip(),
+        unread_only=unread_only,
+        limit=limit,
+    )
+    items = [m.model_dump(mode="json") for m in msgs]
+    return {
+        "success": True,
+        "ok": True,
+        "agent": agent_name.strip(),
+        "total": len(items),
+        "messages": items,
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def message_read(
+    message_id: int,
+    agent_name: str | None = None,
+) -> dict:
+    """阅读指定编号的信件详情，并原子标记为已读。
+
+    字段说明:
+    - message_id: 必填。信件全局唯一自增 ID。
+    - agent_name: 可选。操作者 Agent 名称 (用于审计)。
+    """
+    msg = await db.read_agent_message(message_id=message_id, agent_name=agent_name)
+    if not msg:
+        return tool_error("MESSAGE_NOT_FOUND", f"未找到 ID 为 {message_id} 的信件")
+    return {
+        "success": True,
+        "ok": True,
+        "message": msg.model_dump(mode="json"),
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def lease_acquire(
+    project: str,
+    agent_name: str,
+    file_path: str,
+    duration_seconds: int = 300,
+    allow_cross_project: bool = False,
+) -> dict:
+    """申请代码文件修改租约 (防并发写冲突软锁)。
+
+    字段说明:
+    - project: 必填。项目代号。
+    - agent_name: 必填。申请锁的 Agent 名称 (如 'codebuddy')。
+    - file_path: 必填。目标代码文件相对路径 (如 'src/logbook/db.py')。
+    - duration_seconds: 可选。租约持有秒数 (默认 300 秒/5分钟，上限 3600 秒)。
+    """
+    proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
+    clean_path = file_path.strip().lstrip("/")
+
+    ok, lease, conflict_agent = await db.acquire_file_lease(
+        project_id=proj,
+        agent_name=agent_name.strip(),
+        file_path=clean_path,
+        duration_seconds=duration_seconds,
+    )
+    if not ok:
+        return {
+            "success": False,
+            "ok": False,
+            "error_type": "LEASE_CONFLICT",
+            "detail": f"代码文件 '{clean_path}' 当前已被 Agent [{conflict_agent}] 锁定施工中，请等待其释放或租约过期！",
+            "held_by": conflict_agent,
+            "expires_at": lease.lease_expires_at.isoformat() if lease else None,
+        }
+
+    return {
+        "success": True,
+        "ok": True,
+        "project": proj,
+        "agent": agent_name.strip(),
+        "file_path": clean_path,
+        "lease_expires_at": lease.lease_expires_at.isoformat() if lease else None,
+        "status": "acquired",
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def lease_release(
+    project: str,
+    agent_name: str,
+    file_path: str,
+    allow_cross_project: bool = False,
+) -> dict:
+    """释放已持有的代码文件修改租约。
+
+    字段说明:
+    - project: 必填。项目代号。
+    - agent_name: 必填。持锁的 Agent 名称。
+    - file_path: 必填。代码文件相对路径。
+    """
+    proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
+    clean_path = file_path.strip().lstrip("/")
+
+    released = await db.release_file_lease(
+        project_id=proj,
+        agent_name=agent_name.strip(),
+        file_path=clean_path,
+    )
+    return {
+        "success": True,
+        "ok": True,
+        "project": proj,
+        "file_path": clean_path,
+        "released": released,
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def lease_query(
+    project: str,
+    allow_cross_project: bool = False,
+) -> dict:
+    """查询指定项目当前所有处于生效中的文件修改租约。"""
+    proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
+    leases = await db.query_file_leases(project_id=proj)
+    return {
+        "success": True,
+        "ok": True,
+        "project": proj,
+        "total": len(leases),
+        "leases": [l.model_dump(mode="json") for l in leases],
     }
 
 
