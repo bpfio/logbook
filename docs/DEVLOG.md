@@ -15,7 +15,7 @@
 |---|---|---|---|---|---|
 | L14 | closed | feat | 研发调研知识库 (shared.researches) 与开工前 RAG 语义检索落地 | 0894f91 | sql/07_research_knowledge_base.sql + research_record/search/query 三大MCP工具 + 13测试全绿 |
 | L13.5 | closed | feat | 全实体Agent IP溯源与不可篡改审计增强 (06_migration) | e829bd2 | sql/06_agent_ip_audit_everywhere.sql + detect_caller_ip三级探测 + 9测试全绿 |
-| L13.4 | running | deploy | QNAP生产环境镜像构建、平滑热升级与多Agent端到端协同验证 | 87d5b9e | DevLog #43 / 修复保留字转义(f8524ae) + 吸收全维MCP Resources/Prompts及信箱ID索引直出(87d5b9e) / 20项测试全绿 |
+| L13.4 | closed | deploy | QNAP生产环境镜像构建、平滑热升级与多Agent端到端协同验证 | 87d5b9e | DevLog #43 / 生产镜像上线(67.8MB), 25工具+8资源+4规程真机验证PASS |
 | L13.3 | closed | feat | FastMCP工具注册与端到端测试套件扩充 (mcp_server.py & tests/) | d8fc1c5 | 暴露信箱与租约6大MCP工具，task_upsert增加reviewer参数 |
 | L13.2 | closed | feat | 数据模型层与数据库核心CRUD操作实现 (src/logbook/models.py & db.py) | d8fc1c5 | 落地AgentMessage/FileLease校验模型、状态归一化与db异步信箱租约原子操作 |
 | L13.1 | closed | feat | 多Agent对讲信箱与代码文件租约软锁核心表DDL建模与平滑迁移 | d8fc1c5 | sql/05_agent_messages_and_leases.sql + tasks表支持reviewer与review状态 |
