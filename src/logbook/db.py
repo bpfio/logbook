@@ -947,7 +947,9 @@ class Database:
                     id BIGSERIAL PRIMARY KEY,
                     project_id VARCHAR(32) NOT NULL,
                     from_agent VARCHAR(64) NOT NULL,
+                    from_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0',
                     to_agent VARCHAR(64) NOT NULL,
+                    to_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0',
                     subject VARCHAR(256) NOT NULL,
                     content TEXT NOT NULL,
                     task_id VARCHAR(32),
@@ -956,6 +958,9 @@ class Database:
                     read_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                ALTER TABLE shared.agent_messages ADD COLUMN IF NOT EXISTS from_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
+                ALTER TABLE shared.agent_messages ADD COLUMN IF NOT EXISTS to_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
+
                 CREATE INDEX IF NOT EXISTS idx_agent_messages_inbox
                     ON shared.agent_messages (project_id, to_agent, is_read, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_agent_messages_task
@@ -985,16 +990,18 @@ class Database:
         content: str,
         task_id: str | None = None,
         thread_id: str | None = None,
+        from_ip: str = "0.0.0.0",
+        to_ip: str = "0.0.0.0",
     ) -> AgentMessage:
         await self.ensure_messaging_schema()
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("""
                 INSERT INTO shared.agent_messages (
-                    project_id, from_agent, to_agent, subject, content, task_id, thread_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-                RETURNING id, project_id, from_agent, to_agent, subject, content,
+                    project_id, from_agent, from_ip, to_agent, to_ip, subject, content, task_id, thread_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                RETURNING id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
                           task_id, thread_id, is_read, read_at, created_at;
-            """, project_id, from_agent, to_agent, subject, content, task_id, thread_id)
+            """, project_id, from_agent, from_ip, to_agent, to_ip, subject, content, task_id, thread_id)
             return AgentMessage(**dict(row))
 
     async def get_agent_inbox(
@@ -1018,7 +1025,7 @@ class Database:
         where_clause = " AND ".join(conditions)
         params.append(limit)
         query = f"""
-            SELECT id, project_id, from_agent, to_agent, subject, content,
+            SELECT id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
                    task_id, thread_id, is_read, read_at, created_at
             FROM shared.agent_messages
             WHERE {where_clause}
@@ -1041,7 +1048,7 @@ class Database:
                 SET is_read = TRUE,
                     read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
                 WHERE id = $1
-                RETURNING id, project_id, from_agent, to_agent, subject, content,
+                RETURNING id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
                           task_id, thread_id, is_read, read_at, created_at;
             """, message_id)
             if not row:

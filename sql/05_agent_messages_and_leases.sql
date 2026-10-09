@@ -8,7 +8,9 @@ CREATE TABLE IF NOT EXISTS shared.agent_messages (
     id BIGSERIAL PRIMARY KEY,
     project_id VARCHAR(32) NOT NULL,
     from_agent VARCHAR(64) NOT NULL,
+    from_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0',
     to_agent VARCHAR(64) NOT NULL,
+    to_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0',
     subject VARCHAR(256) NOT NULL,
     content TEXT NOT NULL,
     task_id VARCHAR(32),
@@ -17,6 +19,10 @@ CREATE TABLE IF NOT EXISTS shared.agent_messages (
     read_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 幂等增量加列 (支持已存在旧表的存量数据库平滑演进)
+ALTER TABLE shared.agent_messages ADD COLUMN IF NOT EXISTS from_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
+ALTER TABLE shared.agent_messages ADD COLUMN IF NOT EXISTS to_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
 
 CREATE INDEX IF NOT EXISTS idx_agent_messages_inbox
     ON shared.agent_messages (project_id, to_agent, is_read, created_at DESC);

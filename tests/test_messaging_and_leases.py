@@ -81,3 +81,53 @@ async def test_mcp_messaging_and_lease_signatures():
         file_path="src/db.py"
     )
     assert err_lease.get("isError") is True
+
+
+def test_agent_message_ip_fields_and_validation():
+    """测试 AgentMessageSend 与 AgentMessage 的 IP 字段默认值与边界校验。"""
+    from pydantic import ValidationError
+
+    # 1. 默认 IP 为 0.0.0.0
+    msg = AgentMessageSend(
+        project_id="logbook",
+        from_agent="codebuddy",
+        to_agent="zcode",
+        subject="测试",
+        content="内容"
+    )
+    assert msg.from_ip == "0.0.0.0"
+    assert msg.to_ip == "0.0.0.0"
+
+    # 2. 自定义 IPv4 与 IPv6 支持
+    msg_custom = AgentMessageSend(
+        project_id="logbook",
+        from_agent="codebuddy",
+        from_ip="192.168.1.100",
+        to_agent="zcode",
+        to_ip="2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+        subject="自定义IP",
+        content="内容"
+    )
+    assert msg_custom.from_ip == "192.168.1.100"
+    assert msg_custom.to_ip == "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
+
+    # 3. 超过 45 字符校验拒绝
+    with pytest.raises(ValidationError):
+        AgentMessageSend(
+            project_id="logbook",
+            from_agent="codebuddy",
+            from_ip="a" * 46,
+            to_agent="zcode",
+            subject="超长IP",
+            content="内容"
+        )
+
+
+def test_detect_node_ip():
+    """测试 detect_node_ip 能够探测到有效的非空 IP 格式。"""
+    from logbook.mcp_server import detect_node_ip
+    ip = detect_node_ip()
+    assert isinstance(ip, str)
+    assert len(ip) > 0
+    assert "." in ip or ":" in ip
+

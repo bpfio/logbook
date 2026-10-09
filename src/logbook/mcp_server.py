@@ -9,6 +9,7 @@
 
 import sys
 import os
+import socket
 import asyncio
 import functools
 import asyncpg
@@ -1026,6 +1027,23 @@ async def brief(project: str, devlog_limit: int = 5) -> dict:
 # 七、 多 Agent 对讲信箱与代码文件租约工具集 (0.3.0)
 # =============================================================================
 
+def detect_node_ip() -> str:
+    """自动探测当前节点 IP 地址 (优先 socket.gethostbyname，故障回退 127.0.0.1)。"""
+    try:
+        ip = socket.gethostbyname(socket.gethostname())
+        if ip and ip != "127.0.0.1":
+            return ip
+    except Exception:
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
 @mcp.tool()
 @tool_shell
 async def message_send(
@@ -1034,6 +1052,8 @@ async def message_send(
     to_agent: str,
     subject: str,
     content: str,
+    from_ip: str | None = None,
+    to_ip: str | None = None,
     task_id: str | None = None,
     thread_id: str | None = None,
     allow_cross_project: bool = False,
@@ -1047,6 +1067,8 @@ async def message_send(
     - to_agent: 必填。收件人 Agent 名称 (如 'zcode', 'codebuddy')。
     - subject: 必填。信件主题 (256字符内)。
     - content: 必填。消息正文 (支持 Markdown)。
+    - from_ip: 可选。发件端节点 IP 地址 (缺省自动探测并填充当前节点 IP)。
+    - to_ip: 可选。目标节点 IP 地址 (缺省默认与 from_ip 保持一致)。
     - task_id: 可选。关联的具体任务编号 (如 'L13', 'T101')。
     - thread_id: 可选。会话线索短标识。
     - full: 可选。True 时回显全量 Message 实体。
@@ -1054,6 +1076,14 @@ async def message_send(
     proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     s_sub = sanitize_text(subject).clean_text
     s_cnt = sanitize_text(content).clean_text
+
+    clean_from_ip = (from_ip or "").strip()
+    if not clean_from_ip:
+        clean_from_ip = detect_node_ip()
+
+    clean_to_ip = (to_ip or "").strip()
+    if not clean_to_ip:
+        clean_to_ip = clean_from_ip
 
     msg = await db.send_agent_message(
         project_id=proj,
@@ -1063,18 +1093,54 @@ async def message_send(
         content=s_cnt,
         task_id=task_id.strip() if task_id else None,
         thread_id=thread_id.strip() if thread_id else None,
+        from_ip=clean_from_ip,
+        to_ip=clean_to_ip,
     )
     slim = {
         "success": True,
         "ok": True,
         "project": proj,
         "id": msg.id,
+        "from_agent": msg.from_agent,
         "to_agent": msg.to_agent,
+        "from_ip": msg.from_ip,
+        "to_ip": msg.to_ip,
         "status": "sent"
     }
     if full:
         slim["message"] = msg.model_dump(mode="json")
     return slim
+
+
+@mcp.tool()
+@tool_shell
+async def agent_message_send(
+    project: str,
+    from_agent: str,
+    to_agent: str,
+    subject: str,
+    content: str,
+    from_ip: str | None = None,
+    to_ip: str | None = None,
+    task_id: str | None = None,
+    thread_id: str | None = None,
+    allow_cross_project: bool = False,
+    full: bool = False,
+) -> dict:
+    """向目标 Agent 发送对讲信件或任务指派通知 (message_send 别名)。"""
+    return await message_send(
+        project=project,
+        from_agent=from_agent,
+        to_agent=to_agent,
+        subject=subject,
+        content=content,
+        from_ip=from_ip,
+        to_ip=to_ip,
+        task_id=task_id,
+        thread_id=thread_id,
+        allow_cross_project=allow_cross_project,
+        full=full,
+    )
 
 
 @mcp.tool()

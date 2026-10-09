@@ -245,7 +245,9 @@ class Project(BaseModel):
 class AgentMessageSend(BaseModel):
     project_id: str = Field(..., max_length=32, description="归属项目代号")
     from_agent: str = Field(..., max_length=64, description="发件人 Agent")
+    from_ip: str = Field(default="0.0.0.0", max_length=45, description="发件端节点 IP 地址")
     to_agent: str = Field(..., max_length=64, description="收件人 Agent")
+    to_ip: str = Field(default="0.0.0.0", max_length=45, description="收件端节点 IP 地址")
     subject: str = Field(..., max_length=256, description="消息主题")
     content: str = Field(..., description="消息正文 (Markdown)")
     task_id: str | None = Field(default=None, max_length=32, description="关联任务短编号")
