@@ -9,10 +9,17 @@
 
 ---
 
-## 一、任务台账 (14)
+## 一、任务台账 (18)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L14 | closed | feat | 研发调研知识库 (shared.researches) 与开工前 RAG 语义检索落地 | 0894f91 | sql/07_research_knowledge_base.sql + research_record/search/query 三大MCP工具 + 13测试全绿 |
+| L13.5 | closed | feat | 全实体Agent IP溯源与不可篡改审计增强 (06_migration) | e829bd2 | sql/06_agent_ip_audit_everywhere.sql + detect_caller_ip三级探测 + 9测试全绿 |
+| L13.4 | closed | deploy | QNAP生产环境镜像构建、平滑热升级与多Agent端到端协同验证 | 849f950 | DevLog #43 / 增量from_ip与to_ip全链路支持与自动探测 |
+| L13.3 | closed | feat | FastMCP工具注册与端到端测试套件扩充 (mcp_server.py & tests/) | d8fc1c5 | 暴露信箱与租约6大MCP工具，task_upsert增加reviewer参数 |
+| L13.2 | closed | feat | 数据模型层与数据库核心CRUD操作实现 (src/logbook/models.py & db.py) | d8fc1c5 | 落地AgentMessage/FileLease校验模型、状态归一化与db异步信箱租约原子操作 |
+| L13.1 | closed | feat | 多Agent对讲信箱与代码文件租约软锁核心表DDL建模与平滑迁移 | d8fc1c5 | sql/05_agent_messages_and_leases.sql + tasks表支持reviewer与review状态 |
+| L13 | closed | feat | 支持多 Agent 异步对讲信箱、代码文件防冲突租约与协同流转 | d8fc1c5 | 0.3.0 里程碑主任务闭环 |
 | L12 | closed | feat | Git仓库坐标权威锚定、双轨项目协商与自愈开户原语落地 | 0448a89 | sql/04_project_registry.sql + project_init MCP原语 + 双轨寻址41测试全绿 |
 | L11 | closed | ops | cliserver开发机识别与agy生产logbook MCP配置核验归档 | - | 确证cliserver即xhub; 全局mcp_config.json已生效; logbook_brief RPC验证PASS |
 | L10 | closed | deploy | 优化升级全量落地、03_dedup迁移与QNAP生产环境0.2.0发布 | HEAD | 36测试全绿, 18笔重放通过, 生产内存71MB |
@@ -47,7 +54,27 @@
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
 
-## [DEV-2026-10-08-12] Git仓库坐标权威锚定、双轨项目协商与自愈开户原语落地 — ✅ 闭环
+## [DEV-2026-10-09-02] 研发调研知识库 (shared.researches) 与开工前 RAG 语义检索 — ✅ 闭环
+
+完成研发调研知识库全链路研发、测试与发布 (Logbook v0.4.0):
+1. **共享知识面物理 DDL**: `sql/07_research_knowledge_base.sql` 建立 `shared.researches`，强制约束调研五要素 (objective, market_landscape, tradeoffs, decision, references)，配置 HNSW 向量索引 (512维) 与 GIN 倒排索引；
+2. **强类型模型与铁律断言**: `models.py` 与 `normalizer.py` 增加 `Research` 实体模型与分类/状态归一化，强制断言 `completed` 状态必须包含详实决策与对抗成本评估；
+3. **双引擎混合检索与数据库操作**: `db.py` 实现 `record_research`, `update_research`, `search_researches`（语义向量+全文混合召回）与 `query_researches`；
+4. **三大 MCP 原语上线**: `research_record`, `research_search`, `research_query` 支持 0 摩擦调用并集成三级 IP 溯源；
+5. **单元测试与台账归档**: `tests/test_researches.py` 覆盖 13 项测试 100% 全绿，台账任务 `L14` 办结，`DevLog #45` 归档。
+
+---
+
+## [DEV-2026-10-09-01] 多Agent对讲信箱、文件租约互斥与全实体IP溯源审计 — ✅ 闭环
+
+完成对讲信箱、代码文件防冲突租约软锁与全实体 Agent IP 溯源审计 (Logbook v0.3.0 ~ v0.3.1):
+1. **多 Agent 对讲信箱**: `sql/05_agent_messages_and_leases.sql` 建立 `shared.agent_messages`，支持点对点信件投递、信箱拉取、标记已读与任务状态推进 (`reviewer` / `review`)；
+2. **代码文件租约软锁**: `shared.file_leases` 建立文件级 TTL 软锁，避免多 Agent 并发写入产生文件冲突；
+3. **全实体 IP 溯源与不可篡改审计**: `sql/06_agent_ip_audit_everywhere.sql` 动态循环为所有 Schema 的 7 大实体补齐 `agent_ip VARCHAR(45)` 与索引，更新 `shared.init_project_schema`；
+4. **三级自适应 IP 探测**: `detect_caller_ip` 自动提取 SSH 客户端物理源 IP，调用端 0 改造成本；
+5. **单元测试与台账归档**: `tests/test_messaging_and_leases.py` 与 `tests/test_audit_ip_everywhere.py` 全绿通过，任务 `L13`、`L13.5` 办结，`DevLog #43`、`#44` 归档。
+
+---
 
 完成 Git 仓库坐标权威锚定、多项目双轨协商与 Agent 原生自愈开户原语落地与 QNAP 生产发布：
 1. **权威注册中心 (SSOT) 与双轨解析**: `sql/04_project_registry.sql` 建立 `shared.projects` 登记中心，支持权威 Git 坐标 (`bpfio/brix`, `bpfio/logbook`, `io/TS`) 与物理 Schema (`brix`, `logbook`, `ts`) 双轨互通解析；
