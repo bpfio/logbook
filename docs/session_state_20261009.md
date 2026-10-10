@@ -101,24 +101,36 @@
 
 - **GitHub 仓库**：`https://github.com/bpfio/logbook`
 - **主要分支**：
-  - `main`：最新 HEAD Commit `363506f`
-  - `feat/0.3.0-multi-agent-mailbox`：与 `main` 保持 100% 同步
+  - `main`：最新 HEAD Commit `149a646`
+  - `feat/0.3.0-multi-agent-mailbox`：已合并 `main`
 - **本次会话完整提交链路**：
   1. `849f950`：`feat(messaging): 增强对讲信箱节点 IP 溯源与自动探测 (L13.4)`
   2. `e829bd2`：`feat(audit): 落地全实体 Agent IP 溯源与不可篡改审计 (06_migration)`
   3. `0894f91`：`feat(research): 落地研发调研知识库与开工前 RAG 语义检索 (0.4.0)`
-  4. `f8524ae`：`fix(sql): 修复保留字 references 转义与 pg_toast 模式排除`
-  5. `87d5b9e`：`feat(mcp): 吸收 MCP 全维 Resources 直读看板与 Prompts 工作流引导 (0.4.0)`
-  6. `9a33968`：`docs(devlog): 更新 L13.4 进展为 87d5b9e 吸收全维 MCP 协议`
-  7. `363506f`：`docs(devlog): 办结任务 L13.4, QNAP 生产环境 0.4.0 全维 MCP 成功上线`
+  4. `59f8d91`：`docs(state): 归档多Agent信箱、全实体IP审计与研发调研知识库全量会话状态`
+  5. `f8524ae`：`fix(sql): 修复保留字 references 转义与 pg_toast 模式排除`
+  6. `87d5b9e`：`feat(mcp): 吸收 MCP 全维 Resources 直读看板与 Prompts 工作流引导 (0.4.0)`
+  7. `9a33968`：`docs(devlog): 更新 L13.4 进展为 87d5b9e 吸收全维 MCP 协议`
+  8. `363506f`：`docs(devlog): 办结任务 L13.4, QNAP 生产环境 0.4.0 全维 MCP 成功上线`
+  9. `a4d7e72`：`fix(ssh): 透传 SSH 连接环境变量实现下游 MCP 原生客户端 IP 自动探测`
+  10. `3259ffe`：`fix(messaging): 消除重复 DDL ensure 屏蔽数据库写与暴露个人信箱资源 (L-MSG-1)`
+  11. `149a646`：`docs(devlog): 更新 DEVLOG.md 办结 L-MSG-1 与 DEV-2026-10-10-01 批次`
 
 ---
 
-## 五、 QNAP 生产环境部署验收结论（已完成 100% 上线）
+## 五、 QNAP 生产环境部署验收与端到端双向实测闭环（100% 满分上线）
 
-生产环境（QNAP TS-453D，容器 macvlan IP `192.168.1.68`）已于 2026-10-09 成功完成 0.4.0 平滑热投产升级：
-1. **冷备先行**：`/share/CACHEDEV1_DATA/Container/logbook/backups/logbook_pre_20261009_234403.dump` (167KB)；
-2. **物理数据架构**：05、06、07 迁移脚本全部执行成功，`shared.researches`、`agent_messages`、`file_leases` 就绪；
-3. **极低资源常驻**：全栈内存仅 **67.8 MiB**（`logbook-app` 42.86MiB，`logbook-postgres` 24.96MiB，CPU 占用率接近 0%）；
-4. **协议全维矩阵**：真机验证支持 25 个 MCP 工具全集、8 大 Resources 只读看板、4 大 Prompts 规程模板；
-5. **端到端闭环**：现场成功验证发信回显唯一自增 ID、收信端调用 `message_read` 精确提取并原子核销、文件租约抢占/释放及看板只读直挂。任务 `L13.4` 正式闭环。
+生产环境（QNAP TS-453D，容器 macvlan IP `192.168.1.68`）已成功完成 0.4.0 平滑热投产升级，并通过跨节点真机实测验证：
+
+1. **冷备与物理架构**：
+   - 生产前完成全库冷备（`backups/logbook_pre_20261009_234403.dump`）；
+   - 执行 `sql/05`、`sql/06`、`sql/07` 迁移，`shared.researches`、`agent_messages`、`file_leases` 全实体建表与 HNSW 向量索引就绪。
+2. **极低资源常驻**：
+   - 全栈内存仅 **67.8 MiB**（`logbook-app` 42.86MiB，`logbook-postgres` 24.96MiB，CPU 占用率接近 0%），严格符合轻量低资源准则。
+3. **协议全维矩阵**：
+   - 开放 25 个 MCP 工具、8 大 Resources 只读看板、4 大 Prompts 规程模板。
+4. **端到端收信、阅信、回信双向实测闭环**：
+   - **收信与阅信**：成功调用 `message_read(message_id=5)` 提取发自 `agy@192.168.1.22` 的上线公告信件，原子核销标记已读（`is_read = true`, `read_at = 2026-10-09 23:29:29Z`）；
+   - **回信与发信**：成功调用 `message_send` 投递回执信件 ID `#6`（主题：`【回执】已收到 Logbook 0.4.0 上线通知与协作指引`，线索 `init-0.4.0`），自动捕获源 IP（`192.168.1.30`）安全落库；
+   - **信箱复核**：`message_inbox` 查收列表完整呈现信件成对流转，多 Agent 协同底座 100% 验证就绪。任务 `L13.4` 正式闭环。
+
