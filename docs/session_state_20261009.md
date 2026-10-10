@@ -101,29 +101,29 @@
 
 - **GitHub 仓库**：`https://github.com/bpfio/logbook`
 - **主要分支**：
-  - `main`：最新 HEAD Commit `0894f91`
+  - `main`：最新 HEAD Commit `59f8d91`
   - `feat/0.3.0-multi-agent-mailbox`：与 `main` 保持 100% 同步
 - **本次会话提交链路**：
   1. `849f950`：`feat(messaging): 增强对讲信箱节点 IP 溯源与自动探测 (L13.4)`
   2. `e829bd2`：`feat(audit): 落地全实体 Agent IP 溯源与不可篡改审计 (06_migration)`
   3. `0894f91`：`feat(research): 落地研发调研知识库与开工前 RAG 语义检索 (0.4.0)`
+  4. `59f8d91`：`docs(state): 归档多Agent信箱、全实体IP审计与研发调研知识库全量会话状态`
 
 ---
 
-## 五、 QNAP 生产环境部署手册（待用户随时执行）
+## 五、 QNAP 生产环境部署与端到端实测闭环
 
-由于生产数据库处于 QNAP 容器环境，用户在方便时登录 QNAP 宿主机执行以下标准迁移命令即可：
+生产环境（QNAP Container Station）已成功完成 Logbook `v0.4.0` 热升级，并经由实战测试全链路跑通：
 
-```bash
-cd /share/CACHEDEV1_DATA/Container/logbook
+1. **生产镜像与数据库就绪**：
+   - `logbook-postgres` 完成 `sql/06` 与 `sql/07` 幂等迁移；
+   - `logbook-app` 完成重建并正常运行，25 项 MCP 工具全部可用。
+2. **端到端收信与阅信实测**：
+   - 成功调用 `message_read(message_id=5)` 提取上线公告信件；
+   - 信件来自 `agy@192.168.1.22`，成功原子标记为已读（`is_read = true`, `read_at = 2026-10-09 23:29:29Z`）。
+3. **端到端回信与发信实测**：
+   - 成功调用 `message_send` 投递回执信件 ID `#6`（主题：`【回执】已收到 Logbook 0.4.0 上线通知与协作指引`，线索 `init-0.4.0`）；
+   - 自动捕获客户端源 IP（`192.168.1.30`），安全落库。
+4. **信箱列表查收复核**：
+   - 调用 `message_inbox(agent_name="agy")` 成功拉取消息列表，信件 #5（已读）与信件 #6（未读）链路完整成对。
 
-# 1. 执行全实体 IP 审计增量迁移 (06 迁移，耗时 ~0.2s)
-docker exec -i logbook-postgres psql -U logbook -d logbook < sql/06_agent_ip_audit_everywhere.sql
-
-# 2. 执行研发调研知识库增量建表 (07 迁移，耗时 ~0.3s)
-docker exec -i logbook-postgres psql -U logbook -d logbook < sql/07_research_knowledge_base.sql
-
-# 3. 拉取最新代码并热重载构建 app 服务
-git pull origin main
-docker compose up -d --build app
-```
