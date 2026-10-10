@@ -178,6 +178,143 @@ async def get_open_waitings_resource(project: str) -> str:
         return f"读取阻塞待办失败: {e}"
 
 
+@mcp.resource("logbook://{project}/leases/active")
+async def get_active_leases_resource(project: str) -> str:
+    """提供指定项目当前所有有效且未过期的代码文件租约软锁看板。"""
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+        leases = await db.query_file_leases(proj)
+        if not leases:
+            return f"项目 [{proj}] 当前无活跃文件租约 (全部代码文件可自由申请)。"
+        lines = [
+            f"# 项目 [{proj}] 活跃文件租约看板",
+            "",
+            "| 文件路径 | 锁定 Agent | 来源 IP | 租约到期时间 |",
+            "|---|---|---|---|"
+        ]
+        for l in leases:
+            lines.append(f"| {l.file_path} | {l.agent_name} | {l.agent_ip} | {format_beijing(l.lease_expires_at)} |")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"读取活跃文件租约失败: {e}"
+
+
+@mcp.resource("logbook://{project}/researches/recent")
+async def get_recent_researches_resource(project: str) -> str:
+    """提供指定项目最近沉淀的技术调研、选型决策与对抗代价评估快照。"""
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+        researches = await db.query_researches(proj, limit=10)
+        if not researches:
+            return f"项目 [{proj}] 当前暂无技术调研与架构选型记录。"
+        lines = [f"# 项目 [{proj}] 架构调研与技术决策快照 (最近 10 项)", ""]
+        for r in researches:
+            cat_val = r.category.value if hasattr(r.category, "value") else str(r.category)
+            status_val = r.status.value if hasattr(r.status, "value") else str(r.status)
+            lines.extend([
+                f"## [{cat_val}] {r.title} ({status_val})",
+                f"- **调研目的**: {r.objective}",
+                f"- **业界现状**: {r.market_landscape or '-'}",
+                f"- **对抗成本与权衡**: {r.tradeoffs or '-'}",
+                f"- **选型决策**: {r.decision or '-'}",
+                f"- **权威参考**: {r.references or '-'}",
+                f"- **作者/节点**: {r.author} ({r.agent_ip or '未知 IP'}) | 归档时间: {format_beijing(r.created_at)}",
+                ""
+            ])
+        return "\n".join(lines)
+    except Exception as e:
+        return f"读取技术调研记录失败: {e}"
+
+
+@mcp.resource("logbook://{project}/mailbox/summary")
+async def get_mailbox_summary_resource(project: str) -> str:
+    """提供指定项目内对讲信箱的未读待办看板与信件编号索引。"""
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+        summaries = await db.get_mailbox_summary(proj)
+        if not summaries:
+            return f"项目 [{proj}] 当前信箱全部已读 (无未决待收信件)。"
+        lines = [
+            f"# 项目 [{proj}] 对讲信箱未读看板",
+            "",
+            "| 收件 Agent | 未读信件数 | 待提取信件 ID 清单 | 最近投递时间 |",
+            "|---|---|---|---|"
+        ]
+        for s in summaries:
+            ids_str = ", ".join(f"#{i}" for i in s.get("unread_ids", []))
+            lines.append(f"| {s['to_agent']} | {s['unread_count']} | {ids_str} | {format_beijing(s['latest_at'])} |")
+        lines.extend([
+            "",
+            "> 提示：目标 Agent 可直接调用 `message_read(message_id=...)` 精确提取信件详情并自动核销。"
+        ])
+        return "\n".join(lines)
+    except Exception as e:
+        return f"读取信箱摘要失败: {e}"
+
+
+@mcp.resource("logbook://mailbox/{agent_name}/inbox")
+async def get_agent_personal_inbox_resource(agent_name: str) -> str:
+    """提供指定 Agent 的全局个人信箱未读与近期消息 Markdown 视图 (零开销直读)。"""
+    try:
+        name = agent_name.strip()
+        msgs = await db.get_agent_inbox(project_id=None, agent_name=name, unread_only=True, limit=20)
+        is_unread = True
+        if not msgs:
+            is_unread = False
+            msgs = await db.get_agent_inbox(project_id=None, agent_name=name, unread_only=False, limit=10)
+        if not msgs:
+            return f"Agent [{name}] 的个人信箱为空 (无历史或未读信件)。"
+        status_desc = "未读信件" if is_unread else "近期历史信件 (最近 10 封)"
+        lines = [
+            f"# Agent [{name}] 个人信箱 ({status_desc})",
+            "",
+            "| ID | 项目 | 发件 Agent | 发件端真实 IP | 主题 | 状态 | 投递时间 |",
+            "|---|---|---|---|---|---|---|"
+        ]
+        for m in msgs:
+            st = "未读" if not m.is_read else "已读"
+            lines.append(f"| {m.id} | {m.project_id} | {m.from_agent} | {m.from_ip} | {m.subject} | {st} | {format_beijing(m.created_at)} |")
+        lines.extend([
+            "",
+            "> 提示：阅读正文详情请调用工具 `message_read(message_id=...)` 或发送回信 `message_send(...)`。"
+        ])
+        return "\n".join(lines)
+    except Exception as e:
+        return f"读取 Agent [{agent_name}] 个人信箱失败: {e}"
+
+
+@mcp.resource("logbook://{project}/mailbox/{agent_name}")
+async def get_agent_project_mailbox_resource(project: str, agent_name: str) -> str:
+    """提供指定项目内某 Agent 的专属信箱未读与近期消息 Markdown 视图。"""
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+        name = agent_name.strip()
+        msgs = await db.get_agent_inbox(project_id=proj, agent_name=name, unread_only=True, limit=20)
+        is_unread = True
+        if not msgs:
+            is_unread = False
+            msgs = await db.get_agent_inbox(project_id=proj, agent_name=name, unread_only=False, limit=10)
+        if not msgs:
+            return f"项目 [{proj}] 中 Agent [{name}] 的专属信箱为空。"
+        status_desc = "未读信件" if is_unread else "近期历史信件 (最近 10 封)"
+        lines = [
+            f"# 项目 [{proj}] Agent [{name}] 专属信箱 ({status_desc})",
+            "",
+            "| ID | 发件 Agent | 发件端真实 IP | 主题 | 状态 | 投递时间 |",
+            "|---|---|---|---|---|---|"
+        ]
+        for m in msgs:
+            st = "未读" if not m.is_read else "已读"
+            lines.append(f"| {m.id} | {m.from_agent} | {m.from_ip} | {m.subject} | {st} | {format_beijing(m.created_at)} |")
+        lines.extend([
+            "",
+            "> 提示：阅读正文详情请调用工具 `message_read(message_id=...)` 或发送回信 `message_send(...)`。"
+        ])
+        return "\n".join(lines)
+    except Exception as e:
+        return f"读取项目 [{project}] Agent [{agent_name}] 信箱失败: {e}"
+
+
 @mcp.resource("logbook://projects")
 async def get_projects_resource() -> str:
     """提供所有已注册项目的清单与 Git 仓库坐标。"""
@@ -289,6 +426,29 @@ def prompt_record_devlog(project: str, task_id: str) -> str:
 - 【解决方案 (Solution)】：明确修复逻辑与架构重构
 - 【验证证据 (Evidence)】：复现与修复后的实测比对输出
 请整理完成后调用 devlog_record 工具入库。"""
+
+
+@mcp.prompt("conduct_research")
+def prompt_conduct_research(project: str, topic: str) -> str:
+    """技术调研五要素驱动规程：开工前禁止重复造轮子与对抗成本评估引导。"""
+    return f"""你现在正在针对项目 [{project}] 开展主题为 [{topic}] 的技术调研。
+请严格遵循全局架构与调研铁律：
+1. 【调研先行，禁止重复造轮子】：先查阅业界/社区成熟开源方案与标准库，评估是否有可直接复用或借鉴的成熟资产；
+2. 【评估对抗成本】：技术选型不仅看优势，必须深入评估我们要对抗该组件的什么默认行为 (如线程模型、内存开销、上下文切换等)，列出对抗代价；
+3. 【0/1 与 1-100 证据纪律】：有良率/指标数据即证明产线或能力存在 (0/1 跨越)，质量优劣是量变指标 (1-100 提升)，两者不得混淆；
+4. 【沉淀五要素】：输出必须包含 目标与背景 (objective)、市场现状与选型清单 (market_landscape)、优劣权衡与对抗成本 (tradeoffs)、最终选型决策 (decision)、权威参考 (references)；
+5. 【入库归档】：调研梳理完毕后，必须调用 research_record 工具持久化入库，作为全团队知识底座。"""
+
+
+@mcp.prompt("agent_collaborate")
+def prompt_agent_collaborate(project: str, target_file: str, partner_agent: str) -> str:
+    """跨 Agent 协同作业规程：引导排他软锁申请与对讲信件联动。"""
+    return f"""你现在正准备在项目 [{project}] 中修改核心代码文件 [{target_file}]，并与伙伴 [{partner_agent}] 协同作业。
+请严格执行多 Agent 协同正典：
+1. 【排他锁抢占】：在修改前必须先调用 lease_acquire(project='{project}', file_path='{target_file}') 申请独占租约；
+2. 【租约冲突规避】：若抢占失败 (返回锁定中)，必须等待或联系持有者释放，严禁强行覆盖写代码；
+3. 【对讲通知】：抢占成功后，必须调用 message_send 向 [{partner_agent}] 发送对讲信件，说明修改目的与预计耗时；
+4. 【用后即释】：代码修改与测试验收通过后，必须调用 lease_release 及时释放租约。"""
 
 
 # =============================================================================
@@ -1087,6 +1247,19 @@ async def brief(project: str, devlog_limit: int = 5) -> dict:
         if isinstance(d, dict):
             lines.append(f"D: [{d.get('id')}] {d.get('title')}")
 
+    try:
+        mailbox_summary = await db.get_mailbox_summary(proj)
+    except Exception:
+        mailbox_summary = []
+
+    unread_msgs_total = sum(m.get("unread_count", 0) for m in mailbox_summary)
+    if mailbox_summary:
+        lines[0] += f" mailbox_unread={unread_msgs_total}"
+        for m in mailbox_summary:
+            ids_preview = ",".join(str(i) for i in (m.get("unread_ids") or [])[:5])
+            lines.append(f"M: {m.get('to_agent')} unread={m.get('unread_count')} ids=[{ids_preview}]")
+    data["mailbox_summary"] = mailbox_summary
+
     return {
         "success": True,
         "ok": True,
@@ -1138,16 +1311,18 @@ async def message_send(
     if not clean_to_ip:
         clean_to_ip = clean_from_ip
 
-    msg = await db.send_agent_message(
-        project_id=proj,
-        from_agent=from_agent.strip(),
-        to_agent=to_agent.strip(),
-        subject=s_sub,
-        content=s_cnt,
-        task_id=task_id.strip() if task_id else None,
-        thread_id=thread_id.strip() if thread_id else None,
-        from_ip=clean_from_ip,
-        to_ip=clean_to_ip,
+    msg = await asyncio.shield(
+        db.send_agent_message(
+            project_id=proj,
+            from_agent=from_agent.strip(),
+            to_agent=to_agent.strip(),
+            subject=s_sub,
+            content=s_cnt,
+            task_id=task_id.strip() if task_id else None,
+            thread_id=thread_id.strip() if thread_id else None,
+            from_ip=clean_from_ip,
+            to_ip=clean_to_ip,
+        )
     )
     slim = {
         "success": True,

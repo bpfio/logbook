@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS shared.researches (
     market_landscape TEXT NOT NULL,              -- 2.【成熟方案全景】社区已有方案清单 (Star数/维护度/生产验证)
     tradeoffs TEXT NOT NULL,                     -- 3.【两路线评估与对抗成本】引入 vs 自研代价；对抗默认行为清单
     decision TEXT NOT NULL,                      -- 4.【最终选型决策】选了什么、为什么不用自己写、设计哲学冲突规避策略
-    references TEXT,                             -- 5.【事实依据与文献】官方文档、Benchmark 数据源、GitHub Repo 锚点
+    "references" TEXT,                           -- 5.【事实依据与文献】官方文档、Benchmark 数据源、GitHub Repo 锚点
 
     -- 密级防线与检索加速
     visibility VARCHAR(16) NOT NULL DEFAULT 'project_private'
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS shared.researches (
 -- 幂等防御加列
 ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS agent_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
 ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS batch_id VARCHAR(32);
-ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS references TEXT;
+ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS "references" TEXT;
 
 -- 检索与审计索引规划
 CREATE INDEX IF NOT EXISTS idx_researches_project_vis ON shared.researches(project_id, visibility);

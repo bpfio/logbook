@@ -131,3 +131,63 @@ def test_detect_node_ip():
     assert len(ip) > 0
     assert "." in ip or ":" in ip
 
+
+@pytest.mark.asyncio
+async def test_personal_mailbox_resources(monkeypatch):
+    """测试个人信箱 MCP 资源挂载直读函数 (logbook://mailbox/{agent}/inbox 等)。"""
+    from logbook.mcp_server import (
+        get_agent_personal_inbox_resource,
+        get_agent_project_mailbox_resource,
+        db
+    )
+    from logbook.time_sync import get_beijing_now
+
+    mock_msgs = [
+        AgentMessage(
+            id=101,
+            project_id="brix",
+            from_agent="zcode",
+            from_ip="192.168.1.22",
+            to_agent="agy",
+            to_ip="192.168.1.30",
+            subject="联调对讲测试",
+            content="这是一封测试信件",
+            task_id="L-MSG-1",
+            thread_id=None,
+            is_read=False,
+            read_at=None,
+            created_at=get_beijing_now(),
+        )
+    ]
+
+    async def mock_get_agent_inbox(project_id, agent_name, unread_only=True, limit=20):
+        return mock_msgs
+
+    monkeypatch.setattr(db, "get_agent_inbox", mock_get_agent_inbox)
+
+    # 1. 验证全局个人信箱资源返回包含真实局域网 IP
+    inbox_md = await get_agent_personal_inbox_resource("agy")
+    assert "Agent [agy] 个人信箱" in inbox_md
+    assert "192.168.1.22" in inbox_md
+    assert "101" in inbox_md
+    assert "联调对讲测试" in inbox_md
+
+    # 2. 验证项目信箱资源返回
+    async def mock_val_proj(proj, is_write=False):
+        return proj
+    monkeypatch.setattr("logbook.mcp_server.validate_and_negotiate_project", mock_val_proj)
+
+    proj_md = await get_agent_project_mailbox_resource("brix", "agy")
+    assert "项目 [brix] Agent [agy] 专属信箱" in proj_md
+    assert "192.168.1.22" in proj_md
+    assert "101" in proj_md
+
+
+def test_db_schema_ensured_flag():
+    """测试 Database 类的 _messaging_schema_ensured 与 _researches_schema_ensured 初始状态。"""
+    from logbook.db import Database
+    test_db = Database()
+    assert test_db._messaging_schema_ensured is False
+    assert test_db._researches_schema_ensured is False
+
+

@@ -109,6 +109,10 @@ async def pipe_streams(reader, writer):
     finally:
         try:
             if hasattr(writer, "write_eof"):
+                # 针对非交互式管道命令 (如 printf ... | ssh ... mcp):
+                # 客户端在输入端快速 EOF，给子进程 300ms 缓冲处理当前已派发并在途的事务，
+                # 避免输入流过早关闭导致 MCP AnyIO 引擎将仍在运行的请求取消 (避免 -32000 Connection closed)
+                await asyncio.sleep(0.3)
                 writer.write_eof()
             elif hasattr(writer, "close"):
                 writer.close()
@@ -140,14 +144,35 @@ async def handle_ssh_process(process: asyncssh.SSHServerProcess) -> None:
             process.exit(1)
             return
 
-    # 派生子进程
+    # 派生子进程 (透传 SSH 客户端连接信息环境变量，使下游 MCP 引擎可原生自动探测调用端真实 IP)
+    env = os.environ.copy()
+    peer = process.get_extra_info("peername")
+    if not peer:
+        conn = process.get_extra_info("connection")
+        if conn:
+            peer = conn.get_extra_info("peername")
+    sock = process.get_extra_info("sockname")
+    if not sock:
+        conn = process.get_extra_info("connection")
+        if conn:
+            sock = conn.get_extra_info("sockname")
+
+    if peer and isinstance(peer, (tuple, list)) and len(peer) >= 2:
+        client_ip = str(peer[0])
+        client_port = str(peer[1])
+        server_ip = str(sock[0]) if sock and isinstance(sock, (tuple, list)) and len(sock) >= 1 else "0.0.0.0"
+        server_port = str(sock[1]) if sock and isinstance(sock, (tuple, list)) and len(sock) >= 2 else "22"
+        env["SSH_CLIENT"] = f"{client_ip} {client_port} {server_port}"
+        env["SSH_CONNECTION"] = f"{client_ip} {client_port} {server_ip} {server_port}"
+        logger.info(f"Injected SSH_CLIENT='{env['SSH_CLIENT']}' for user '{username}'")
+
     try:
         subproc = await asyncio.create_subprocess_exec(
             *cmd_args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=os.environ.copy()
+            env=env
         )
     except Exception as e:
         process.stderr.write(f"Failed to spawn Logbook process: {e}\r\n")

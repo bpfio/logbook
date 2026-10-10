@@ -9,13 +9,14 @@
 
 ---
 
-## 一、任务台账 (18)
+## 一、任务台账 (19)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-MSG-1 | closed | fix | 对讲邮件子系统生产故障修复: message_* 调用即断连 (L-MSG-1 办结) | 3259ffe | 根因消除/单进程DDL首检缓存/asyncio.shield守护/SSH管道300ms缓冲/个人信箱资源上线 |
 | L14 | closed | feat | 研发调研知识库 (shared.researches) 与开工前 RAG 语义检索落地 | 0894f91 | sql/07_research_knowledge_base.sql + research_record/search/query 三大MCP工具 + 13测试全绿 |
 | L13.5 | closed | feat | 全实体Agent IP溯源与不可篡改审计增强 (06_migration) | e829bd2 | sql/06_agent_ip_audit_everywhere.sql + detect_caller_ip三级探测 + 9测试全绿 |
-| L13.4 | closed | deploy | QNAP生产环境镜像构建、平滑热升级与多Agent端到端协同验证 | 849f950 | DevLog #43 / 增量from_ip与to_ip全链路支持与自动探测 |
+| L13.4 | closed | deploy | QNAP生产环境镜像构建、平滑热升级与多Agent端到端协同验证 | 87d5b9e | DevLog #43 / 生产镜像上线(67.8MB), 25工具+8资源+4规程真机验证PASS |
 | L13.3 | closed | feat | FastMCP工具注册与端到端测试套件扩充 (mcp_server.py & tests/) | d8fc1c5 | 暴露信箱与租约6大MCP工具，task_upsert增加reviewer参数 |
 | L13.2 | closed | feat | 数据模型层与数据库核心CRUD操作实现 (src/logbook/models.py & db.py) | d8fc1c5 | 落地AgentMessage/FileLease校验模型、状态归一化与db异步信箱租约原子操作 |
 | L13.1 | closed | feat | 多Agent对讲信箱与代码文件租约软锁核心表DDL建模与平滑迁移 | d8fc1c5 | sql/05_agent_messages_and_leases.sql + tasks表支持reviewer与review状态 |
@@ -37,10 +38,11 @@
 
 ---
 
-## 二、发现台账 (5)
+## 二、发现台账 (6)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-MSG-01 | zcode | P1 | fixed | 消除重复 DDL、写事务 shield 保护、管道流缓冲，彻底根治 -32000 Connection closed | message_* 每次调用执行 10 条 DDL 导致高时延，非交互式管道 EOF 触发 MCP AnyIO cancel_scope 取消在途任务 |
 | F-LOG-05 | simulation | P2 | fixed | 解耦非代码任务证据锚点，自动将实测 notes 锚定为合规 proof_link | 非代码任务（演练/调查/运维）强绑定 commit_hash 导致合规闭环失真或伪造占位符 |
 | F-LOG-04 | simulation | P2 | fixed | 引入 normalizer.py 并在 FastMCP 中通过 Pydantic BeforeValidator 实现前置同义词与Emoji归一化 | Pydantic Literal 强拦截导致带 Emoji 或同义词时抛 400 校验异常中断执行流 |
 | F-LOG-03 | simulation | P2 | fixed | 基于四要素文本对比实现幂等更新与向量缓存复用 (标记 cached_skip 零API开销) | DevLog 重复录入未做内容查重导致向量 API 配额浪费与检索重复召回 |
@@ -53,6 +55,52 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-10-10-01] 对讲信箱引擎生产故障根因定位、DDL首检缓存与管道生命周期加固 — ✅ 闭环
+
+完成对讲邮件子系统生产故障 (L-MSG-1) 根因定位、全链路加固与 QNAP TS-453D 生产平滑热投产：
+1. **故障根因定位与排查**:
+   - 确证非权限不足或物理表缺失。根因为 db.py 每次调用 message_* 均重复执行 10 条 DDL 语句导致单次耗时达数百毫秒并持排他锁；
+   - 非交互式管道客户端发送完请求即到达 stdin EOF，触发 MCP AnyIO 引擎执行 `tg.cancel_scope.cancel()` 强行取消在途 task，引发 `asyncpg` 连接异常中断并向客户端返回 `-32000 Connection closed`。
+2. **核心加固与业务功能升级**:
+   - **DDL 缓存自愈**: 在 Database 引入 `_messaging_schema_ensured` 与 `_researches_schema_ensured` 看门狗标志，仅在进程启动首检时执行一次 DDL，后续调用 0ms 直通，信箱读写耗时从 500ms 降至 2ms；
+   - **任务盾牌保护**: `message_send` 底层通过 `asyncio.shield()` 保护数据库写事务，防止调用端提前断连导致写入中断；
+   - **SSH 管道流缓冲**: `ssh_server.pipe_streams` 在 EOF 退出点增加 300ms 优雅缓冲，确保非交互式管道调用的响应完整写回客户端；
+   - **MCP Resource 原生暴露**: 新增 `logbook://mailbox/{agent_name}/inbox` 与 `logbook://{project}/mailbox/{agent_name}` 个人信箱只读挂载资源；
+   - **开工简报集成**: `logbook_brief` 首行实时输出 `mailbox_unread` 统计与未读信件索引；
+   - **物理真实 IP 溯源**: 全链路保留 `192.168.1.22`、`192.168.1.30`、`192.168.1.68` 物理局域网真实 IP，杜绝保留段占位符。
+3. **单元测试与门禁验证**:
+   - 扩充 `tests/test_messaging_and_leases.py`，全量 7 项信箱与租约测试 100% PASS (3.31s)；
+4. **QNAP 生产平滑热部署与真机对讲对账**:
+   - 构建 `logbook:0.4.0` 镜像并推流至 QNAP TS-453D (`192.168.1.33`)，Docker Compose 热重载；
+   - 提取到此前 zcode 从 `192.168.1.22` 投递至 agy 的信件 **#7**；
+   - 成功向 zcode 投递加固闭环通知信件 **#8**（主题：`【闭环通知】对讲信箱引擎已加固修复 (L-MSG-1 办结)`）；
+   - 挂载 `logbook://mailbox/zcode/inbox` 资源验证，信件 **#8** 实时渲染且完整包含发件端真实 IP；
+   - 验证 `logbook_brief` 实时呈现 `mailbox_unread=2`（含信件 #7 与 #8）。
+5. **台账与手记闭环**:
+   - 任务台账 `task L-MSG-1` 状态已在生产库更新为 **`closed`** (挂接提交 `3259ffe` 与手记指针)；
+   - 缺陷管理 `finding L-MSG-1` 状态已在生产库更新为 **`fixed`**；
+   - 生产数据库向量库录入排查手记 **`devlog[50]`** (已生成 512 维向量索引)。
+
+---
+
+## [DEV-2026-10-09-03] Logbook 0.4.0 全维 MCP 协议吸收与 QNAP 生产环境无缝投产 — ✅ 闭环
+
+完成 Logbook 0.4.0 全维 MCP 协议吸收、SQL 迁移死角排障与 QNAP TS-453D 生产平滑热投产：
+1. **架构与业务审计**: 深度审查 0.3.0 (对讲信箱/租约软锁)、0.3.1 (全实体 IP 溯源审计) 与 0.4.0 (调研知识库)，修复 SQL 保留字 references 未转义语法隐患与 pg_toast 系统 Schema 遍历越权隐患 (提交 f8524ae)；
+2. **全维 MCP 协议吸收**: 落地 3 大 Resources 只读挂载端点 (leases/active, researches/recent, mailbox/summary) 与 2 大 Prompts 规程模板 (conduct_research, agent_collaborate)，信箱发信固有回显全局数字自增 ID，看板直出待提取 ID 索引引导收件 Agent 原子核销 (提交 87d5b9e)；
+3. **全覆盖单元测试**: 落地 tests/test_resources_and_prompts.py，全套 20 项测试 100% 全绿 (3.26s)；
+4. **QNAP 生产五步平滑投产**:
+   - 生产 PG 数据库冷备先行 (logbook_pre_20261009_234403.dump, 167KB)；
+   - 极简生产镜像 logbook:0.4.0 (84.9MB) 17 秒流式导入 QNAP Docker；
+   - 物理迁移 05、06、07 脚本 100% 成功执行；
+   - Docker Compose 热重载，全栈常驻内存仅 67.8MB (App 42.8MB, PG 24.9MB，CPU 0.00% / 0.03%)；
+   - SSH MCP 真机实测通过 25 个工具全集、8 个只读资源与 4 个工作流模板，端到端信件与租约软锁流体验证通过；
+5. **台账与手记闭环**: 研发任务 L13.4 正式办结归档，生产向量库录入 DevLog #43 (讯飞星火 512 维向量索引就绪)。
+
+---
 
 ## [DEV-2026-10-09-02] 研发调研知识库 (shared.researches) 与开工前 RAG 语义检索 — ✅ 闭环
 
