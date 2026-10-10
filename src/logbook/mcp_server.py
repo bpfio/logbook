@@ -252,6 +252,69 @@ async def get_mailbox_summary_resource(project: str) -> str:
         return f"读取信箱摘要失败: {e}"
 
 
+@mcp.resource("logbook://mailbox/{agent_name}/inbox")
+async def get_agent_personal_inbox_resource(agent_name: str) -> str:
+    """提供指定 Agent 的全局个人信箱未读与近期消息 Markdown 视图 (零开销直读)。"""
+    try:
+        name = agent_name.strip()
+        msgs = await db.get_agent_inbox(project_id=None, agent_name=name, unread_only=True, limit=20)
+        is_unread = True
+        if not msgs:
+            is_unread = False
+            msgs = await db.get_agent_inbox(project_id=None, agent_name=name, unread_only=False, limit=10)
+        if not msgs:
+            return f"Agent [{name}] 的个人信箱为空 (无历史或未读信件)。"
+        status_desc = "未读信件" if is_unread else "近期历史信件 (最近 10 封)"
+        lines = [
+            f"# Agent [{name}] 个人信箱 ({status_desc})",
+            "",
+            "| ID | 项目 | 发件 Agent | 发件端真实 IP | 主题 | 状态 | 投递时间 |",
+            "|---|---|---|---|---|---|---|"
+        ]
+        for m in msgs:
+            st = "未读" if not m.is_read else "已读"
+            lines.append(f"| {m.id} | {m.project_id} | {m.from_agent} | {m.from_ip} | {m.subject} | {st} | {format_beijing(m.created_at)} |")
+        lines.extend([
+            "",
+            "> 提示：阅读正文详情请调用工具 `message_read(message_id=...)` 或发送回信 `message_send(...)`。"
+        ])
+        return "\n".join(lines)
+    except Exception as e:
+        return f"读取 Agent [{agent_name}] 个人信箱失败: {e}"
+
+
+@mcp.resource("logbook://{project}/mailbox/{agent_name}")
+async def get_agent_project_mailbox_resource(project: str, agent_name: str) -> str:
+    """提供指定项目内某 Agent 的专属信箱未读与近期消息 Markdown 视图。"""
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+        name = agent_name.strip()
+        msgs = await db.get_agent_inbox(project_id=proj, agent_name=name, unread_only=True, limit=20)
+        is_unread = True
+        if not msgs:
+            is_unread = False
+            msgs = await db.get_agent_inbox(project_id=proj, agent_name=name, unread_only=False, limit=10)
+        if not msgs:
+            return f"项目 [{proj}] 中 Agent [{name}] 的专属信箱为空。"
+        status_desc = "未读信件" if is_unread else "近期历史信件 (最近 10 封)"
+        lines = [
+            f"# 项目 [{proj}] Agent [{name}] 专属信箱 ({status_desc})",
+            "",
+            "| ID | 发件 Agent | 发件端真实 IP | 主题 | 状态 | 投递时间 |",
+            "|---|---|---|---|---|---|"
+        ]
+        for m in msgs:
+            st = "未读" if not m.is_read else "已读"
+            lines.append(f"| {m.id} | {m.from_agent} | {m.from_ip} | {m.subject} | {st} | {format_beijing(m.created_at)} |")
+        lines.extend([
+            "",
+            "> 提示：阅读正文详情请调用工具 `message_read(message_id=...)` 或发送回信 `message_send(...)`。"
+        ])
+        return "\n".join(lines)
+    except Exception as e:
+        return f"读取项目 [{project}] Agent [{agent_name}] 信箱失败: {e}"
+
+
 @mcp.resource("logbook://projects")
 async def get_projects_resource() -> str:
     """提供所有已注册项目的清单与 Git 仓库坐标。"""
@@ -1184,6 +1247,19 @@ async def brief(project: str, devlog_limit: int = 5) -> dict:
         if isinstance(d, dict):
             lines.append(f"D: [{d.get('id')}] {d.get('title')}")
 
+    try:
+        mailbox_summary = await db.get_mailbox_summary(proj)
+    except Exception:
+        mailbox_summary = []
+
+    unread_msgs_total = sum(m.get("unread_count", 0) for m in mailbox_summary)
+    if mailbox_summary:
+        lines[0] += f" mailbox_unread={unread_msgs_total}"
+        for m in mailbox_summary:
+            ids_preview = ",".join(str(i) for i in (m.get("unread_ids") or [])[:5])
+            lines.append(f"M: {m.get('to_agent')} unread={m.get('unread_count')} ids=[{ids_preview}]")
+    data["mailbox_summary"] = mailbox_summary
+
     return {
         "success": True,
         "ok": True,
@@ -1235,16 +1311,18 @@ async def message_send(
     if not clean_to_ip:
         clean_to_ip = clean_from_ip
 
-    msg = await db.send_agent_message(
-        project_id=proj,
-        from_agent=from_agent.strip(),
-        to_agent=to_agent.strip(),
-        subject=s_sub,
-        content=s_cnt,
-        task_id=task_id.strip() if task_id else None,
-        thread_id=thread_id.strip() if thread_id else None,
-        from_ip=clean_from_ip,
-        to_ip=clean_to_ip,
+    msg = await asyncio.shield(
+        db.send_agent_message(
+            project_id=proj,
+            from_agent=from_agent.strip(),
+            to_agent=to_agent.strip(),
+            subject=s_sub,
+            content=s_cnt,
+            task_id=task_id.strip() if task_id else None,
+            thread_id=thread_id.strip() if thread_id else None,
+            from_ip=clean_from_ip,
+            to_ip=clean_to_ip,
+        )
     )
     slim = {
         "success": True,

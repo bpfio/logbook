@@ -67,6 +67,8 @@ class Database:
             self.password = os.getenv("LOGBOOK_PG_PASSWORD", os.getenv("POSTGRES_PASSWORD", "logbook_dev_secret"))
             self.database = os.getenv("LOGBOOK_PG_DB", os.getenv("POSTGRES_DB", "logbook"))
         self._pool: asyncpg.Pool | None = None
+        self._messaging_schema_ensured: bool = False
+        self._researches_schema_ensured: bool = False
 
     async def connect(self):
         import asyncio
@@ -954,7 +956,9 @@ class Database:
     # =========================================================================
 
     async def ensure_messaging_schema(self):
-        """确保 shared.agent_messages 与 shared.file_leases 物理表存在 (幂等自愈)。"""
+        """确保 shared.agent_messages 与 shared.file_leases 物理表存在 (幂等自愈，单进程生命周期仅首检一次)。"""
+        if self._messaging_schema_ensured:
+            return
         await self.connect()
         async with self._pool.acquire() as conn:
             await conn.execute("""
@@ -999,6 +1003,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_file_leases_agent_ip
                     ON shared.file_leases (project_id, agent_ip);
             """)
+        self._messaging_schema_ensured = True
 
     async def send_agent_message(
         self,
@@ -1164,7 +1169,9 @@ class Database:
     # =========================================================================
 
     async def ensure_researches_schema(self):
-        """确保 shared.researches 物理表及索引存在 (幂等自愈)。"""
+        """确保 shared.researches 物理表及索引存在 (幂等自愈，单进程生命周期仅首检一次)。"""
+        if self._researches_schema_ensured:
+            return
         await self.connect()
         async with self._pool.acquire() as conn:
             await conn.execute("""
@@ -1205,6 +1212,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_researches_vector_hnsw ON shared.researches USING hnsw (embedding vector_cosine_ops)
                     WITH (m = 16, ef_construction = 64);
             """)
+        self._researches_schema_ensured = True
 
     async def find_existing_research(
         self,

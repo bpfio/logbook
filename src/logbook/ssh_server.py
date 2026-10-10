@@ -109,6 +109,10 @@ async def pipe_streams(reader, writer):
     finally:
         try:
             if hasattr(writer, "write_eof"):
+                # 针对非交互式管道命令 (如 printf ... | ssh ... mcp):
+                # 客户端在输入端快速 EOF，给子进程 300ms 缓冲处理当前已派发并在途的事务，
+                # 避免输入流过早关闭导致 MCP AnyIO 引擎将仍在运行的请求取消 (避免 -32000 Connection closed)
+                await asyncio.sleep(0.3)
                 writer.write_eof()
             elif hasattr(writer, "close"):
                 writer.close()
