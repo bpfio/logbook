@@ -13,10 +13,10 @@
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
-| L-STAB | running | fix | 审计 A-01~A-08 稳定性整改与生产验收 | 08c0461 | S0~S4 已提交 (9c9d239 补 0.4.1 版本辨识)；S5 本地预飞全绿 (备份迁移演练+冒烟9/9+SSH入口, DevLog #91)，仅剩 QNAP 镜像替换终验 |
-| L-AUD-01 | closed | audit | Logbook 稳定性专项审计报告落盘 | 08c0461 | `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`; P0×1 / P1×6 / P2×1 全部转入 L-STAB 修复流, 报告随 08c0461 入库办结 |
-| L-AUD-02 | running | audit | 稳定性整改变更后复审 | 08c0461 | R-01~R-06 已二次修复提交 (RA-IDENT-1/RA-QUAL-1/RA-LEASE-1 全 fixed)；仅剩 S5 生产镜像替换终验 |
-| L-MSG-1 | running | fix | 对讲邮件子系统生产故障: message_* 断连 — 生产复测已通, 待 0.4.1 镜像终验 | 3259ffe | 10-10 复测退回 (容器未加载热补丁)；10-13 生产复测回环全通断连不复现；0.4.1 新镜像预飞就绪待 QNAP 载入后翻 closed |
+| L-STAB | closed | fix | 审计 A-01~A-08 稳定性整改与生产验收 | 08c0461 | S0~S4 提交 + 9c9d239 版本辨识；0.4.1 已上线生产, 终验 9/9 全绿 (DevLog #91, DEV-2026-10-13-05) |
+| L-AUD-01 | closed | audit | Logbook 稳定性专项审计报告落盘 | 08c0461 | `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`; P0×1 / P1×6 / P2×1 全部转入 L-STAB 修复流, 报告随提交入库办结 |
+| L-AUD-02 | closed | audit | 稳定性整改变更后复审 | 08c0461 | R-01~R-06 修复并随 0.4.1 生产验收 (身份拒绝生产实测生效, S5 完成), 发布阻断解除 |
+| L-MSG-1 | closed | fix | 对讲邮件子系统生产故障: message_* 断连 — 0.4.1 上线终验通过办结 | 9c9d239 | 10-10 退回(容器未加载热补丁)；10-13 复测回环全通 + 0.4.1 上线, read_by_agent 审计列生效, 生产终验 9/9 |
 | L14 | closed | feat | 研发调研知识库 (shared.researches) 与开工前 RAG 语义检索落地 | 0894f91 | sql/07_research_knowledge_base.sql + research_record/search/query 三大MCP工具 + 13测试全绿 |
 | L13.5 | closed | feat | 全实体Agent IP溯源与不可篡改审计增强 (06_migration) | e829bd2 | sql/06_agent_ip_audit_everywhere.sql + detect_caller_ip三级探测 + 9测试全绿 |
 | L13.4 | closed | deploy | QNAP生产环境镜像构建、平滑热升级与多Agent端到端协同验证 | 87d5b9e | DevLog #43 / 生产镜像上线(67.8MB), 25工具+8资源+4规程真机验证PASS |
@@ -60,6 +60,17 @@
 |---|---|---|---|
 
 ---
+
+## [DEV-2026-10-13-05] 0.4.1 生产上线与 S5 终验 — ✅ 闭环
+
+经宿主管理通道 (admin@192.168.1.33, docker 在 Container Station 私有 PATH) 完成 QNAP 生产升级：
+
+1. **备份先行**: pg_dump 冷备 379K (`sha256 ebeb54d1…`) + 升级前对账基线 (devlogs=79/tasks=55/messages=14)；
+2. **镜像载入**: 本地 `docker save | gzip | ssh docker load` 19s，旧 tag 全保留 (回滚凭据 ae24f803)；
+3. **部署陷阱修复**: 新镜像 SSH 默认仅绑回环，NAS compose 原缺 `SSH_HOST` —— 已补 `SSH_HOST=0.0.0.0` 后才换 tag，避免 macvlan SSH 失联；
+4. **compose 切换**: image: logbook:0.4.1，双容器重建，启动即自动迁移 (采用 01~07 + 实跑 08)，verify 通过；
+5. **终验 9/9**: 对账零差异 / `serverInfo.version=0.4.1` / 信件回环 (`read_by_agent=agy` 审计列生产生效) / inbox 冒充生产拒绝 / 租约回环 / 5.65s 慢调用完整返回 / 内存 75.8MiB (红线 140MB)；
+6. **闭环**: L-MSG-1、L-STAB、L-AUD-02 全部 closed；通报信 #16 已达 zcode-main；回滚三件套 (旧镜像 + compose 备份 + dump) 落盘 NAS。
 
 ## [DEV-2026-10-13-04] S5 生产升级预飞与 L-MSG-1 生产复测 — ✅ 闭环
 
