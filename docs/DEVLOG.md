@@ -70,7 +70,8 @@ MCP 工具面盘点发现唯一真空：规则 (shared.rules) 只有 `rule_query
 2. **发布**: 门禁全绿 → 镜像构建 → 本地容器冒烟 4/4 → QNAP 备份 (sha256 `9ddccd38…`) → 18s 载入 → compose 切 0.4.2 → up -d；
 3. **生产验证**: tools=26 含 rule_record，写入→查询→`logbook://rules/engineering` 资源渲染全通；以 DEPLOY.md 铁律为蓝本写入首条真实规则 `RULE-DEPLOY-01`；
 4. **对账**: devlogs/messages/brix_tasks 与升级前一致，rules 0→1 即本次写入；全栈内存 70.3MiB；
-5. **澄清**: 此前"缺 pgvector"仅系本地对账沙盒的 `-t` 过滤还原假象；生产 vector 0.8.7 + HNSW 完好，且最新备份裸容器干净还原实证扩展自愈。
+5. **澄清**: 此前"缺 pgvector"仅系本地对账沙盒的 `-t` 过滤还原假象；生产 vector 0.8.7 + HNSW 完好，且最新备份裸容器干净还原实证扩展自愈；
+6. **状态归档**: 完整会话状态（提交链/回滚三件套/环境通道备忘/接续指引）保存于 `docs/session_state_2026-10-13_execution.md`，台账侧入库为 DevLog #91（会话归档条目）。
 
 ## [DEV-2026-10-13-05] 0.4.1 生产上线与 S5 终验 — ✅ 闭环
 
