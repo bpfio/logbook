@@ -13,10 +13,10 @@
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
-| L-STAB | running | fix | 审计 A-01~A-08 稳定性整改与生产验收 | - | `docs/PLAN_STABILITY_FIX_2026-10-13.md`; S0~S4 代码与本地验收完成，S5 QNAP 生产验收待执行 |
-| L-AUD-01 | running | audit | Logbook 稳定性专项审计报告落盘 | - | `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`; P0×1 / P1×6 / P2×1; 待提交后补齐 commit |
-| L-AUD-02 | running | audit | 稳定性整改变更后复审 | - | `docs/AUDIT_LOGBOOK_STABILITY_REAUDIT_2026-10-13.md`; 首次 P1×3 / P2×2 / P3×1 已二次修复，待生产 S5 与提交证据 |
-| L-MSG-1 | closed | fix | 对讲邮件子系统生产故障修复: message_* 调用即断连 (L-MSG-1 办结) | 3259ffe | 根因消除/单进程DDL首检缓存/asyncio.shield守护/SSH管道300ms缓冲/个人信箱资源上线 |
+| L-STAB | running | fix | 审计 A-01~A-08 稳定性整改与生产验收 | 336647e | S0~S4 已提交 (11af7e0 补 0.4.1 版本辨识)；S5 本地预飞全绿 (备份迁移演练+冒烟9/9+SSH入口, DevLog #91)，仅剩 QNAP 镜像替换终验 |
+| L-AUD-01 | closed | audit | Logbook 稳定性专项审计报告落盘 | 336647e | `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`; P0×1 / P1×6 / P2×1 全部转入 L-STAB 修复流, 报告随 336647e 入库办结 |
+| L-AUD-02 | running | audit | 稳定性整改变更后复审 | 336647e | R-01~R-06 已二次修复提交 (RA-IDENT-1/RA-QUAL-1/RA-LEASE-1 全 fixed)；仅剩 S5 生产镜像替换终验 |
+| L-MSG-1 | running | fix | 对讲邮件子系统生产故障: message_* 断连 — 生产复测已通, 待 0.4.1 镜像终验 | 3259ffe | 10-10 复测退回 (容器未加载热补丁)；10-13 生产复测回环全通断连不复现；0.4.1 新镜像预飞就绪待 QNAP 载入后翻 closed |
 | L14 | closed | feat | 研发调研知识库 (shared.researches) 与开工前 RAG 语义检索落地 | 0894f91 | sql/07_research_knowledge_base.sql + research_record/search/query 三大MCP工具 + 13测试全绿 |
 | L13.5 | closed | feat | 全实体Agent IP溯源与不可篡改审计增强 (06_migration) | e829bd2 | sql/06_agent_ip_audit_everywhere.sql + detect_caller_ip三级探测 + 9测试全绿 |
 | L13.4 | closed | deploy | QNAP生产环境镜像构建、平滑热升级与多Agent端到端协同验证 | 87d5b9e | DevLog #43 / 生产镜像上线(67.8MB), 25工具+8资源+4规程真机验证PASS |
@@ -61,7 +61,17 @@
 
 ---
 
-## [DEV-2026-10-13-03] 稳定性整改变更后复审 — 🟢 running
+## [DEV-2026-10-13-04] S5 生产升级预飞与 L-MSG-1 生产复测 — ✅ 闭环
+
+整改代码提交 `336647e` + `11af7e0` (0.4.1 版本辨识) 后，完成 S5 全部可本地化预飞与生产只读复测 (DevLog #91)：
+
+1. **生产复测**: QNAP 生产 (0.4.0+3259ffe 热补丁在跑) `message_send(#13)`→`inbox`→`read` 回环全通，10-10 的 -32000 断连不复现，判定"容器未加载热补丁"假设成立 (期间发生过重启)；`doctor` 报 PG 18.6 正常 (时钟漂移 +9s 警告)；
+2. **迁移演练**: 10-09 生产备份 (sha256 `7d0d4456…`) 还原至临时 PG 18 → `migrate up` 采用 01~07 + 实跑 08，`verify` 通过，11 项数据计数迁移前后零差异；
+3. **隔离冒烟**: `logbook:0.4.1` 镜像接迁移后库，9/9 全 PASS——信件回环、三路身份冒充全拒 (`CALLER_IDENTITY_MISMATCH`)、租约回环、brief；
+4. **干净部署**: 空库启动自动迁移 01→08 全 runner，SSH 默认仅回环监听；真实 SSH 入口 (生产同路径 ssh→forced-command→mcp) 握手成功，`serverInfo.version=0.4.1` 可辨识；
+5. **剩余用户动作**: `docker save logbook:0.4.1 | ssh NAS docker load` → compose 换 tag → `docker compose up -d` → `migrate verify` → 生产终验后翻 L-MSG-1 / L-STAB / L-AUD-02 closed。
+
+## [DEV-2026-10-13-03] 稳定性整改变更后复审 — ✅ 闭环
 
 针对未提交的 S0~S4 变更执行代码审查、隔离数据库对抗测试、真实 AsyncSSH 测试和 clean-checkout 门禁复验，报告已落盘至 `docs/AUDIT_LOGBOOK_STABILITY_REAUDIT_2026-10-13.md`：
 
@@ -72,7 +82,7 @@
 5. **裁决**: 暂不批准生产发布；完成 S5 后方可复审关闭；
 6. **状态归档**: 完整会话状态保存于 `docs/session_state_2026-10-13.md`，并已入库为 `devlog[90]`。
 
-## [DEV-2026-10-13-02] Logbook 稳定性审计修复计划 — 🟢 running
+## [DEV-2026-10-13-02] Logbook 稳定性审计修复计划 — ✅ 闭环
 
 基于已复验的 A-01 至 A-08 审计发现，形成 `docs/PLAN_STABILITY_FIX_2026-10-13.md`：
 
@@ -81,7 +91,7 @@
 3. **当前状态**: S0~S4 已完成本地代码与测试验收；临时 PostgreSQL 门禁、迁移链、并发/安全及真实 AsyncSSH 5 秒慢调用均已通过；
 4. **完成红线**: 全部 P0/P1 修复、clean-checkout 门禁、并发与安全验收、QNAP 备份对账及回滚演练全部通过后方可办结；当前仅剩 S5 生产验收与提交证据，任务保持 `running`。
 
-## [DEV-2026-10-13-01] Logbook 稳定性专项审计报告落盘 — 🟢 running
+## [DEV-2026-10-13-01] Logbook 稳定性专项审计报告落盘 — ✅ 闭环
 
 基于本地工作区 `main@149a646` 完成只读代码审查、测试执行与连接池并发探针，形成 `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`：
 
