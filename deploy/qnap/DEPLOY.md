@@ -42,21 +42,29 @@ docker save logbook:<new-tag> | ssh <user>@<qnap> docker load
 ```bash
 cd <deploy-dir>
 cp compose.yaml.example compose.yaml   # 首次；已有则核对 .env 引用
-# 确认 .env 含 LOGBOOK_DB_PASSWORD / EMBEDDING_API_KEY / SSH_PASSWORD（禁止明文入 yaml）
+# 确认 .env 含 LOGBOOK_DB_PASSWORD / EMBEDDING_API_KEY / SSH_AUTHORIZED_KEYS（禁止明文入 yaml）
+cp .env.example .env   # 首次；填写数据库、向量 API 与 SSH 公钥
 sed -i 's/image: logbook:.*/image: logbook:<new-tag>/' compose.yaml
 docker compose up -d
 docker compose ps               # 验证: 双容器 Up，无 Restarting
 docker logs --tail 20 logbook-app   # 验证: 无 traceback，DB 连接正常
 ```
 
+### SSH 认证与多 Agent 身份
+
+- 默认关闭口令认证；缺少有效公钥时应用容器拒绝绑定 SSH 端口。
+- 默认 principal `sysadmin` 映射到 `LOGBOOK_DEFAULT_AGENT_ID`，不得把该变量视为口令。
+- 多 Agent 使用独立 SSH principal，并分别放置 `<SSH_AGENT_KEYS_ROOT>/<principal>/authorized_keys`。
+- 严禁启用 `logbook` 等已知默认口令；确需口令认证时显式设置 `SSH_ENABLE_PASSWORD_AUTH=1` 且口令不少于 16 字符。
+
 ## 4. SQL 迁移（有迁移的波次）
 
-迁移脚本执行顺序固定，**先决条件 = 第 1 步备份已完成**：
+应用容器启动前会自动执行版本化迁移并持有 PostgreSQL advisory lock。也可手动检查和执行，**先决条件 = 第 1 步备份已完成**：
 
 ```bash
-# 顺序: 01_init.sql（仅全新库）→ 02_optimize_fields.sql → 03_dedup.sql（波1 去重迁移，落地后新增）
-docker exec -i logbook-pg psql -U postgres -d logbook < sql/02_optimize_fields.sql
-docker exec -i logbook-pg psql -U postgres -d logbook < sql/03_dedup.sql
+docker exec logbook-app python -m logbook.migrate status
+docker exec logbook-app python -m logbook.migrate up
+docker exec logbook-app python -m logbook.migrate verify
 ```
 
 验证点（以 03_dedup 为例）：

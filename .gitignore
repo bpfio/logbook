@@ -37,6 +37,7 @@ deploy/qnap/.env
 deploy/qnap/pgdata/
 deploy/qnap/data/
 deploy/qnap/compose.yaml
+deploy/qnap/init.sql
 
 # Testing & Caches
 .pytest_cache/
@@ -60,3 +61,4 @@ backups/
 *.db
 *.sqlite
 *.sqlite3
+*.dump

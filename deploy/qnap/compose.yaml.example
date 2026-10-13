@@ -22,7 +22,8 @@ services:
       - EMBEDDING_MODEL_NAME=xop3qwen8bembedding
       - EMBEDDING_DIM=512
       - SSH_USER=sysadmin
-      - SSH_PASSWORD=${SSH_PASSWORD:-logbook}
+      - SSH_HOST=0.0.0.0
+      - LOGBOOK_DEFAULT_AGENT_ID=agy
       - SSH_AUTHORIZED_KEYS=${SSH_AUTHORIZED_KEYS}
       - TZ=Asia/Shanghai
     volumes:
@@ -51,7 +52,7 @@ services:
     command: postgres -c shared_buffers=32MB -c max_connections=20 -c timezone=Asia/Shanghai
     volumes:
       - ./pgdata:/var/lib/postgresql
-      - ./init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ../../sql:/docker-entrypoint-initdb.d:ro
       - /etc/localtime:/etc/localtime:ro
 
 networks:

@@ -142,6 +142,8 @@ async def test_personal_mailbox_resources(monkeypatch):
     )
     from logbook.time_sync import get_beijing_now
 
+    monkeypatch.setenv("LOGBOOK_AGENT_ID", "agy")
+
     mock_msgs = [
         AgentMessage(
             id=101,
@@ -181,6 +183,9 @@ async def test_personal_mailbox_resources(monkeypatch):
     assert "项目 [brix] Agent [agy] 专属信箱" in proj_md
     assert "192.168.1.22" in proj_md
     assert "101" in proj_md
+
+    denied = await get_agent_personal_inbox_resource("zcode")
+    assert "CALLER_IDENTITY_MISMATCH" in denied
 
 
 def test_db_schema_ensured_flag():

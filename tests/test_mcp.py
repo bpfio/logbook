@@ -21,6 +21,8 @@ from logbook.mcp_server import (
 from logbook.db import db
 from logbook.models import Rule
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.mark.asyncio
 async def test_mcp_task_flow():
@@ -268,8 +270,9 @@ async def test_mcp_waiting_flow():
 # =============================================================================
 
 @pytest.mark.asyncio
-async def test_mcp_error_surface_structured():
+async def test_mcp_error_surface_structured(monkeypatch):
     """P0-2: 全工具体异常统一结构化形态 {isError, error_type, detail}。"""
+    monkeypatch.setenv("LOGBOOK_PROJECT", "logbook")
     # 1. negotiation 裸 ValueError 收编: project 为空 -> INVALID_ARGUMENT 结构化错 (非 SDK 裸包装)
     res = await task_upsert(project="  ", id="X", title="t", status="running")
     assert res["isError"] is True

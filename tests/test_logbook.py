@@ -64,6 +64,7 @@ def test_sntp_clock_drift_check():
 
 
 @pytest.mark.asyncio
+@pytest.mark.integration
 async def test_database_crud_and_duration():
     """测试任务生命周期、用时自动度量、层级解耦与时间线记录。"""
     await db.ensure_project("test_proj")
@@ -115,6 +116,7 @@ async def test_database_crud_and_duration():
 
 
 @pytest.mark.asyncio
+@pytest.mark.integration
 async def test_devlog_record_and_search():
     """测试根因四要素手记录入与向量/全文检索。"""
     vec_res = await get_embedding("xdp reconcile EBUSY bpf_link")

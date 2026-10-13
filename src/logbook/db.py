@@ -7,6 +7,8 @@
 - 向量 HNSW 距离与全文混合召回
 """
 
+import asyncio
+import logging
 import os
 import json
 from typing import Any
@@ -23,6 +25,8 @@ from .models import (
     Research, ResearchCategory, ResearchStatus
 )
 from .time_sync import get_beijing_now
+
+logger = logging.getLogger(__name__)
 
 
 # LIMIT 统一钳制上限 (P1-4: 防 f-string 注入面 + 防 token 肥胖)
@@ -50,8 +54,8 @@ class Database:
             return default
         return min(n, MAX_LIMIT)
 
-    def __init__(self):
-        db_url = os.getenv("DATABASE_URL")
+    def __init__(self, database_url: str | None = None):
+        db_url = database_url or os.getenv("DATABASE_URL")
         if db_url:
             from urllib.parse import urlparse
             u = urlparse(db_url)
@@ -67,42 +71,74 @@ class Database:
             self.password = os.getenv("LOGBOOK_PG_PASSWORD", os.getenv("POSTGRES_PASSWORD", "logbook_dev_secret"))
             self.database = os.getenv("LOGBOOK_PG_DB", os.getenv("POSTGRES_DB", "logbook"))
         self._pool: asyncpg.Pool | None = None
+        self._runtime_loop: asyncio.AbstractEventLoop | None = None
+        self._async_locks: dict[str, asyncio.Lock] = {}
         self._messaging_schema_ensured: bool = False
         self._researches_schema_ensured: bool = False
+        self._project_ready: set[str] = set()
+
+    def _get_lock(self, name: str) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._runtime_loop is not loop:
+            self._runtime_loop = loop
+            self._async_locks.clear()
+            self._project_ready.clear()
+            self._messaging_schema_ensured = False
+            self._researches_schema_ensured = False
+        lock = self._async_locks.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._async_locks[name] = lock
+        return lock
 
     async def connect(self):
-        import asyncio
         loop = asyncio.get_running_loop()
-        if self._pool is not None and getattr(self._pool, "_loop", None) != loop:
-            old_pool = self._pool
-            self._pool = None
-            try:
-                old_pool.terminate()
-            except Exception:
-                pass
+        async with self._get_lock("connect"):
+            if self._pool is not None and getattr(self._pool, "_loop", None) != loop:
+                old_pool = self._pool
+                self._pool = None
+                try:
+                    old_pool.terminate()
+                except Exception:
+                    pass
 
-        if not self._pool:
-            self._pool = await asyncpg.create_pool(
-                host=self.host,
-                port=self.port,
-                user=self.user,
-                password=self.password,
-                database=self.database,
-                min_size=1,
-                max_size=3,  # 严格控制在 3 个连接以内，杜绝多连接资源争抢
-                command_timeout=10.0,
-            )
+            if self._pool is None:
+                self._pool = await asyncpg.create_pool(
+                    host=self.host,
+                    port=self.port,
+                    user=self.user,
+                    password=self.password,
+                    database=self.database,
+                    min_size=1,
+                    max_size=3,
+                    command_timeout=10.0,
+                )
 
     async def close(self):
-        if self._pool:
-            await self._pool.close()
+        loop = asyncio.get_running_loop()
+        async with self._get_lock("connect"):
+            pool = self._pool
             self._pool = None
+            self._project_ready.clear()
+            self._messaging_schema_ensured = False
+            self._researches_schema_ensured = False
+            if pool is not None:
+                if getattr(pool, "_loop", None) != loop:
+                    pool.terminate()
+                else:
+                    await pool.close()
 
     async def ensure_project(self, project: str):
-        """确保项目 Schema 已经初始化。"""
+        """Ensure a project schema once per process and event loop."""
         await self.connect()
-        async with self._pool.acquire() as conn:
-            await conn.execute("SELECT shared.init_project_schema($1)", project)
+        if project in self._project_ready:
+            return
+        async with self._get_lock(f"project:{project}"):
+            if project in self._project_ready:
+                return
+            async with self._pool.acquire() as conn:
+                await conn.execute("SELECT shared.init_project_schema($1)", project)
+            self._project_ready.add(project)
 
     async def register_project(
         self,
@@ -956,54 +992,29 @@ class Database:
     # =========================================================================
 
     async def ensure_messaging_schema(self):
-        """确保 shared.agent_messages 与 shared.file_leases 物理表存在 (幂等自愈，单进程生命周期仅首检一次)。"""
+        """Verify the migration-managed messaging and lease schema once per loop."""
+        await self.connect()
         if self._messaging_schema_ensured:
             return
-        await self.connect()
-        async with self._pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS shared.agent_messages (
-                    id BIGSERIAL PRIMARY KEY,
-                    project_id VARCHAR(32) NOT NULL,
-                    from_agent VARCHAR(64) NOT NULL,
-                    from_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0',
-                    to_agent VARCHAR(64) NOT NULL,
-                    to_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0',
-                    subject VARCHAR(256) NOT NULL,
-                    content TEXT NOT NULL,
-                    task_id VARCHAR(32),
-                    thread_id VARCHAR(64),
-                    is_read BOOLEAN NOT NULL DEFAULT FALSE,
-                    read_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-                ALTER TABLE shared.agent_messages ADD COLUMN IF NOT EXISTS from_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
-                ALTER TABLE shared.agent_messages ADD COLUMN IF NOT EXISTS to_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
-
-                CREATE INDEX IF NOT EXISTS idx_agent_messages_inbox
-                    ON shared.agent_messages (project_id, to_agent, is_read, created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_agent_messages_task
-                    ON shared.agent_messages (project_id, task_id);
-                CREATE INDEX IF NOT EXISTS idx_agent_messages_thread
-                    ON shared.agent_messages (project_id, thread_id);
-
-                CREATE TABLE IF NOT EXISTS shared.file_leases (
-                    id BIGSERIAL PRIMARY KEY,
-                    project_id VARCHAR(32) NOT NULL,
-                    agent_name VARCHAR(64) NOT NULL,
-                    agent_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0',
-                    file_path VARCHAR(512) NOT NULL,
-                    lease_expires_at TIMESTAMPTZ NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT uq_project_file_lease UNIQUE (project_id, file_path)
-                );
-                ALTER TABLE shared.file_leases ADD COLUMN IF NOT EXISTS agent_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
-                CREATE INDEX IF NOT EXISTS idx_file_leases_lookup
-                    ON shared.file_leases (project_id, lease_expires_at);
-                CREATE INDEX IF NOT EXISTS idx_file_leases_agent_ip
-                    ON shared.file_leases (project_id, agent_ip);
-            """)
-        self._messaging_schema_ensured = True
+        async with self._get_lock("messaging_schema"):
+            if self._messaging_schema_ensured:
+                return
+            async with self._pool.acquire() as conn:
+                ready = bool(await conn.fetchval("""
+                    SELECT to_regclass('shared.agent_messages') IS NOT NULL
+                       AND to_regclass('shared.file_leases') IS NOT NULL
+                       AND EXISTS (
+                           SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = 'shared'
+                             AND table_name = 'agent_messages'
+                             AND column_name = 'read_by_agent'
+                       )
+                """))
+            if not ready:
+                raise RuntimeError(
+                    "messaging schema is not migrated; run python -m logbook.migrate up"
+                )
+            self._messaging_schema_ensured = True
 
     async def send_agent_message(
         self,
@@ -1065,17 +1076,31 @@ class Database:
         message_id: int,
         agent_name: str | None = None,
     ) -> AgentMessage | None:
+        recipient = (agent_name or "").strip()
+        if not recipient:
+            raise ValueError("recipient agent identity is required")
         await self.ensure_messaging_schema()
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("""
                 UPDATE shared.agent_messages
                 SET is_read = TRUE,
-                    read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
-                WHERE id = $1
+                    read_at = COALESCE(read_at, CURRENT_TIMESTAMP),
+                    read_by_agent = COALESCE(read_by_agent, $2)
+                WHERE id = $1 AND to_agent = $2
                 RETURNING id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
-                          task_id, thread_id, is_read, read_at, created_at;
-            """, message_id)
+                          task_id, thread_id, is_read, read_at, read_by_agent, created_at;
+            """, message_id, recipient)
             if not row:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM shared.agent_messages WHERE id = $1)",
+                    message_id,
+                )
+                if exists:
+                    logger.warning(
+                        "Rejected mailbox read: message_id=%s recipient=%s",
+                        message_id,
+                        recipient,
+                    )
                 return None
             return AgentMessage(**dict(row))
 
@@ -1110,29 +1135,42 @@ class Database:
         await self.ensure_messaging_schema()
         duration_seconds = max(10, min(duration_seconds, 3600))
         async with self._pool.acquire() as conn:
-            existing = await conn.fetchrow("""
-                SELECT id, project_id, agent_name, agent_ip, file_path, lease_expires_at, created_at
-                FROM shared.file_leases
-                WHERE project_id = $1 AND file_path = $2;
-            """, project_id, file_path)
+            result = await conn.fetchrow("""
+                WITH attempted AS (
+                    INSERT INTO shared.file_leases
+                        (project_id, agent_name, agent_ip, file_path, lease_expires_at, created_at)
+                    VALUES (
+                        $1, $2, $3, $4,
+                        CURRENT_TIMESTAMP + ($5 * INTERVAL '1 second'),
+                        CURRENT_TIMESTAMP
+                    )
+                    ON CONFLICT (project_id, file_path) DO UPDATE SET
+                        agent_name = EXCLUDED.agent_name,
+                        agent_ip = EXCLUDED.agent_ip,
+                        lease_expires_at = CURRENT_TIMESTAMP + ($5 * INTERVAL '1 second'),
+                        created_at = CURRENT_TIMESTAMP
+                    WHERE shared.file_leases.lease_expires_at <= CURRENT_TIMESTAMP
+                       OR shared.file_leases.agent_name = EXCLUDED.agent_name
+                    RETURNING id, project_id, agent_name, agent_ip, file_path,
+                              lease_expires_at, created_at
+                ), current AS (
+                    SELECT id, project_id, agent_name, agent_ip, file_path,
+                           lease_expires_at, created_at
+                    FROM shared.file_leases
+                    WHERE project_id = $1 AND file_path = $2
+                )
+                SELECT
+                    (SELECT to_jsonb(attempted) FROM attempted) AS attempted,
+                    (SELECT to_jsonb(current) FROM current) AS current;
+            """, project_id, agent_name, agent_ip, file_path, duration_seconds)
+            attempted = json.loads(result["attempted"]) if result["attempted"] else None
+            if attempted:
+                return True, FileLease(**attempted), None
 
-            now = get_beijing_now()
-            if existing:
-                exp = existing["lease_expires_at"]
-                if exp > now and existing["agent_name"] != agent_name:
-                    return False, FileLease(**dict(existing)), existing["agent_name"]
-
-            row = await conn.fetchrow("""
-                INSERT INTO shared.file_leases (project_id, agent_name, agent_ip, file_path, lease_expires_at, created_at)
-                VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP + ($5 || ' seconds')::INTERVAL, CURRENT_TIMESTAMP)
-                ON CONFLICT (project_id, file_path) DO UPDATE SET
-                    agent_name = EXCLUDED.agent_name,
-                    agent_ip = EXCLUDED.agent_ip,
-                    lease_expires_at = CURRENT_TIMESTAMP + ($5 || ' seconds')::INTERVAL,
-                    created_at = CURRENT_TIMESTAMP
-                RETURNING id, project_id, agent_name, agent_ip, file_path, lease_expires_at, created_at;
-            """, project_id, agent_name, agent_ip, file_path, str(duration_seconds))
-            return True, FileLease(**dict(row)), None
+            conflict_row = json.loads(result["current"]) if result["current"] else None
+            if conflict_row:
+                return False, FileLease(**conflict_row), conflict_row["agent_name"]
+            return False, None, None
 
     async def release_file_lease(
         self,
@@ -1169,12 +1207,15 @@ class Database:
     # =========================================================================
 
     async def ensure_researches_schema(self):
-        """确保 shared.researches 物理表及索引存在 (幂等自愈，单进程生命周期仅首检一次)。"""
+        """Ensure research tables once per process and event loop."""
+        await self.connect()
         if self._researches_schema_ensured:
             return
-        await self.connect()
-        async with self._pool.acquire() as conn:
-            await conn.execute("""
+        async with self._get_lock("researches_schema"):
+            if self._researches_schema_ensured:
+                return
+            async with self._pool.acquire() as conn:
+                await conn.execute("""
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pg_trgm;
                 CREATE TABLE IF NOT EXISTS shared.researches (
@@ -1211,8 +1252,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_researches_tsv ON shared.researches USING gin(tsv_content);
                 CREATE INDEX IF NOT EXISTS idx_researches_vector_hnsw ON shared.researches USING hnsw (embedding vector_cosine_ops)
                     WITH (m = 16, ef_construction = 64);
-            """)
-        self._researches_schema_ensured = True
+                """)
+            self._researches_schema_ensured = True
 
     async def find_existing_research(
         self,

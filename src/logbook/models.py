@@ -279,6 +279,7 @@ class AgentMessage(AgentMessageSend):
     id: int
     is_read: bool = False
     read_at: datetime | None = None
+    read_by_agent: str | None = Field(default=None, max_length=64, description="实际读取并核销信件的收件人")
     created_at: datetime = Field(default_factory=get_beijing_now)
 
 

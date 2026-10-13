@@ -18,6 +18,8 @@ from logbook.negotiation import (
 from logbook.mcp_server import project_init, get_projects_resource
 from logbook.db import db
 
+pytestmark = pytest.mark.integration
+
 
 def test_slug_to_schema_name():
     """测试将权威 Git 坐标转换为合规物理 Schema 名称。"""

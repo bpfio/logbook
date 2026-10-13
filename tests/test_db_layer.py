@@ -11,6 +11,8 @@ from logbook.models import (
     Waiting, WaitingStatus, DevLog,
 )
 
+pytestmark = pytest.mark.integration
+
 PROJ = "l_a1_probe"
 
 

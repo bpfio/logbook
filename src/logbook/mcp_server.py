@@ -65,6 +65,21 @@ mcp = MCPServer("logbook-mcp-server")
 QUERY_LIMIT_MAX = 200
 
 
+def _trusted_agent_identity(explicit_agent: str | None = None) -> tuple[str | None, dict | None]:
+    trusted_identity = os.getenv("LOGBOOK_AGENT_ID", "").strip()
+    if not trusted_identity:
+        return None, tool_error(
+            "CALLER_IDENTITY_REQUIRED",
+            "缺少可信 LOGBOOK_AGENT_ID，无法执行多 Agent 身份操作",
+        )
+    if explicit_agent is not None and explicit_agent.strip() != trusted_identity:
+        return None, tool_error(
+            "CALLER_IDENTITY_MISMATCH",
+            "调用参数中的 Agent 身份与可信身份不一致",
+        )
+    return trusted_identity, None
+
+
 def tool_shell(fn):
     """P0-2 结构化错误面: 工具体任何异常统一转 {isError, error_type, detail, ...}。
 
@@ -257,6 +272,9 @@ async def get_agent_personal_inbox_resource(agent_name: str) -> str:
     """提供指定 Agent 的全局个人信箱未读与近期消息 Markdown 视图 (零开销直读)。"""
     try:
         name = agent_name.strip()
+        trusted_identity, identity_error = _trusted_agent_identity(name)
+        if identity_error:
+            return f"拒绝读取 Agent [{name}] 的个人信箱: {identity_error['error_type']}"
         msgs = await db.get_agent_inbox(project_id=None, agent_name=name, unread_only=True, limit=20)
         is_unread = True
         if not msgs:
@@ -289,6 +307,9 @@ async def get_agent_project_mailbox_resource(project: str, agent_name: str) -> s
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
         name = agent_name.strip()
+        trusted_identity, identity_error = _trusted_agent_identity(name)
+        if identity_error:
+            return f"拒绝读取项目 [{project}] Agent [{name}] 的信箱: {identity_error['error_type']}"
         msgs = await db.get_agent_inbox(project_id=proj, agent_name=name, unread_only=True, limit=20)
         is_unread = True
         if not msgs:
@@ -1302,6 +1323,9 @@ async def message_send(
     - thread_id: 可选。会话线索短标识。
     - full: 可选。True 时回显全量 Message 实体。
     """
+    trusted_identity, identity_error = _trusted_agent_identity(from_agent)
+    if identity_error:
+        return identity_error
     proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     s_sub = sanitize_text(subject).clean_text
     s_cnt = sanitize_text(content).clean_text
@@ -1314,7 +1338,7 @@ async def message_send(
     msg = await asyncio.shield(
         db.send_agent_message(
             project_id=proj,
-            from_agent=from_agent.strip(),
+            from_agent=trusted_identity,
             to_agent=to_agent.strip(),
             subject=s_sub,
             content=s_cnt,
@@ -1388,13 +1412,16 @@ async def message_inbox(
     - unread_only: 可选。默认 True (仅查未读)。False 时查收历史全部。
     - limit: 可选。返回条数限制 (默认 20，上限 200)。
     """
+    trusted_identity, identity_error = _trusted_agent_identity(agent_name)
+    if identity_error:
+        return identity_error
     proj = None
     if project:
         proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
 
     msgs = await db.get_agent_inbox(
         project_id=proj,
-        agent_name=agent_name.strip(),
+        agent_name=trusted_identity,
         unread_only=unread_only,
         limit=limit,
     )
@@ -1402,7 +1429,7 @@ async def message_inbox(
     return {
         "success": True,
         "ok": True,
-        "agent": agent_name.strip(),
+        "agent": trusted_identity,
         "total": len(items),
         "messages": items,
     }
@@ -1418,11 +1445,17 @@ async def message_read(
 
     字段说明:
     - message_id: 必填。信件全局唯一自增 ID。
-    - agent_name: 可选。操作者 Agent 名称 (用于审计)。
+    - agent_name: 可选兼容参数，只能等于可信调用身份。
     """
-    msg = await db.read_agent_message(message_id=message_id, agent_name=agent_name)
+    trusted_identity, identity_error = _trusted_agent_identity(agent_name)
+    if identity_error:
+        return identity_error
+    msg = await db.read_agent_message(
+        message_id=message_id,
+        agent_name=trusted_identity,
+    )
     if not msg:
-        return tool_error("MESSAGE_NOT_FOUND", f"未找到 ID 为 {message_id} 的信件")
+        return tool_error("MESSAGE_NOT_READABLE", "信件不存在或当前身份无权读取")
     return {
         "success": True,
         "ok": True,
@@ -1449,13 +1482,16 @@ async def lease_acquire(
     - duration_seconds: 可选。租约持有秒数 (默认 300 秒/5分钟，上限 3600 秒)。
     - agent_ip: 可选。申请租约的 Agent 节点 IP 地址 (缺省自动探测填充)。
     """
+    trusted_identity, identity_error = _trusted_agent_identity(agent_name)
+    if identity_error:
+        return identity_error
     proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     clean_path = file_path.strip().lstrip("/")
     caller_ip = detect_caller_ip(agent_ip)
 
     ok, lease, conflict_agent = await db.acquire_file_lease(
         project_id=proj,
-        agent_name=agent_name.strip(),
+        agent_name=trusted_identity,
         file_path=clean_path,
         duration_seconds=duration_seconds,
         agent_ip=caller_ip,
@@ -1474,7 +1510,7 @@ async def lease_acquire(
         "success": True,
         "ok": True,
         "project": proj,
-        "agent": agent_name.strip(),
+        "agent": trusted_identity,
         "agent_ip": caller_ip,
         "file_path": clean_path,
         "lease_expires_at": lease.lease_expires_at.isoformat() if lease else None,
@@ -1497,12 +1533,15 @@ async def lease_release(
     - agent_name: 必填。持锁的 Agent 名称。
     - file_path: 必填。代码文件相对路径。
     """
+    trusted_identity, identity_error = _trusted_agent_identity(agent_name)
+    if identity_error:
+        return identity_error
     proj = await validate_and_negotiate_project(project, allow_cross_project=allow_cross_project)
     clean_path = file_path.strip().lstrip("/")
 
     released = await db.release_file_lease(
         project_id=proj,
-        agent_name=agent_name.strip(),
+        agent_name=trusted_identity,
         file_path=clean_path,
     )
     return {

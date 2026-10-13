@@ -23,6 +23,8 @@ from logbook.mcp_server import (
 )
 from logbook.db import db
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.mark.asyncio
 async def test_negotiation_typo_correction():
@@ -72,8 +74,9 @@ async def test_mcp_tool_negotiation_response():
 
 
 @pytest.mark.asyncio
-async def test_cross_project_permission_boundary():
+async def test_cross_project_permission_boundary(monkeypatch):
     """测试跨项目越权物理拦截与显式授权放行。"""
+    monkeypatch.setenv("LOGBOOK_PROJECT", "logbook")
     curr_ws = detect_current_workspace_project()
     assert curr_ws in ("logbook", "bpfio/logbook")  # 当前物理工作区正是 logbook / bpfio/logbook
 

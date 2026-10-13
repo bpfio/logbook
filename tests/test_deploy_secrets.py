@@ -1,8 +1,8 @@
 """deploy/qnap 密钥迁出 (P2-1) 冒烟测试
 
 验证内容:
-1. compose.yaml 不含明文凭据 (星火 API Key / 数据库口令)
-2. compose.yaml 的 ${VAR} 引用均能在 .env / .env.example 中找到定义
+1. compose.yaml.example 不含明文凭据 (星火 API Key / 数据库口令)
+2. compose.yaml.example 的 ${VAR} 引用均能在 .env.example 中找到定义
 3. .env.example 只含占位符, 不含真实值
 4. .gitignore 已忽略 deploy/qnap/.env
 
@@ -35,19 +35,21 @@ def _compose_var_refs(text: str) -> set:
 
 
 def test_compose_has_no_plaintext_secrets():
-    text = (QNAP_DIR / "compose.yaml").read_text(encoding="utf-8")
+    text = (QNAP_DIR / "compose.yaml.example").read_text(encoding="utf-8")
     # 星火 key 片段与历史明文口令不得再出现
     assert "3ea8786db03a" not in text
     assert "logbook_qnap_password_2026" not in text
     assert "EMBEDDING_API_KEY=${EMBEDDING_API_KEY}" in text
     assert "POSTGRES_PASSWORD=${LOGBOOK_DB_PASSWORD}" in text
+    assert "SSH_PASSWORD" not in text
+    assert "SSH_HOST=0.0.0.0" in text
+    assert "LOGBOOK_DEFAULT_AGENT_ID=agy" in text
 
 
 def test_compose_var_refs_resolvable():
-    compose_text = (QNAP_DIR / "compose.yaml").read_text(encoding="utf-8")
-    env = _parse_env_file(QNAP_DIR / ".env")
+    compose_text = (QNAP_DIR / "compose.yaml.example").read_text(encoding="utf-8")
     env_example = _parse_env_file(QNAP_DIR / ".env.example")
-    defined = set(env) | set(env_example)
+    defined = set(env_example)
     missing = _compose_var_refs(compose_text) - defined
     assert not missing, f"compose 引用了未定义变量: {missing}"
 
@@ -56,6 +58,7 @@ def test_env_example_is_placeholder_only():
     text = (QNAP_DIR / ".env.example").read_text(encoding="utf-8")
     assert "3ea8786db03a" not in text
     assert "logbook_qnap_password_2026" not in text
+    assert "LOGBOOK_DEFAULT_AGENT_ID=agy" in text
 
 
 def test_gitignore_covers_qnap_env():

@@ -23,7 +23,7 @@ services:
           memory: 80M
     volumes:
       - pgdata:/var/lib/postgresql
-      - ./sql/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./sql:/docker-entrypoint-initdb.d:ro
 
 volumes:
   pgdata:

@@ -9,10 +9,13 @@
 
 ---
 
-## 一、任务台账 (19)
+## 一、任务台账 (22)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-STAB | running | fix | 审计 A-01~A-08 稳定性整改与生产验收 | - | `docs/PLAN_STABILITY_FIX_2026-10-13.md`; S0~S4 代码与本地验收完成，S5 QNAP 生产验收待执行 |
+| L-AUD-01 | running | audit | Logbook 稳定性专项审计报告落盘 | - | `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`; P0×1 / P1×6 / P2×1; 待提交后补齐 commit |
+| L-AUD-02 | running | audit | 稳定性整改变更后复审 | - | `docs/AUDIT_LOGBOOK_STABILITY_REAUDIT_2026-10-13.md`; 首次 P1×3 / P2×2 / P3×1 已二次修复，待生产 S5 与提交证据 |
 | L-MSG-1 | closed | fix | 对讲邮件子系统生产故障修复: message_* 调用即断连 (L-MSG-1 办结) | 3259ffe | 根因消除/单进程DDL首检缓存/asyncio.shield守护/SSH管道300ms缓冲/个人信箱资源上线 |
 | L14 | closed | feat | 研发调研知识库 (shared.researches) 与开工前 RAG 语义检索落地 | 0894f91 | sql/07_research_knowledge_base.sql + research_record/search/query 三大MCP工具 + 13测试全绿 |
 | L13.5 | closed | feat | 全实体Agent IP溯源与不可篡改审计增强 (06_migration) | e829bd2 | sql/06_agent_ip_audit_everywhere.sql + detect_caller_ip三级探测 + 9测试全绿 |
@@ -55,6 +58,37 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-10-13-03] 稳定性整改变更后复审 — 🟢 running
+
+针对未提交的 S0~S4 变更执行代码审查、隔离数据库对抗测试、真实 AsyncSSH 测试和 clean-checkout 门禁复验，报告已落盘至 `docs/AUDIT_LOGBOOK_STABILITY_REAUDIT_2026-10-13.md`：
+
+1. **已验证改善**: A-01、A-03、A-04、A-05、A-07 本地证据成立，二次修复后当前工作区与隔离树均为 unit 45 / integration 40 全绿；
+2. **首次阻断**: `message_inbox` 与个人信箱 Resource 绕过收件人鉴权；租约持有者可被任意调用参数冒充；
+3. **二次修复**: 可信身份、租约单语句冲突返回、Schema 就绪检查与 clean-checkout 自举均已修复，当前工作区和隔离树 full gate 全绿；
+4. **未闭环项**: QNAP 生产 `L-MSG-1` 仍为 P1，S5 生产部署、备份对账和回滚演练尚未执行；
+5. **裁决**: 暂不批准生产发布；完成 S5 后方可复审关闭；
+6. **状态归档**: 完整会话状态保存于 `docs/session_state_2026-10-13.md`，并已入库为 `devlog[90]`。
+
+## [DEV-2026-10-13-02] Logbook 稳定性审计修复计划 — 🟢 running
+
+基于已复验的 A-01 至 A-08 审计发现，形成 `docs/PLAN_STABILITY_FIX_2026-10-13.md`：
+
+1. **实施顺序**: S0 可复现门禁 → S1 版本化迁移链 → S2 并发正确性 → S3 信箱与 SSH 安全 → S4 SSH/MCP 生命周期 → S5 QNAP 发布验收；
+2. **关键架构约束**: 数据库原子条件写入、连接池与 DDL 单飞、协议生命周期驱动 EOF、可信身份不接受工具参数伪造；
+3. **当前状态**: S0~S4 已完成本地代码与测试验收；临时 PostgreSQL 门禁、迁移链、并发/安全及真实 AsyncSSH 5 秒慢调用均已通过；
+4. **完成红线**: 全部 P0/P1 修复、clean-checkout 门禁、并发与安全验收、QNAP 备份对账及回滚演练全部通过后方可办结；当前仅剩 S5 生产验收与提交证据，任务保持 `running`。
+
+## [DEV-2026-10-13-01] Logbook 稳定性专项审计报告落盘 — 🟢 running
+
+基于本地工作区 `main@149a646` 完成只读代码审查、测试执行与连接池并发探针，形成 `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`：
+
+1. **审计结论**: 既有数据卷上的生产路径据历史台账记录能够运行，但本次未连接 QNAP Docker 或生产数据库；干净部署、并发一致性与测试可复现性不稳定；
+2. **发现分级**: P0×1 (干净数据库初始化链断裂)、P1×6 (租约并发、连接池竞态、重复 DDL、SSH 300ms 猜测、信箱越权、默认弱口令)、P2×1 (门禁不可在干净检出复现)；
+3. **验证证据**: 源码 `compileall` 与 `git diff --check` 通过；无数据库抽样测试 8/8 通过；全量收集 64 项中 34 项通过、30 项因本地 PostgreSQL 未启动失败；并发探针创建 3 个连接池并泄漏 2 个引用；
+4. **当前状态**: 报告已落盘但尚未提交，任务保持 `running`，提交后补齐 commit hash 并按正典办结。
 
 ---
 

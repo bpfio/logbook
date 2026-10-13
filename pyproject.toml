@@ -33,3 +33,6 @@ packages = ["src/logbook"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: requires the ephemeral PostgreSQL test database",
+]

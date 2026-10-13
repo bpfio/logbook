@@ -26,6 +26,7 @@ RUN uv pip install --system \
 
 # Copy application source
 COPY src/ /app/src/
+COPY sql/ /app/sql/
 
 # Expose SSH (22) for Agent MCP & CLI access
 EXPOSE 22
