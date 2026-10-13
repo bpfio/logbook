@@ -54,8 +54,14 @@ WaitingCategoryArg = Annotated[WaitingCategory, BeforeValidator(normalize_waitin
 ResearchCategoryArg = Annotated[ResearchCategory, BeforeValidator(normalize_research_category)]
 ResearchStatusArg = Annotated[ResearchStatus, BeforeValidator(normalize_research_status)]
 
-# 创建 MCP Server 实例
-mcp = MCPServer("logbook-mcp-server")
+# 创建 MCP Server 实例 (version 注入用于生产部署构建辨识)
+try:
+    from importlib.metadata import version as _pkg_version
+    _SERVER_VERSION = _pkg_version("logbook")
+except Exception:
+    _SERVER_VERSION = "0.4.1"
+
+mcp = MCPServer("logbook-mcp-server", version=_SERVER_VERSION)
 
 
 # =============================================================================
