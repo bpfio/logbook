@@ -13,9 +13,9 @@
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
-| L-STAB | running | fix | 审计 A-01~A-08 稳定性整改与生产验收 | 336647e | S0~S4 已提交 (11af7e0 补 0.4.1 版本辨识)；S5 本地预飞全绿 (备份迁移演练+冒烟9/9+SSH入口, DevLog #91)，仅剩 QNAP 镜像替换终验 |
-| L-AUD-01 | closed | audit | Logbook 稳定性专项审计报告落盘 | 336647e | `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`; P0×1 / P1×6 / P2×1 全部转入 L-STAB 修复流, 报告随 336647e 入库办结 |
-| L-AUD-02 | running | audit | 稳定性整改变更后复审 | 336647e | R-01~R-06 已二次修复提交 (RA-IDENT-1/RA-QUAL-1/RA-LEASE-1 全 fixed)；仅剩 S5 生产镜像替换终验 |
+| L-STAB | running | fix | 审计 A-01~A-08 稳定性整改与生产验收 | 08c0461 | S0~S4 已提交 (9c9d239 补 0.4.1 版本辨识)；S5 本地预飞全绿 (备份迁移演练+冒烟9/9+SSH入口, DevLog #91)，仅剩 QNAP 镜像替换终验 |
+| L-AUD-01 | closed | audit | Logbook 稳定性专项审计报告落盘 | 08c0461 | `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`; P0×1 / P1×6 / P2×1 全部转入 L-STAB 修复流, 报告随 08c0461 入库办结 |
+| L-AUD-02 | running | audit | 稳定性整改变更后复审 | 08c0461 | R-01~R-06 已二次修复提交 (RA-IDENT-1/RA-QUAL-1/RA-LEASE-1 全 fixed)；仅剩 S5 生产镜像替换终验 |
 | L-MSG-1 | running | fix | 对讲邮件子系统生产故障: message_* 断连 — 生产复测已通, 待 0.4.1 镜像终验 | 3259ffe | 10-10 复测退回 (容器未加载热补丁)；10-13 生产复测回环全通断连不复现；0.4.1 新镜像预飞就绪待 QNAP 载入后翻 closed |
 | L14 | closed | feat | 研发调研知识库 (shared.researches) 与开工前 RAG 语义检索落地 | 0894f91 | sql/07_research_knowledge_base.sql + research_record/search/query 三大MCP工具 + 13测试全绿 |
 | L13.5 | closed | feat | 全实体Agent IP溯源与不可篡改审计增强 (06_migration) | e829bd2 | sql/06_agent_ip_audit_everywhere.sql + detect_caller_ip三级探测 + 9测试全绿 |
@@ -63,7 +63,7 @@
 
 ## [DEV-2026-10-13-04] S5 生产升级预飞与 L-MSG-1 生产复测 — ✅ 闭环
 
-整改代码提交 `336647e` + `11af7e0` (0.4.1 版本辨识) 后，完成 S5 全部可本地化预飞与生产只读复测 (DevLog #91)：
+整改代码提交 `08c0461` + `9c9d239` (0.4.1 版本辨识) 后，完成 S5 全部可本地化预飞与生产只读复测 (DevLog #91)：
 
 1. **生产复测**: QNAP 生产 (0.4.0+3259ffe 热补丁在跑) `message_send(#13)`→`inbox`→`read` 回环全通，10-10 的 -32000 断连不复现，判定"容器未加载热补丁"假设成立 (期间发生过重启)；`doctor` 报 PG 18.6 正常 (时钟漂移 +9s 警告)；
 2. **迁移演练**: 10-09 生产备份 (sha256 `7d0d4456…`) 还原至临时 PG 18 → `migrate up` 采用 01~07 + 实跑 08，`verify` 通过，11 项数据计数迁移前后零差异；
