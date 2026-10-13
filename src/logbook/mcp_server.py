@@ -59,7 +59,7 @@ try:
     from importlib.metadata import version as _pkg_version
     _SERVER_VERSION = _pkg_version("logbook")
 except Exception:
-    _SERVER_VERSION = "0.4.1"
+    _SERVER_VERSION = "0.4.2"
 
 mcp = MCPServer("logbook-mcp-server", version=_SERVER_VERSION)
 
@@ -1105,6 +1105,46 @@ async def devlog_search(
         "total": len(items),
         "items": items
     }
+
+
+@mcp.tool()
+@tool_shell
+async def rule_record(
+    id: str,
+    title: str,
+    summary: str,
+    bad_practice: str,
+    good_practice: str,
+    category: Literal["general", "network", "kernel", "database", "security", "engineering", "governance", "resource"] = "general",
+    constraints: str | None = None,
+    full: bool = False,
+) -> dict:
+    """登记或更新架构铁律/工程红线 (SSOT)。全项目共享，按 id 幂等更新。
+
+    标准要素 (AGENTS.md 正典):
+    - id: 必填。规则标识 (如 'RULE-NET-01')。
+    - title: 必填。规则标题。
+    - summary: 必填。一句话核心原则。
+    - bad_practice: 必填。错误示范 (Anti-Pattern)。
+    - good_practice: 必填。正确做法 (Best Practice)。
+    - category: 领域分类 (general/network/kernel/database/security/engineering/governance/resource)。
+    - constraints: 可选。执行细则与边界红线说明。
+    - full: 可选。True 时回显规则全对象 (缺省 False 仅回瘦身 {ok, id, category})。
+    """
+    rule = Rule(
+        id=id,
+        category=category,
+        title=sanitize_text(title).clean_text,
+        summary=sanitize_text(summary).clean_text,
+        bad_practice=sanitize_text(bad_practice).clean_text,
+        good_practice=sanitize_text(good_practice).clean_text,
+        constraints=sanitize_text(constraints).clean_text if constraints else None,
+    )
+    saved = await db.upsert_rule(rule)
+    slim = {"success": True, "ok": True, "id": id, "category": saved.category}
+    if full:
+        slim["rule"] = saved.model_dump(mode="json")
+    return slim
 
 
 @mcp.tool()

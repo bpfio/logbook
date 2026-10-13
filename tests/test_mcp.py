@@ -12,14 +12,13 @@ from logbook.mcp_server import (
     waiting_record,
     devlog_record,
     devlog_search,
+    rule_record,
     rule_query,
     batch_upsert,
     batch_query,
     export_markdown,
     brief
 )
-from logbook.db import db
-from logbook.models import Rule
 
 pytestmark = pytest.mark.integration
 
@@ -193,22 +192,38 @@ async def test_mcp_devlog_and_search_with_cache():
 
 @pytest.mark.asyncio
 async def test_mcp_rule_and_export():
-    """测试 rule_query 与 export_markdown。"""
-    rule = Rule(
+    """测试 rule_record 写入路径、幂等更新、rule_query 与 export_markdown。"""
+    saved = await rule_record(
         id="RULE-TEST-01",
-        category="security",
         title="测试铁律",
         summary="绝不在生产环境写明文密码",
         bad_practice="硬编码密码在配置文件中",
         good_practice="使用环境变量注入凭据",
-        constraints="违者立即阻断流水线"
+        category="security",
+        constraints="违者立即阻断流水线",
     )
-    await db.upsert_rule(rule)
+    assert saved["success"] is True
+    assert saved["id"] == "RULE-TEST-01"
+    assert saved["category"] == "security"
+
+    updated = await rule_record(
+        id="RULE-TEST-01",
+        title="测试铁律",
+        summary="绝不在生产环境写明文密码",
+        bad_practice="硬编码密码在配置文件中",
+        good_practice="使用环境变量注入凭据",
+        category="security",
+        constraints="违者立即阻断流水线并吊销凭据",
+        full=True,
+    )
+    assert updated["ok"] is True
+    assert updated["rule"]["constraints"] == "违者立即阻断流水线并吊销凭据"
 
     rules = await rule_query("测试铁律", category="security")
     assert rules["success"] is True
     assert rules["total"] >= 1
-    assert rules["items"][0]["id"] == "RULE-TEST-01"
+    hit = next(item for item in rules["items"] if item["id"] == "RULE-TEST-01")
+    assert hit["constraints"] == "违者立即阻断流水线并吊销凭据"
 
     # 导出 markdown 测试
     export_path = "tests/test_export.md"
