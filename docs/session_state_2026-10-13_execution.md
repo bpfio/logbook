@@ -54,7 +54,7 @@
 
 ## 7. 环境通道备忘（接续必读）
 
-- 生产 MCP：`ssh sysadmin@192.168.1.68 mcp`（forced-command，仅 mcp/CLI；`logbook doctor`/`logbook status` 可用）。
+- 生产 MCP：`ssh sysadmin@logbook mcp`（forced-command，仅 mcp/CLI；`logbook doctor`/`logbook status` 可用）。主机别名：本机 `/etc/hosts` 定义 `nas`=192.168.1.33、`logbook`=192.168.1.68；`~/.ssh/config` 定义同名 Host 别名（nas→admin@.33、logbook→sysadmin@.68）；ZCode MCP 配置已改用 `sysadmin@logbook`。命令行直接 `ssh logbook` / `ssh nas` 即可。
 - QNAP 宿主：`192.168.1.33`，docker 在 `/share/CACHEDEV1_DATA/.qpkg/container-station/bin`（需 export PATH）；部署目录 `/share/CACHEDEV1_DATA/Container/logbook`；宿主凭据不在仓库内（通道机制见 `tests/benchmark_live.py` 的 QNAP_PASSWORD 用法）。
 - 部署陷阱：新镜像 SSH 默认仅绑回环，**compose 必须显式 `SSH_HOST=0.0.0.0`**，否则 macvlan SSH 失联。
 - 本会话 MCP 工具清单为会话建立时快照（25 工具），`rule_record` 需客户端重连后可见（生产侧已验证可用）。
