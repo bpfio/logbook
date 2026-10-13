@@ -8,7 +8,7 @@
 
 - 起点：复审报告 R-01~R-06 已二次修复但未提交、S5 生产验收未执行的 `main@149a646` 工作区。
 - 用户指令序列：执行审计整改闭环 → 直接部署 QNAP → 数据完整性核验 → 时钟治理 → 补 rule_record → 保存全部会话状态并同步 GitHub。
-- 终态：`main@02ddeb1` 已推送 `bpfio/logbook`，生产运行 `logbook:0.4.2`，全部 P1 任务办结，工作区 clean，三端时钟对齐。
+- 终态：`main@8436bf3` 已推送 `bpfio/logbook`，生产运行 `logbook:0.4.2`，全部 P1 任务办结，工作区 clean，三端时钟对齐。
 
 ## 2. 提交与版本链
 
@@ -74,3 +74,5 @@
 ## 9. 接续指引
 
 新会话开工：先 `logbook_brief(project=logbook)` → 通读 `docs/DEVLOG.md` 顶部 → 按需回看本文第 7 节通道备忘与第 8 节遗留项。生产不可用时回滚命令见 `deploy/qnap/DEPLOY.md` 第 6 节，回滚凭据见本文第 3 节。
+
+本执行会话的 ZCode 会话 ID：`sess_21a018d8-3afa-4596-af4a-7b129929c9a3`——需要完整对话上下文（决策链、误判证伪过程、命令细节）时，可用 `ReadSessionContext(sessionId="sess_21a018d8-3afa-4596-af4a-7b129929c9a3", strategy="handoff")` 直接拉取。
