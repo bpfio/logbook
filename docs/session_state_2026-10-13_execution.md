@@ -38,7 +38,8 @@
 - QNAP 宿主：`192.168.1.33`，docker 在 `/share/CACHEDEV1_DATA/.qpkg/container-station/bin`（需 export PATH）；部署目录 `/share/CACHEDEV1_DATA/Container/logbook`；宿主凭据不在仓库内（通道机制见 `tests/benchmark_live.py` 的 QNAP_PASSWORD 用法）。
 - 部署陷阱：新镜像 SSH 默认仅绑回环，**compose 必须显式 `SSH_HOST=0.0.0.0`**，否则 macvlan SSH 失联。
 - pgvector 结论：生产 vector 0.8.7 + HNSW 完好；最新备份裸容器干净还原实证扩展自愈（此前"缺扩展"系本地对账沙盒 `-t` 过滤还原的假象）。
-- 已知非阻断项：生产容器时钟漂移 +9s（doctor 告警）；NAS admin 凭据目前仅存在于用户侧历史文件，建议改公钥管理。
+- 时钟治理（2026-10-13 晚已完成）：QNAP 已配置 ntp.aliyun.com/ntp.tencent.com 双上游并作为 LAN NTP 服务端（`Enable NTP Server=TRUE`，UDP 123 全接口监听），漂移 +9.16s 已步进消除，生产 doctor 时钟项 ✔；本机时区 Asia/Shanghai，chrony 经 QNAP 同步（Stratum 4，synchronized=yes）。注意：QTS 配置必须走 `/sbin/setcfg`（直改 uLinux.conf 会被守护进程缓存回写覆盖）；`pool.ntp.org` 在本局域网被 DNS fake-ip 劫持不可用，禁用；chrony 的 `sources.d` 各文件严禁重复定义同一主机名（会导致选源死锁）。详见 DevLog #91。
+- 已知非阻断项：NAS admin 凭据目前仅存在于用户侧历史文件，建议改公钥管理。
 
 ## 5. 遗留与后续建议（均非阻断）
 
