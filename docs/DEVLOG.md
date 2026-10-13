@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (22)
+## 一、任务台账 (23)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L15 | closed | feat | rule_record MCP 写入原语落地, 闭合架构铁律 SSOT 读写环 (0.4.2) | 837ff87 | db.upsert_rule 早有但从未暴露; 0.4.2 上线生产, 回环验证通过并写入首条铁律 RULE-DEPLOY-01 (DevLog #92, DEV-2026-10-13-06) |
 | L-STAB | closed | fix | 审计 A-01~A-08 稳定性整改与生产验收 | 08c0461 | S0~S4 提交 + 9c9d239 版本辨识；0.4.1 已上线生产, 终验 9/9 全绿 (DevLog #91, DEV-2026-10-13-05) |
 | L-AUD-01 | closed | audit | Logbook 稳定性专项审计报告落盘 | 08c0461 | `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`; P0×1 / P1×6 / P2×1 全部转入 L-STAB 修复流, 报告随提交入库办结 |
 | L-AUD-02 | closed | audit | 稳定性整改变更后复审 | 08c0461 | R-01~R-06 修复并随 0.4.1 生产验收 (身份拒绝生产实测生效, S5 完成), 发布阻断解除 |
@@ -60,6 +61,16 @@
 |---|---|---|---|
 
 ---
+
+## [DEV-2026-10-13-06] rule_record 落地与 0.4.2 生产上线 — ✅ 闭环
+
+MCP 工具面盘点发现唯一真空：规则 (shared.rules) 只有 `rule_query`，`db.upsert_rule` 自 0.2.0 起存在却从未暴露，生产规则表长期 0 行只读。本次闭合 (DevLog #92)：
+
+1. **实现**: `rule_record` 工具 (id 幂等更新 / sanitizer 脱敏 / full 回显 / category 与 rule_query 同枚举)，测试改走工具路径并覆盖幂等与回显；升版 0.4.2 (commit `837ff87`)；
+2. **发布**: 门禁全绿 → 镜像构建 → 本地容器冒烟 4/4 → QNAP 备份 (sha256 `9ddccd38…`) → 18s 载入 → compose 切 0.4.2 → up -d；
+3. **生产验证**: tools=26 含 rule_record，写入→查询→`logbook://rules/engineering` 资源渲染全通；以 DEPLOY.md 铁律为蓝本写入首条真实规则 `RULE-DEPLOY-01`；
+4. **对账**: devlogs/messages/brix_tasks 与升级前一致，rules 0→1 即本次写入；全栈内存 70.3MiB；
+5. **澄清**: 此前"缺 pgvector"仅系本地对账沙盒的 `-t` 过滤还原假象；生产 vector 0.8.7 + HNSW 完好，且最新备份裸容器干净还原实证扩展自愈。
 
 ## [DEV-2026-10-13-05] 0.4.1 生产上线与 S5 终验 — ✅ 闭环
 
