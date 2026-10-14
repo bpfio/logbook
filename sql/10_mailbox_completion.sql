@@ -4,8 +4,11 @@
 -- - 收件人余量函数 acl_mailbox_has_room (防灌爆, GUC logbook.mailbox_cap 可覆盖, 缺省 500)
 -- - 信箱 RLS: 行级点对点隐私 —— 仅收发双方可见, 与群组隔离正交
 -- - 检索索引: 收件箱复合索引 + pg_trgm 模糊检索索引
--- 幂等执行。
+-- 幂等执行。pg_trgm 在迁移内自建, 不依赖运行期 ensure 状态, 保证迁移链自给自足。
 -- ============================================================================
+
+-- 0. 检索依赖扩展 (幂等; 迁移以超级用户/建库角色执行)
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- 1. 归档列
 ALTER TABLE shared.agent_messages ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;
