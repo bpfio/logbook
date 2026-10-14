@@ -18,7 +18,8 @@
 | `7c7b010` | feat(multi-user): 权限层 + 邮箱完成面（11 文件，+1761/-25） |
 | `251ac93` | docs(state): DEVLOG 台账/批次章节 + CHANGELOG 0.5.0 |
 | `e23a5fe` | fix(test): 门禁库名动态化（gate full 兼容） |
-| (本提交) | docs(state): 会话状态归档 |
+| `2692efc` | fix(migrate): 迁移 10 内自建 pg_trgm（部署隐患消除，见 §8） |
+| (本提交) | docs(state): 会话状态归档 + 生产兼容性核验（§8） |
 
 ## 3. 设计决策（语义方案 A，用户确认）
 
@@ -53,6 +54,7 @@
 2. **测试工作区探测干扰**：测试进程跑在 `bpfio/logbook` 检出内，MCP 工具的跨项目写守卫拦截探针项目 → 测试用 `LOGBOOK_PROJECT` env 显式声明工作区。
 3. **成员关系表不对数据面授权**：`principal_groups`/`groups` 刻意不授 SELECT（防成员关系泄漏），`get_principal_groups/list_groups` 走系统面读取。
 4. **门禁库名硬编码**：容量测试 `ALTER DATABASE logbook` 写死库名，gate 的干净临时库名不同导致 setup 全 ERROR → 改 `current_database()` 动态获取（e23a5fe）。
+5. **迁移 10 隐性依赖 pg_trgm**：`CREATE INDEX gin_trgm_ops` 需要该扩展但迁移链未创建；目标库若缺失 → 迁移 10 失败 → `up_with_retry` 自愈循环卡死 = 服务不可用。已在迁移 10 内补 `CREATE EXTENSION IF NOT EXISTS pg_trgm`（幂等，2692efc），迁移链自给自足。
 
 ## 6. 验收证据与上线前置
 
@@ -77,3 +79,23 @@
 - 权限裁决入口：`shared.acl_project_visible(schema, agent)`；数据面会话身份：`db._init_data_conn` / `_reset_data_conn`。
 - 群组运营：MCP `group_record → group_member_add → group_grant` 三步；查询 `group_query`；自查 `principal_query`。
 - 未做事项备忘：附件（若未来做，只做指针附件）、SMTP 桥（走外部 mail 通道）、stdio 多用户（不做）。
+
+## 8. 生产部署兼容性核验（验收后追加，2026-10-14）
+
+**结论：部署不影响现有使用，可平滑升级。** 核验依据（对照 `deploy/qnap/compose.yaml` 实际生产配置）：
+
+1. **RLS 不会拦截现有操作**：生产 `POSTGRES_USER=postgres` 且 app `DATABASE_URL` 亦以 postgres 连接 —— 表 owner = app 登录角色，PG RLS 对 owner 天然豁免；即使 SSH 会话降权到 `lb_u_<agent>`，`ensure_acl_bootstrap` 对全部存量 schema 补「未挂组 = legacy 全通」授权，启用群组收口前权限面与升级前完全等价。
+2. **迁移纯增量/自动/可回滚**：09/10 只加表、函数、带默认值列与索引，不删改存量行；SSH 启动时 `up_with_retry` 自动应用；旧版容器对新 schema 兼容（INSERT 显式列名）；回滚 = revert + 重建容器，RLS/grant 对 owner 透明。
+3. **首次会话自动开户**：`agy`/`zcode` 等首连自动注册 principals + 建 PG 角色；`LOGBOOK_ADMIN_AGENTS` 不配置不影响现有使用，仅群组管理工具返回 ADMIN_REQUIRED。
+
+**三个已知行为变化（非破坏）**：
+
+| 变化 | 影响 | 缓解 |
+|---|---|---|
+| `logbook_brief` 信箱概览只显示本人未读（RLS 点对点隐私） | 协调者不再看到所有 agent 的未读汇总 | 需要时可加 admin 可见汇总变体（未实现） |
+| 每会话连接数翻倍（数据面+系统面两池，各 min1） | postgres 默认 max_connections=100，日常 2~3 并发会话无压力 | 无需动作 |
+| 收件人未读满 500 拒收（`logbook.mailbox_cap` GUC 可调） | 按现消息量级不会触顶 | 无法本会话核验生产积压（见下） |
+
+**核验受限项**：生产库直读核验（pg_trgm 现状/未读积压）未完成 —— `ssh nas` 需交互密码（admin@192.168.1.33）、`logbook` 别名（192.168.1.68 容器 SSH）本会话公钥不匹配。pg_trgm 风险已由 2692efc 在代码侧消除；未读积压按量级判断不会触顶，部署后可用 `docker exec logbook-postgres psql -U postgres -d logbook -c "SELECT to_agent, count(*) FROM shared.agent_messages WHERE NOT is_read GROUP BY 1 ORDER BY 2 DESC;"` 一次性确认。
+
+**部署后验证清单**：① 任一 agent 发一封站内测试信 + 收件确认；② 查一次 `logbook_brief` 确认会话引导无降级告警（stderr 出现 `ACL bootstrap degraded` 即为引导失败，属 legacy 降级非故障，但应排查）；③ 需要分组时再配置 `LOGBOOK_ADMIN_AGENTS` 并重建容器。

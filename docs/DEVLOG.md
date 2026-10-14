@@ -73,6 +73,7 @@
 3. **关键排障**: asyncpg 连接池归还默认执行 RESET ALL 会清掉自定义 GUC (角色保留但身份丢失, RLS 静默失效) —— 以自定义 reset 钩子在归还时重新断言会话身份修复, 已沉淀 DevLog;
 4. **验证**: 新增 tests/test_permissions_mailbox.py 14 用例 (权限矩阵/加组显隐/摘组回开/信箱隐私/回复会话/归档/容量/管理面门禁) 全绿; 正式门禁 `scripts/gate.sh full` 5/5 全绿 (干净临时库, 含 18 笔重放/brief 度量/dedup dry-run); 完整会话状态归档 `docs/session_state_2026-10-14.md`;
 5. **回滚与上线**: 未部署 (按指示)。上线前置: `migrate up` 应用 09/10 → 评估 scripts/backfill_permissions.py --discover 挂组收口 → LOGBOOK_ADMIN_AGENTS 声明 admin → stdio 仅限本机、远程只走 SSH。回滚 = revert 7c7b010 + 重建容器 (RLS 对 owner 透明, 旧版本可直接读回全部数据)。
+6. **生产兼容性核验 (2692efc 后)**: 生产 POSTGRES_USER=postgres 且 app 同角色连接 → 表 owner 豁免 RLS, 升级零影响; 迁移 10 补建 pg_trgm 消除服务启动卡死隐患; 已知行为变化 (brief 信箱仅本人未读/每会话双连接/未读 500 上限) 与部署后验证清单详见 docs/session_state_2026-10-14.md §8。
 
 ---
 
