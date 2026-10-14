@@ -9,6 +9,7 @@
 
 import sys
 import os
+import re
 import socket
 import asyncio
 import functools
@@ -26,7 +27,8 @@ from .models import (
     Batch, BatchStatus,
     DevLog, DevLogVisibility, Rule,
     AgentMessage, FileLease,
-    Research, ResearchCategory, ResearchStatus
+    Research, ResearchCategory, ResearchStatus,
+    slug_to_schema_name,
 )
 from .sanitizer import sanitize_text
 from .time_sync import get_beijing_now, format_beijing
@@ -84,6 +86,44 @@ def _trusted_agent_identity(explicit_agent: str | None = None) -> tuple[str | No
             "调用参数中的 Agent 身份与可信身份不一致",
         )
     return trusted_identity, None
+
+
+async def _require_admin(action: str) -> str | None:
+    """群组管理面 admin 门禁。
+
+    - 有可信身份: 必须为 shared.principals.is_admin, 否则 ADMIN_REQUIRED 拒绝;
+    - 无身份 (本机 legacy/CLI 模式): 视为系统面全权, 保持存量行为。
+    """
+    identity = os.getenv("LOGBOOK_AGENT_ID", "").strip()
+    if not identity:
+        return None
+    if not await db.is_admin(identity):
+        raise ToolError(
+            "ADMIN_REQUIRED",
+            f"[{action}] 属于群组管理面操作, 仅 admin 账户可执行; 当前身份 [{identity}] 非 admin。",
+        )
+    return identity
+
+
+async def _session_bootstrap():
+    """stdio/SSH 会话启动引导 (幂等): ACL 基座 + 账户注册与 PG 角色同步。
+
+    任一失败均降级 legacy 不降权模式 (与存量单用户行为一致), 不阻断服务启动。
+    """
+    identity = os.getenv("LOGBOOK_AGENT_ID", "").strip()
+    if not identity:
+        return
+    try:
+        await db.ensure_acl_bootstrap()
+        await db.ensure_principal(identity)
+    except Exception as e:
+        print(f"[logbook] ACL bootstrap degraded to legacy mode: {type(e).__name__}: {e}", file=sys.stderr)
+    finally:
+        # 引导用连接不跨事件循环携带, 服务循环内按需重建
+        try:
+            await db.close()
+        except Exception:
+            pass
 
 
 def tool_shell(fn):
@@ -489,6 +529,7 @@ async def project_init(
     title: str,
     description: str | None = None,
     schema_name: str | None = None,
+    groups: list[str] | None = None,
 ) -> dict:
     """初始化并开立新项目的 Logbook 研发台账空间 (DDL Schema 幂等创建)。
 
@@ -497,13 +538,28 @@ async def project_init(
     - title: 必填。项目全称或中文名称 (如 '出口退税涉税风险穿透分析与研判')。
     - description: 可选。项目背景与核心职责简述。
     - schema_name: 可选。指定物理 Schema 名称 (缺省由 repo 尾部名称自动安全派生)。
+    - groups: 可选。建库时挂载的群组 (挂载即收口: 组内互见互写, 跨组不可见);
+      缺省挂载调用者所在的全部群组; admin 可指定任意群组。
+      不挂组 = legacy 开放态 (全体账户可见可写), 可后续由 admin group_grant 收口。
     """
+    identity = os.getenv("LOGBOOK_AGENT_ID", "").strip() or None
     clean_repo = sanitize_text(repo).clean_text.strip()
     clean_title = sanitize_text(title).clean_text.strip()
     clean_desc = sanitize_text(description).clean_text.strip() if description else None
 
     if not clean_repo or not clean_title:
         return tool_error("INVALID_ARGUMENT", "repo 与 title 参数均为必填项，禁止为空！", tool="project_init")
+
+    # 多用户语义守卫: 项目物理存在但当前身份不可见 → 语义化拒绝 (不泄露存在性细节以外的信息)
+    probe_schema = schema_name or slug_to_schema_name(clean_repo)
+    probe = await db.probe_project(probe_schema, agent=identity)
+    if probe["exists"] and not probe["visible"] and not (identity and await db.is_admin(identity)):
+        return tool_error(
+            "PROJECT_NOT_VISIBLE",
+            f"项目 [{probe_schema}] 已存在且已挂载群组, 您的账户无访问权 (跨组不可见); 如需接入请联系 admin 将您加入对应群组。",
+            project=probe_schema,
+            tool="project_init",
+        )
 
     proj = await db.register_project(
         slug=clean_repo,
@@ -512,13 +568,169 @@ async def project_init(
         schema_name=schema_name
     )
 
+    # 建库挂组: 新建项目挂请求群组 (或调用者所在群组); 已存在项目不自动改挂载面 (由 admin 管理)
+    was_new = not probe["exists"]
+    attached: list[str] = []
+    if was_new and db.acl_bootstrapped:
+        if groups:
+            if identity and not await db.is_admin(identity):
+                mine = set(await db.get_principal_groups(identity))
+                disallowed = set(groups) - mine
+                if disallowed:
+                    return tool_error(
+                        "ADMIN_REQUIRED",
+                        f"非 admin 账户仅能将新项目挂载到自己所在的群组; 无权挂载: {sorted(disallowed)}",
+                        tool="project_init",
+                    )
+            for g in sorted(set(groups)):
+                try:
+                    await db.grant_group_project(g, proj.schema_name, operator=identity)
+                    attached.append(g)
+                except ValueError:
+                    return tool_error("GROUP_NOT_FOUND", f"群组 [{g}] 不存在, 请先 group_record 创建。", tool="project_init")
+        elif identity:
+            for g in await db.get_principal_groups(identity):
+                try:
+                    await db.grant_group_project(g, proj.schema_name, operator=identity)
+                    attached.append(g)
+                except ValueError:
+                    continue
+
     return {
         "success": True,
         "ok": True,
         "project": proj.schema_name,
         "repo": proj.slug,
         "title": proj.title,
+        "groups_attached": attached,
         "message": f"项目 [{proj.slug}] 研发台账空间已成功开通！物理 Schema: [{proj.schema_name}]"
+                   + (f"；已挂载群组: {attached} (组内互见互写, 跨组不可见)" if attached else "；当前为 legacy 开放态 (未挂组)"),
+    }
+
+
+# =============================================================================
+# 一·五、 多用户分组权限管理面 (0.5.0, admin 门禁)
+# =============================================================================
+
+@mcp.tool()
+@tool_shell
+async def group_record(
+    group_name: str,
+    description: str | None = None,
+) -> dict:
+    """创建或更新群组 (admin 门禁)。群组是项目可见性的唯一边界: 组内互见互写, 跨组不可见。
+
+    - group_name: 必填。群组名 (2~64 位字母数字下划线中划线)。
+    - description: 可选。群组职责说明。
+    """
+    await _require_admin("group_record")
+    name = sanitize_text(group_name).clean_text.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", name):
+        return tool_error("INVALID_ARGUMENT", "group_name 需为 2~64 位字母/数字/下划线/中划线。", tool="group_record")
+    identity = os.getenv("LOGBOOK_AGENT_ID", "").strip() or None
+    g = await db.create_group(name, description, identity)
+    return {"success": True, "ok": True, "group": g}
+
+
+@mcp.tool()
+@tool_shell
+async def group_grant(group_name: str, project: str) -> dict:
+    """将项目挂载到群组 (admin 门禁)。挂载即收口: 未挂组用户立即对该项目不可见不可写。"""
+    await _require_admin("group_grant")
+    name = sanitize_text(group_name).clean_text.strip()
+    gname = re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", name)
+    if not gname:
+        return tool_error("INVALID_ARGUMENT", "group_name 非法。", tool="group_grant")
+    proj = await validate_and_negotiate_project(project, is_write=True, allow_cross_project=True)
+    identity = os.getenv("LOGBOOK_AGENT_ID", "").strip() or None
+    await db.grant_group_project(name, proj, identity)
+    await db.reset_data_pool()
+    return {
+        "success": True, "ok": True,
+        "group": name, "project": proj,
+        "message": f"项目 [{proj}] 已挂载到群组 [{name}]: 组内互见互写, 跨组不可见 (授权已即时生效)。",
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def group_revoke(group_name: str, project: str) -> dict:
+    """将项目从群组摘除 (admin 门禁)。摘后若无任何挂载组, 项目回到 legacy 开放态。"""
+    await _require_admin("group_revoke")
+    name = sanitize_text(group_name).clean_text.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", name):
+        return tool_error("INVALID_ARGUMENT", "group_name 非法。", tool="group_revoke")
+    proj = await validate_and_negotiate_project(project, is_write=True, allow_cross_project=True)
+    identity = os.getenv("LOGBOOK_AGENT_ID", "").strip() or None
+    await db.revoke_group_project(name, proj, identity)
+    await db.reset_data_pool()
+    return {"success": True, "ok": True, "group": name, "project": proj,
+            "message": f"项目 [{proj}] 已从群组 [{name}] 摘除。"}
+
+
+@mcp.tool()
+@tool_shell
+async def group_member_add(group_name: str, agent_name: str) -> dict:
+    """将账户加入群组 (admin 门禁)。账户不存在时自动注册。"""
+    await _require_admin("group_member_add")
+    name = sanitize_text(group_name).clean_text.strip()
+    agent = sanitize_text(agent_name).clean_text.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", name):
+        return tool_error("INVALID_ARGUMENT", "group_name 非法。", tool="group_member_add")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", agent):
+        return tool_error("INVALID_ARGUMENT", "agent_name 非法。", tool="group_member_add")
+    identity = os.getenv("LOGBOOK_AGENT_ID", "").strip() or None
+    await db.add_group_member(name, agent, identity)
+    await db.reset_data_pool()
+    return {"success": True, "ok": True, "group": name, "agent": agent,
+            "message": f"账户 [{agent}] 已加入群组 [{name}], 立即获得该群组全部挂载项目的读写权。"}
+
+
+@mcp.tool()
+@tool_shell
+async def group_member_remove(group_name: str, agent_name: str) -> dict:
+    """将账户移出群组 (admin 门禁)。移除后对该群组挂载项目立即不可见。"""
+    await _require_admin("group_member_remove")
+    name = sanitize_text(group_name).clean_text.strip()
+    agent = sanitize_text(agent_name).clean_text.strip()
+    identity = os.getenv("LOGBOOK_AGENT_ID", "").strip() or None
+    removed = await db.remove_group_member(name, agent, identity)
+    await db.reset_data_pool()
+    if not removed:
+        return tool_error("MEMBERSHIP_NOT_FOUND", f"账户 [{agent}] 不在群组 [{name}] 中。", tool="group_member_remove")
+    return {"success": True, "ok": True, "group": name, "agent": agent,
+            "message": f"账户 [{agent}] 已移出群组 [{name}]。"}
+
+
+@mcp.tool()
+@tool_shell
+async def group_query() -> dict:
+    """查询全部群组及成员/挂载项目 (所有认证账户可读, 便于感知协作边界)。"""
+    groups = await db.list_groups()
+    return {"success": True, "ok": True, "total": len(groups), "groups": groups}
+
+
+@mcp.tool()
+@tool_shell
+async def principal_query() -> dict:
+    """查询当前身份的权限画像: 账户、admin 标记、所在群组。"""
+    identity, err = _trusted_agent_identity(None)
+    if err:
+        return err
+    try:
+        is_admin = await db.is_admin(identity)
+    except Exception:
+        is_admin = False
+    try:
+        groups = await db.get_principal_groups(identity)
+    except Exception:
+        groups = []
+    return {
+        "success": True, "ok": True,
+        "identity": identity,
+        "is_admin": is_admin,
+        "groups": groups,
+        "semantics": "组内互见互写, 跨组不可见; 未挂组项目为 legacy 开放态。",
     }
 
 
@@ -1319,6 +1531,16 @@ async def brief(project: str, devlog_limit: int = 5) -> dict:
     except Exception:
         mailbox_summary = []
 
+    # 多用户: 本人未读角标 (信箱 RLS 下 summary 仅含本人; legacy 模式保持全量概览)
+    me_unread = None
+    me = os.getenv("LOGBOOK_AGENT_ID", "").strip()
+    if me:
+        try:
+            me_unread = await db.count_agent_unread(me, proj)
+            lines[0] += f" my_unread={me_unread}"
+        except Exception:
+            me_unread = None
+
     unread_msgs_total = sum(m.get("unread_count", 0) for m in mailbox_summary)
     if mailbox_summary:
         lines[0] += f" mailbox_unread={unread_msgs_total}"
@@ -1326,6 +1548,8 @@ async def brief(project: str, devlog_limit: int = 5) -> dict:
             ids_preview = ",".join(str(i) for i in (m.get("unread_ids") or [])[:5])
             lines.append(f"M: {m.get('to_agent')} unread={m.get('unread_count')} ids=[{ids_preview}]")
     data["mailbox_summary"] = mailbox_summary
+    if me_unread is not None:
+        data["my_unread"] = me_unread
 
     return {
         "success": True,
@@ -1394,6 +1618,12 @@ async def message_send(
             to_ip=clean_to_ip,
         )
     )
+    # 收件人注册核验: 未注册账户仍可投递 (信任既有开放语义), 但显式告警防静默丢失
+    try:
+        recipient_registered = await db.principal_exists(to_agent.strip())
+    except Exception:
+        recipient_registered = None
+
     slim = {
         "success": True,
         "ok": True,
@@ -1403,8 +1633,11 @@ async def message_send(
         "to_agent": msg.to_agent,
         "from_ip": msg.from_ip,
         "to_ip": msg.to_ip,
-        "status": "sent"
+        "status": "sent",
+        "recipient_registered": recipient_registered,
     }
+    if recipient_registered is False:
+        slim["warning"] = f"收件人 [{msg.to_agent}] 尚未注册 logbook 账户, 信件已投递但对方可能永远无法查收。"
     if full:
         slim["message"] = msg.model_dump(mode="json")
     return slim
@@ -1448,6 +1681,7 @@ async def message_inbox(
     project: str | None = None,
     unread_only: bool = True,
     limit: int = 20,
+    include_archived: bool = False,
     allow_cross_project: bool = True,
 ) -> dict:
     """查收指定 Agent 的独立信箱 (未读/全部消息)。
@@ -1457,6 +1691,7 @@ async def message_inbox(
     - project: 可选。指定项目过滤 (缺省为查收该 Agent 的全部跨项目信箱)。
     - unread_only: 可选。默认 True (仅查未读)。False 时查收历史全部。
     - limit: 可选。返回条数限制 (默认 20，上限 200)。
+    - include_archived: 可选。默认 False (归档信件不出现在收件箱)。
     """
     trusted_identity, identity_error = _trusted_agent_identity(agent_name)
     if identity_error:
@@ -1470,6 +1705,7 @@ async def message_inbox(
         agent_name=trusted_identity,
         unread_only=unread_only,
         limit=limit,
+        include_archived=include_archived,
     )
     items = [m.model_dump(mode="json") for m in msgs]
     return {
@@ -1506,6 +1742,160 @@ async def message_read(
         "success": True,
         "ok": True,
         "message": msg.model_dump(mode="json"),
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def message_reply(
+    message_id: int,
+    content: str,
+    subject: str | None = None,
+    from_ip: str | None = None,
+    to_ip: str | None = None,
+) -> dict:
+    """回复信件: 沿用父信的项目/任务/会话线索, 收件人自动取对方 (点对点, 仅收发双方可见)。
+
+    字段说明:
+    - message_id: 必填。要回复的父信 ID (必须为您的收信或发信)。
+    - content: 必填。回复正文 (Markdown)。
+    - subject: 可选。缺省自动带 "Re: " 前缀。
+    """
+    trusted_identity, identity_error = _trusted_agent_identity(None)
+    if identity_error:
+        return identity_error
+    s_cnt = sanitize_text(content).clean_text
+    s_sub = sanitize_text(subject).clean_text.strip() if subject else None
+    clean_from_ip = detect_caller_ip(from_ip)
+    clean_to_ip = (to_ip or "").strip() or clean_from_ip
+    msg = await asyncio.shield(
+        db.reply_agent_message(
+            message_id=message_id,
+            me=trusted_identity,
+            content=s_cnt,
+            subject=s_sub,
+            from_ip=clean_from_ip,
+            to_ip=clean_to_ip,
+        )
+    )
+    if not msg:
+        return tool_error("MESSAGE_NOT_FOUND", "父信不存在或您不在其收发双方之列 (跨组/跨人不可见)")
+    return {
+        "success": True,
+        "ok": True,
+        "id": msg.id,
+        "thread_id": msg.thread_id,
+        "to_agent": msg.to_agent,
+        "message": msg.model_dump(mode="json"),
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def message_thread(
+    thread_id: str,
+    project: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """拉取会话线索全部信件 (时间正序, 仅您为收发双方的信件可见)。"""
+    trusted_identity, identity_error = _trusted_agent_identity(None)
+    if identity_error:
+        return identity_error
+    proj = None
+    if project:
+        proj = await validate_and_negotiate_project(project, is_write=False, allow_cross_project=True)
+    msgs = await db.get_agent_thread(
+        thread_id=thread_id.strip(),
+        agent_name=trusted_identity,
+        project_id=proj,
+        limit=clamp_limit(limit),
+    )
+    return {
+        "success": True,
+        "ok": True,
+        "thread_id": thread_id,
+        "total": len(msgs),
+        "messages": [m.model_dump(mode="json") for m in msgs],
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def message_sent(
+    project: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """已发送信箱 (本人发件记录)。"""
+    trusted_identity, identity_error = _trusted_agent_identity(None)
+    if identity_error:
+        return identity_error
+    proj = None
+    if project:
+        proj = await validate_and_negotiate_project(project, is_write=False, allow_cross_project=True)
+    msgs = await db.get_agent_sent(
+        agent_name=trusted_identity,
+        project_id=proj,
+        limit=clamp_limit(limit),
+    )
+    return {
+        "success": True,
+        "ok": True,
+        "total": len(msgs),
+        "messages": [m.model_dump(mode="json") for m in msgs],
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def message_search(
+    query: str,
+    project: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """全文检索本人收发信件 (主题+正文模糊匹配, 仅可见自己的信件)。"""
+    trusted_identity, identity_error = _trusted_agent_identity(None)
+    if identity_error:
+        return identity_error
+    proj = None
+    if project:
+        proj = await validate_and_negotiate_project(project, is_write=False, allow_cross_project=True)
+    msgs = await db.search_agent_messages(
+        agent_name=trusted_identity,
+        query=sanitize_text(query).clean_text,
+        project_id=proj,
+        limit=clamp_limit(limit),
+    )
+    return {
+        "success": True,
+        "ok": True,
+        "total": len(msgs),
+        "messages": [m.model_dump(mode="json") for m in msgs],
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def message_archive(
+    message_id: int,
+    archived: bool = True,
+) -> dict:
+    """归档/恢复信件 (仅收件人可操作; 归档后移出未读收件箱, 不影响对方)。"""
+    trusted_identity, identity_error = _trusted_agent_identity(None)
+    if identity_error:
+        return identity_error
+    msg = await db.archive_agent_message(
+        message_id=message_id,
+        agent_name=trusted_identity,
+        archived=archived,
+    )
+    if not msg:
+        return tool_error("MESSAGE_NOT_ARCHIVABLE", "信件不存在或您不是其收件人")
+    return {
+        "success": True,
+        "ok": True,
+        "id": msg.id,
+        "is_archived": msg.is_archived,
+        "message": f"信件 [{msg.id}] 已{'归档' if archived else '恢复'}。",
     }
 
 
@@ -1866,6 +2256,11 @@ async def research_query(
 
 def run_stdio():
     """以 Stdio 模式运行 MCP Server。"""
+    import asyncio as _asyncio
+    try:
+        _asyncio.run(_session_bootstrap())
+    except Exception:
+        pass
     mcp.run()
 
 

@@ -81,6 +81,7 @@ async def test_messaging_schema_concurrent_first_check_executes_once():
     connection = FakeConnection()
     db = Database()
     db._pool = FakePool(connection)
+    db._system_pool = FakePool(connection)  # ensure_project 的 DDL 走系统面 (0.5.0 双平面)
     with patch.object(db, "connect", new=AsyncMock()):
         await asyncio.gather(
             db.ensure_messaging_schema(),
@@ -108,6 +109,7 @@ async def test_project_schema_concurrent_first_check_executes_once():
     connection = FakeConnection()
     db = Database()
     db._pool = FakePool(connection)
+    db._system_pool = FakePool(connection)  # ensure_project 的 DDL 走系统面 (0.5.0 双平面)
     with patch.object(db, "connect", new=AsyncMock()):
         await asyncio.gather(
             db.ensure_project("probe"),

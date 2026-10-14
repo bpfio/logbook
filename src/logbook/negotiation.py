@@ -175,7 +175,8 @@ async def validate_and_negotiate_project(
             raise NegotiationPermissionError(
                 f"【Logbook 隔离拦截】越权阻断：当前物理工作区锁定为 [{workspace_proj}]，"
                 f"禁止跨项目向 [{req} -> {resolved_schema}] 执行写操作！"
-                f"如确认用户显式要求跨项目操作，请显式传入 allow_cross_project=True。",
+                f"如确认用户显式要求跨项目操作，请显式传入 allow_cross_project=True"
+                f" (注: 多用户模式下群组边界由 PG 角色硬性执行, 该参数只能收紧不能放宽授权)。",
                 workspace_project=workspace_proj,
                 requested_project=req,
             )

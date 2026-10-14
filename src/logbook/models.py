@@ -280,6 +280,8 @@ class AgentMessage(AgentMessageSend):
     is_read: bool = False
     read_at: datetime | None = None
     read_by_agent: str | None = Field(default=None, max_length=64, description="实际读取并核销信件的收件人")
+    is_archived: bool = Field(default=False, description="收件人归档标记 (仅影响本人信箱视图)")
+    archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=get_beijing_now)
 
 

@@ -8,9 +8,11 @@
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import json
+import re
 from typing import Any
 import asyncpg
 from .models import (
@@ -70,12 +72,20 @@ class Database:
             self.user = os.getenv("LOGBOOK_PG_USER", os.getenv("POSTGRES_USER", "logbook"))
             self.password = os.getenv("LOGBOOK_PG_PASSWORD", os.getenv("POSTGRES_PASSWORD", "logbook_dev_secret"))
             self.database = os.getenv("LOGBOOK_PG_DB", os.getenv("POSTGRES_DB", "logbook"))
+        # 多用户双平面: identity 来自可信环境变量 (SSH 会话/stdio 注入)。
+        # 数据面池 (self._pool) init 钩子执行 SET ROLE 降权到账户角色,
+        # 系统面池 (self._system_pool) 以登录角色执行 DDL/授权等特权操作。
+        # identity 为空 (CLI/迁移/存量测试) 时数据面不降权, 行为与单用户时代完全一致。
+        self.identity: str | None = os.getenv("LOGBOOK_AGENT_ID", "").strip() or None
         self._pool: asyncpg.Pool | None = None
+        self._system_pool: asyncpg.Pool | None = None
         self._runtime_loop: asyncio.AbstractEventLoop | None = None
         self._async_locks: dict[str, asyncio.Lock] = {}
         self._messaging_schema_ensured: bool = False
         self._researches_schema_ensured: bool = False
         self._project_ready: set[str] = set()
+        self._acl_bootstrapped: bool = False
+        self._identity_active: bool = False
 
     def _get_lock(self, name: str) -> asyncio.Lock:
         loop = asyncio.get_running_loop()
@@ -91,19 +101,53 @@ class Database:
             self._async_locks[name] = lock
         return lock
 
-    async def connect(self):
+    # =========================================================================
+    # 多用户 ACL: 角色/池基座 (0.5.0)
+    # =========================================================================
+
+    @staticmethod
+    def _qi(ident: str) -> str:
+        """PG 标识符安全引用 (角色名/schema 名均已由上游正则约束)。"""
+        return '"' + ident.replace('"', '""') + '"'
+
+    @staticmethod
+    def pg_role_name(kind: str, name: str) -> str:
+        """确定性 PG 角色名: lb_u_<principal> / lb_g_<group>。
+
+        PG 标识符硬上限 63 字节, 超长时以内容哈希截断保持确定性。
+        """
+        base = f"lb_{kind}_{name}"
+        if len(base.encode()) <= 63:
+            return base
+        return f"lb_{kind}_{hashlib.sha256(name.encode()).hexdigest()[:20]}"
+
+    @property
+    def data_role_name(self) -> str | None:
+        return self.pg_role_name("u", self.identity) if self.identity else None
+
+    @property
+    def acl_bootstrapped(self) -> bool:
+        """ACL 基座是否已引导成功 (决定 ensure_project 是否补开放授权)。"""
+        return self._acl_bootstrapped
+
+    async def connect(self, plane: str = "data"):
         loop = asyncio.get_running_loop()
-        async with self._get_lock("connect"):
-            if self._pool is not None and getattr(self._pool, "_loop", None) != loop:
-                old_pool = self._pool
-                self._pool = None
+        async with self._get_lock(f"connect:{plane}"):
+            if plane == "data":
+                pool_attr, init_hook = "_pool", self._init_data_conn
+            else:
+                pool_attr, init_hook = "_system_pool", None
+            pool = getattr(self, pool_attr)
+            if pool is not None and getattr(pool, "_loop", None) != loop:
+                setattr(self, pool_attr, None)
                 try:
-                    old_pool.terminate()
+                    pool.terminate()
                 except Exception:
                     pass
+                pool = None
 
-            if self._pool is None:
-                self._pool = await asyncpg.create_pool(
+            if pool is None:
+                pool = await asyncpg.create_pool(
                     host=self.host,
                     port=self.port,
                     user=self.user,
@@ -112,11 +156,45 @@ class Database:
                     min_size=1,
                     max_size=3,
                     command_timeout=10.0,
+                    init=init_hook,
+                    reset=self._reset_data_conn if plane == "data" else None,
                 )
+                setattr(self, pool_attr, pool)
+
+    async def _init_data_conn(self, conn: asyncpg.Connection):
+        """数据面连接降权: 会话身份绑定 (SET ROLE + logbook.agent GUC)。
+
+        仅在身份引导 (ensure_principal) 成功后生效; 失败降级 legacy 不降权。
+        """
+        if self._identity_active and self.data_role_name:
+            await conn.execute("SELECT set_config('role', $1, false)", self.data_role_name)
+            await conn.execute("SELECT set_config('logbook.agent', $1, false)", self.identity)
+        elif self.identity:
+            # 有身份但未引导成功 (如无 CREATEROLE 权限): 保持 legacy 全通并记录
+            await conn.execute("SELECT set_config('logbook.agent', $1, false)", self.identity)
+
+    async def _reset_data_conn(self, conn: asyncpg.Connection):
+        """数据面连接归还钩子: 替换 asyncpg 默认 reset。
+
+        默认 reset 会执行 RESET ALL, 把 init 钩子设置的 logbook.agent 会话
+        变量清空 (角色保留但身份 GUC 丢失, RLS 语义被破坏); 此处改为归还时
+        重新断言会话身份, 同时不再遗留其它会话级状态。
+        """
+        if self._identity_active and self.data_role_name:
+            await conn.execute("SELECT set_config('role', $1, false)", self.data_role_name)
+            await conn.execute("SELECT set_config('logbook.agent', $1, false)", self.identity)
+
+    async def _acquire_system(self) -> asyncpg.pool.Pool:
+        """系统面连接池 (登录角色, 用于 DDL/授权/引导等特权操作)。"""
+        await self.connect(plane="system")
+        return self._system_pool
+
+    def _data_plane_ready(self) -> bool:
+        return self._pool is not None
 
     async def close(self):
         loop = asyncio.get_running_loop()
-        async with self._get_lock("connect"):
+        async with self._get_lock("connect:data"):
             pool = self._pool
             self._pool = None
             self._project_ready.clear()
@@ -124,20 +202,45 @@ class Database:
             self._researches_schema_ensured = False
             if pool is not None:
                 if getattr(pool, "_loop", None) != loop:
-                    pool.terminate()
+                    try:
+                        pool.terminate()
+                    except Exception:
+                        pass
                 else:
                     await pool.close()
+        async with self._get_lock("connect:system"):
+            spool = self._system_pool
+            self._system_pool = None
+            if spool is not None:
+                if getattr(spool, "_loop", None) != loop:
+                    try:
+                        spool.terminate()
+                    except Exception:
+                        pass
+                else:
+                    await spool.close()
+
+    async def reset_data_pool(self):
+        """群组授权变更后重建数据面池: SET ROLE 的成员关系是连接级快照, 必须换新连接生效。"""
+        await self.close()
 
     async def ensure_project(self, project: str):
-        """Ensure a project schema once per process and event loop."""
+        """Ensure a project schema once per process and event loop.
+
+        Schema/表 DDL 以系统面 (登录角色) 执行, 普通账户角色无建表权;
+        建成后若 ACL 已引导, 为未挂组的 legacy 项目补公共只读读写授权。
+        """
         await self.connect()
         if project in self._project_ready:
             return
         async with self._get_lock(f"project:{project}"):
             if project in self._project_ready:
                 return
-            async with self._pool.acquire() as conn:
+            spool = await self._acquire_system()
+            async with spool.acquire() as conn:
                 await conn.execute("SELECT shared.init_project_schema($1)", project)
+                if self._acl_bootstrapped:
+                    await self._ensure_schema_open_grants(conn, project)
             self._project_ready.add(project)
 
     async def register_project(
@@ -147,10 +250,11 @@ class Database:
         description: str | None = None,
         schema_name: str | None = None
     ) -> Project:
-        """注册新项目：初始化物理 Schema 并登记至 shared.projects 元数据中心。"""
+        """注册新项目：初始化物理 Schema 并登记至 shared.projects 元数据中心 (系统面特权操作)。"""
         await self.connect()
         s_name = schema_name or slug_to_schema_name(slug)
-        async with self._pool.acquire() as conn:
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS shared.projects (
                     slug VARCHAR(64) PRIMARY KEY,
@@ -163,6 +267,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_projects_schema ON shared.projects(schema_name);
             """)
             await conn.execute("SELECT shared.init_project_schema($1)", s_name)
+            if self._acl_bootstrapped:
+                await self._ensure_schema_open_grants(conn, s_name)
             row = await conn.fetchrow("""
                 INSERT INTO shared.projects (slug, schema_name, title, description)
                 VALUES ($1, $2, $3, $4)
@@ -991,6 +1097,347 @@ class Database:
     # 多 Agent 对讲信箱与代码文件租约 (0.3.0)
     # =========================================================================
 
+    # =========================================================================
+    # 多用户分组权限 (0.5.0): 引导 / 账户 / 群组 / 项目挂载
+    # 语义 (方案 A): 组内互见互写, 跨组不可见; 未挂组项目 legacy 全通; admin 全见。
+    # 全部特权操作走系统面连接, 数据面仅经降权角色访问。
+    # =========================================================================
+
+    async def _ensure_schema_open_grants(self, conn: asyncpg.Connection, schema: str):
+        """legacy 开放授权: 未挂组项目对全体认证账户 (logbook_authenticated) 开放读写。
+
+        已挂组项目跳过 (挂载即收口, 由 grant_group_project 精确授权)。
+        """
+        attached = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM shared.project_groups WHERE schema_name = $1)", schema
+        )
+        if attached:
+            return
+        auth = self._qi("logbook_authenticated")
+        s = self._qi(schema)
+        u = self._qi(self.user)
+        await conn.execute(f"""
+            GRANT USAGE ON SCHEMA {s} TO {auth};
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {s} TO {auth};
+            GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {s} TO {auth};
+            ALTER DEFAULT PRIVILEGES FOR ROLE {u} IN SCHEMA {s}
+                GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {auth};
+            ALTER DEFAULT PRIVILEGES FOR ROLE {u} IN SCHEMA {s}
+                GRANT USAGE, SELECT ON SEQUENCES TO {auth};
+        """)
+
+    async def ensure_acl_bootstrap(self):
+        """ACL 基座引导 (系统面, 幂等): 公共认证角色 + shared 面授权 + 存量 schema 开放授权。
+
+        迁移 09 已建 ACL 表与 RLS; 本函数负责依赖执行者权限的角色/GRANT 面:
+        - logbook_authenticated (NOLOGIN): 全体账户角色的公共权限锚点
+        - shared 面对象授权 + 默认权限 (未来新表自动继承)
+        - 存量项目 schema 一次性开放授权 (legacy 兼容, 挂组时收回)
+        任何失败向上抛出, 由调用方降级 legacy。
+        """
+        if self._acl_bootstrapped:
+            return
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            role_exists = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'logbook_authenticated')"
+            )
+            if not role_exists:
+                await conn.execute("CREATE ROLE logbook_authenticated NOLOGIN")
+            auth = self._qi("logbook_authenticated")
+            u = self._qi(self.user)
+            await conn.execute(f"GRANT USAGE ON SCHEMA shared TO {auth};")
+            # shared 面数据表 (逐表守卫, 缺表跳过以兼容未迁移库)
+            for table, privs in (
+                ("principals", "SELECT"),
+                ("projects", "SELECT"),
+                ("agent_messages", "SELECT, INSERT, UPDATE"),
+                ("file_leases", "SELECT, INSERT, UPDATE, DELETE"),
+                ("rules", "SELECT, INSERT, UPDATE"),
+                ("devlogs", "SELECT, INSERT, UPDATE"),
+                ("researches", "SELECT, INSERT, UPDATE"),
+            ):
+                if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"shared.{table}"):
+                    await conn.execute(f"GRANT {privs} ON shared.{self._qi(table)} TO {auth};")
+            await conn.execute(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA shared TO {auth};")
+            await conn.execute(f"""
+                ALTER DEFAULT PRIVILEGES FOR ROLE {u} IN SCHEMA shared
+                    GRANT SELECT, INSERT, UPDATE ON TABLES TO {auth};
+                ALTER DEFAULT PRIVILEGES FOR ROLE {u} IN SCHEMA shared
+                    GRANT USAGE, SELECT ON SEQUENCES TO {auth};
+            """)
+            # 存量项目 schema 开放授权 (幂等, 已挂组跳过)
+            schemas = await conn.fetch("""
+                SELECT nspname FROM pg_namespace
+                WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'shared', 'public')
+                  AND nspname NOT LIKE 'pg_%';
+            """)
+            for row in schemas:
+                await self._ensure_schema_open_grants(conn, row["nspname"])
+        self._acl_bootstrapped = True
+
+    async def ensure_principal(self, agent_name: str | None = None, is_admin: bool | None = None) -> dict:
+        """注册/刷新账户并同步 PG 角色 (系统面, 幂等)。
+
+        - principals 行: LOGBOOK_ADMIN_AGENTS 环境变量中的身份强制置 admin
+        - PG 账户角色 lb_u_<name> (NOLOGIN, INHERIT) + 公共角色成员
+        - 群组成员关系同步: principal_groups → GRANT 群组角色
+        成功后标记 _identity_active, 数据面连接 init 钩子开始执行 SET ROLE。
+        """
+        name = (agent_name or self.identity or "").strip()
+        if not name:
+            raise ValueError("principal agent_name is required")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name):
+            raise ValueError(f"invalid principal name: {name!r}")
+        admin_env = {
+            a.strip() for a in os.getenv("LOGBOOK_ADMIN_AGENTS", "").split(",") if a.strip()
+        }
+        want_admin = True if name in admin_env else (bool(is_admin) if is_admin is not None else None)
+
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO shared.principals (agent_name, is_admin)
+                VALUES ($1, COALESCE($2, FALSE))
+                ON CONFLICT (agent_name) DO UPDATE SET
+                    is_admin = COALESCE($2, shared.principals.is_admin),
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING agent_name, is_admin;
+            """, name, want_admin)
+
+            user_role = self._qi(self.pg_role_name("u", name))
+            if not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
+                self.pg_role_name("u", name),
+            ):
+                await conn.execute(f"CREATE ROLE {user_role} NOLOGIN INHERIT")
+            else:
+                await conn.execute(f"ALTER ROLE {user_role} NOLOGIN INHERIT")
+
+            if await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'logbook_authenticated')"
+            ):
+                await conn.execute(
+                    f"GRANT logbook_authenticated TO {user_role}"
+                )
+
+            # 群组角色成员同步 (角色缺失则重建, 兼容手工 drop)
+            memberships = await conn.fetch("""
+                SELECT g.id, g.group_name FROM shared.principal_groups m
+                JOIN shared.groups g ON g.id = m.group_id
+                WHERE m.agent_name = $1;
+            """, name)
+            for g in memberships:
+                grp_role_name = self.pg_role_name("g", g["group_name"])
+                if not await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", grp_role_name
+                ):
+                    await conn.execute(f"CREATE ROLE {self._qi(grp_role_name)} NOLOGIN NOINHERIT")
+                await conn.execute(
+                    f"GRANT {self._qi(grp_role_name)} TO {user_role}"
+                )
+
+        if name == (self.identity or ""):
+            self._identity_active = True
+        return dict(row)
+
+    async def is_admin(self, agent_name: str) -> bool:
+        await self.connect()
+        async with self._pool.acquire() as conn:
+            return bool(await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM shared.principals WHERE agent_name = $1 AND is_admin)",
+                agent_name,
+            ))
+
+    async def principal_exists(self, agent_name: str) -> bool:
+        """收件人账户存在性校验 (SECURITY DEFINER, 数据面可调, 不暴露 principals 全表)。"""
+        await self.connect()
+        async with self._pool.acquire() as conn:
+            return bool(await conn.fetchval(
+                "SELECT shared.acl_principal_exists($1)", agent_name
+            ))
+
+    async def probe_project(self, schema_name: str, agent: str | None = None) -> dict:
+        """系统面探测项目物理存在性与指定身份可见性 (供 project_init 语义化报错)。"""
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            exists = bool(await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)",
+                schema_name,
+            ))
+            visible = bool(await conn.fetchval(
+                "SELECT shared.acl_project_visible($1, $2)", schema_name, agent
+            )) if exists else False
+            return {"exists": exists, "visible": visible}
+
+    async def create_group(self, group_name: str, description: str | None, creator: str | None) -> dict:
+        """创建群组 + 对应 PG 群组角色 (系统面, mcp 层 admin 门禁)。"""
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO shared.groups (group_name, description, created_by)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (group_name) DO UPDATE SET description = COALESCE(EXCLUDED.description, shared.groups.description)
+                RETURNING id, group_name, description, created_by, created_at;
+            """, group_name, description, creator)
+            role_name = self.pg_role_name("g", group_name)
+            if not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", role_name
+            ):
+                await conn.execute(f"CREATE ROLE {self._qi(role_name)} NOLOGIN NOINHERIT")
+            return dict(row)
+
+    async def list_groups(self) -> list[dict]:
+        """群组列表: 成员与挂载项目汇总 (系统面元数据读, 成员关系表不对数据面授权)。"""
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            groups = await conn.fetch("""
+                SELECT g.id, g.group_name, g.description, g.created_by, g.created_at,
+                       COALESCE(m.members, '{}') AS members,
+                       COALESCE(p.schemas, '{}') AS schemas
+                FROM shared.groups g
+                LEFT JOIN LATERAL (
+                    SELECT array_agg(mg.agent_name ORDER BY mg.agent_name) AS members
+                    FROM shared.principal_groups mg WHERE mg.group_id = g.id
+                ) m ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT array_agg(pg.schema_name ORDER BY pg.schema_name) AS schemas
+                    FROM shared.project_groups pg WHERE pg.group_id = g.id
+                ) p ON TRUE
+                ORDER BY g.group_name;
+            """)
+            return [dict(r) for r in groups]
+
+    async def _group_id(self, conn: asyncpg.Connection, group_name: str) -> int:
+        gid = await conn.fetchval(
+            "SELECT id FROM shared.groups WHERE group_name = $1", group_name
+        )
+        if gid is None:
+            raise ValueError(f"group not found: {group_name}")
+        return gid
+
+    async def grant_group_project(self, group_name: str, schema_name: str, operator: str | None) -> None:
+        """项目挂载到群组 (挂载即收口): 挂组并精确授权, 同时收回公共开放授权。"""
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            gid = await self._group_id(conn, group_name)
+            await conn.execute("""
+                INSERT INTO shared.project_groups (schema_name, group_id, granted_by)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (schema_name, group_id) DO NOTHING;
+            """, schema_name, gid, operator)
+            await self._apply_schema_group_grants(conn, schema_name)
+
+    async def revoke_group_project(self, group_name: str, schema_name: str, operator: str | None) -> None:
+        """项目摘除群组: 若摘后无任何挂载组, 项目回到 legacy 开放态。"""
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            gid = await self._group_id(conn, group_name)
+            await conn.execute(
+                "DELETE FROM shared.project_groups WHERE schema_name = $1 AND group_id = $2",
+                schema_name, gid,
+            )
+            await self._apply_schema_group_grants(conn, schema_name)
+
+    async def _apply_schema_group_grants(self, conn: asyncpg.Connection, schema: str):
+        """重算项目 schema 授权面: 无挂组 → 开放; 有挂组 → 仅挂载群组角色 (含默认权限)。"""
+        rows = await conn.fetch("""
+            SELECT g.group_name FROM shared.project_groups pg
+            JOIN shared.groups g ON g.id = pg.group_id
+            WHERE pg.schema_name = $1 ORDER BY g.group_name;
+        """, schema)
+        auth = self._qi("logbook_authenticated")
+        s = self._qi(schema)
+        u = self._qi(self.user)
+        if not rows:
+            await conn.execute(f"GRANT USAGE ON SCHEMA {s} TO {auth};")
+            await self._ensure_schema_open_grants(conn, schema)
+            return
+        # 收口: 先收回公共授权
+        await conn.execute(f"""
+            REVOKE ALL ON SCHEMA {s} FROM {auth};
+            REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {auth};
+            REVOKE ALL ON ALL SEQUENCES IN SCHEMA {s} FROM {auth};
+            ALTER DEFAULT PRIVILEGES FOR ROLE {u} IN SCHEMA {s}
+                REVOKE ALL ON TABLES FROM {auth};
+            ALTER DEFAULT PRIVILEGES FOR ROLE {u} IN SCHEMA {s}
+                REVOKE ALL ON SEQUENCES FROM {auth};
+        """)
+        # 再按挂载群组逐一授权
+        grp_roles = [self.pg_role_name("g", r["group_name"]) for r in rows]
+        for role_name in grp_roles:
+            if not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", role_name
+            ):
+                await conn.execute(f"CREATE ROLE {self._qi(role_name)} NOLOGIN NOINHERIT")
+            q = self._qi(role_name)
+            await conn.execute(f"GRANT USAGE ON SCHEMA {s} TO {q};")
+        await conn.execute(f"""
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {s} TO {', '.join(self._qi(r) for r in grp_roles)};
+            GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {s} TO {', '.join(self._qi(r) for r in grp_roles)};
+            ALTER DEFAULT PRIVILEGES FOR ROLE {u} IN SCHEMA {s}
+                GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {', '.join(self._qi(r) for r in grp_roles)};
+            ALTER DEFAULT PRIVILEGES FOR ROLE {u} IN SCHEMA {s}
+                GRANT USAGE, SELECT ON SEQUENCES TO {', '.join(self._qi(r) for r in grp_roles)};
+        """)
+        # 摘除已不在挂载列表中的群组角色残留授权
+        for role_name in await self._all_group_role_names(conn):
+            if role_name not in grp_roles:
+                q = self._qi(role_name)
+                await conn.execute(f"""
+                    REVOKE ALL ON SCHEMA {s} FROM {q};
+                    REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {q};
+                    REVOKE ALL ON ALL SEQUENCES IN SCHEMA {s} FROM {q};
+                    ALTER DEFAULT PRIVILEGES FOR ROLE {u} IN SCHEMA {s}
+                        REVOKE ALL ON TABLES FROM {q};
+                    ALTER DEFAULT PRIVILEGES FOR ROLE {u} IN SCHEMA {s}
+                        REVOKE ALL ON SEQUENCES FROM {q};
+                """)
+
+    async def _all_group_role_names(self, conn: asyncpg.Connection) -> list[str]:
+        rows = await conn.fetch("SELECT group_name FROM shared.groups ORDER BY group_name")
+        return [self.pg_role_name("g", r["group_name"]) for r in rows]
+
+    async def add_group_member(self, group_name: str, agent_name: str, operator: str | None) -> None:
+        """加人进群: 登记 principals + principal_groups 并 GRANT 群组角色。"""
+        await self.ensure_principal(agent_name)
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            gid = await self._group_id(conn, group_name)
+            await conn.execute("""
+                INSERT INTO shared.principal_groups (agent_name, group_id, granted_by)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (agent_name, group_id) DO NOTHING;
+            """, agent_name, gid, operator)
+            grp_role = self._qi(self.pg_role_name("g", group_name))
+            user_role = self._qi(self.pg_role_name("u", agent_name))
+            await conn.execute(f"GRANT {grp_role} TO {user_role}")
+
+    async def remove_group_member(self, group_name: str, agent_name: str, operator: str | None) -> bool:
+        """移出群组: 删关系行并 REVOKE 群组角色。返回是否确有移除。"""
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            gid = await self._group_id(conn, group_name)
+            deleted = await conn.fetchval(
+                "DELETE FROM shared.principal_groups WHERE agent_name = $1 AND group_id = $2 RETURNING 1",
+                agent_name, gid,
+            )
+            if deleted:
+                grp_role = self._qi(self.pg_role_name("g", group_name))
+                user_role = self._qi(self.pg_role_name("u", agent_name))
+                await conn.execute(f"REVOKE {grp_role} FROM {user_role}")
+            return bool(deleted)
+
+    async def get_principal_groups(self, agent_name: str) -> list[str]:
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT g.group_name FROM shared.principal_groups m
+                JOIN shared.groups g ON g.id = m.group_id
+                WHERE m.agent_name = $1 ORDER BY g.group_name;
+            """, agent_name)
+            return [r["group_name"] for r in rows]
+
     async def ensure_messaging_schema(self):
         """Verify the migration-managed messaging and lease schema once per loop."""
         await self.connect()
@@ -1030,6 +1477,16 @@ class Database:
     ) -> AgentMessage:
         await self.ensure_messaging_schema()
         async with self._pool.acquire() as conn:
+            # 收件箱余量防灌爆 (SECURITY DEFINER 函数, 发件人视角也可校验收件人余量)
+            has_room = await conn.fetchval(
+                "SELECT shared.acl_mailbox_has_room($1)", to_agent
+            )
+            if not has_room:
+                from .errors import ToolError
+                raise ToolError(
+                    "RECIPIENT_MAILBOX_FULL",
+                    f"收件人 [{to_agent}] 的未读信箱已达容量上限, 投递被拒收; 请其先查收清理信箱。",
+                )
             row = await conn.fetchrow("""
                 INSERT INTO shared.agent_messages (
                     project_id, from_agent, from_ip, to_agent, to_ip, subject, content, task_id, thread_id
@@ -1045,14 +1502,17 @@ class Database:
         agent_name: str,
         unread_only: bool = True,
         limit: int = 20,
+        include_archived: bool = False,
     ) -> list[AgentMessage]:
         await self.ensure_messaging_schema()
         limit = self._clamp_limit(limit, default=20)
-        conditions = ["to_agent = $1"]
+        conditions = ["to_agent = $1", "is_archived = FALSE"]
         params: list[Any] = [agent_name]
 
         if unread_only:
             conditions.append("is_read = FALSE")
+        if include_archived:
+            conditions.pop(1)
         if project_id:
             params.append(project_id)
             conditions.append(f"project_id = ${len(params)}")
@@ -1070,6 +1530,185 @@ class Database:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [AgentMessage(**dict(r)) for r in rows]
+
+    async def get_agent_message(
+        self,
+        message_id: int,
+        agent_name: str,
+    ) -> AgentMessage | None:
+        """按 id 取单封信 (仅收发双方可见, RLS 双保险)。"""
+        await self.ensure_messaging_schema()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
+                       task_id, thread_id, is_read, read_at, created_at
+                FROM shared.agent_messages
+                WHERE id = $1 AND ($2 = '' OR from_agent = $2 OR to_agent = $2);
+            """, message_id, agent_name)
+            return AgentMessage(**dict(row)) if row else None
+
+    async def reply_agent_message(
+        self,
+        message_id: int,
+        me: str,
+        content: str,
+        subject: str | None = None,
+        from_ip: str = "0.0.0.0",
+        to_ip: str = "0.0.0.0",
+    ) -> AgentMessage | None:
+        """回复信件: 沿用父信 thread_id/project/task, 收件人取对方 (父信发件人或收件人)。
+
+        父信不存在或非收发双方 → None (RLS 语义: 不可见即不存在)。
+        """
+        parent = await self.get_agent_message(message_id, me)
+        if parent is None:
+            return None
+        other = parent.to_agent if me == parent.from_agent else parent.from_agent
+        thread_id = parent.thread_id or f"t-{parent.id}"
+        # 父信无线索时物化 thread_id, 保证会话视图能拉到根信 (仅收发双方可执行)
+        if not parent.thread_id:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE shared.agent_messages SET thread_id = $2 WHERE id = $1 AND thread_id IS NULL",
+                    parent.id, thread_id,
+                )
+        final_subject = subject or (parent.subject if parent.subject.startswith("Re:") else f"Re: {parent.subject}")
+        return await self.send_agent_message(
+            project_id=parent.project_id,
+            from_agent=me,
+            to_agent=other,
+            subject=final_subject[:256],
+            content=content,
+            task_id=parent.task_id,
+            thread_id=thread_id,
+            from_ip=from_ip,
+            to_ip=to_ip,
+        )
+
+    async def get_agent_thread(
+        self,
+        thread_id: str,
+        agent_name: str,
+        project_id: str | None = None,
+        limit: int = 50,
+    ) -> list[AgentMessage]:
+        """拉取会话线索 (仅收发双方可见, 时间正序)。"""
+        await self.ensure_messaging_schema()
+        limit = self._clamp_limit(limit, default=50)
+        conditions = ["thread_id = $1", "is_archived = FALSE",
+                      "(from_agent = $2 OR to_agent = $2)"]
+        params: list[Any] = [thread_id, agent_name]
+        if project_id:
+            params.append(project_id)
+            conditions.append(f"project_id = ${len(params)}")
+        params.append(limit)
+        query = f"""
+            SELECT id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
+                   task_id, thread_id, is_read, read_at, created_at
+            FROM shared.agent_messages
+            WHERE {" AND ".join(conditions)}
+            ORDER BY created_at ASC, id ASC
+            LIMIT ${len(params)};
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [AgentMessage(**dict(r)) for r in rows]
+
+    async def get_agent_sent(
+        self,
+        agent_name: str,
+        project_id: str | None = None,
+        limit: int = 20,
+    ) -> list[AgentMessage]:
+        """已发送箱。"""
+        await self.ensure_messaging_schema()
+        limit = self._clamp_limit(limit, default=20)
+        conditions = ["from_agent = $1"]
+        params: list[Any] = [agent_name]
+        if project_id:
+            params.append(project_id)
+            conditions.append(f"project_id = ${len(params)}")
+        params.append(limit)
+        query = f"""
+            SELECT id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
+                   task_id, thread_id, is_read, read_at, created_at
+            FROM shared.agent_messages
+            WHERE {" AND ".join(conditions)}
+            ORDER BY created_at DESC
+            LIMIT ${len(params)};
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [AgentMessage(**dict(r)) for r in rows]
+
+    async def search_agent_messages(
+        self,
+        agent_name: str,
+        query: str,
+        project_id: str | None = None,
+        limit: int = 20,
+    ) -> list[AgentMessage]:
+        """信件全文模糊检索 (仅收发双方可见, pg_trgm ILIKE)。"""
+        await self.ensure_messaging_schema()
+        limit = self._clamp_limit(limit, default=20)
+        conditions = ["(from_agent = $1 OR to_agent = $1)"]
+        params: list[Any] = [agent_name]
+        if project_id:
+            params.append(project_id)
+            conditions.append(f"project_id = ${len(params)}")
+        if query and query.strip():
+            params.append(query.strip())
+            q_idx = len(params)
+            conditions.append(f"(subject ILIKE '%' || ${q_idx} || '%' OR content ILIKE '%' || ${q_idx} || '%')")
+        params.append(limit)
+        sql = f"""
+            SELECT id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
+                   task_id, thread_id, is_read, read_at, created_at
+            FROM shared.agent_messages
+            WHERE {" AND ".join(conditions)}
+            ORDER BY created_at DESC
+            LIMIT ${len(params)};
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+            return [AgentMessage(**dict(r)) for r in rows]
+
+    async def archive_agent_message(
+        self,
+        message_id: int,
+        agent_name: str,
+        archived: bool = True,
+    ) -> AgentMessage | None:
+        """归档/恢复信件 (仅收件人可操作自己的信箱视图)。"""
+        await self.ensure_messaging_schema()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                UPDATE shared.agent_messages
+                SET is_archived = $2,
+                    archived_at = CASE WHEN $2 THEN CURRENT_TIMESTAMP ELSE NULL END
+                WHERE id = $1 AND to_agent = $3
+                RETURNING id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
+                          task_id, thread_id, is_read, read_at, is_archived, archived_at, created_at;
+            """, message_id, archived, agent_name)
+            return AgentMessage(**dict(row)) if row else None
+
+    async def count_agent_unread(
+        self,
+        agent_name: str,
+        project_id: str | None = None,
+    ) -> int:
+        """本人未读信件计数 (开工简报/信箱角标)。"""
+        await self.ensure_messaging_schema()
+        conditions = ["to_agent = $1", "is_read = FALSE", "is_archived = FALSE"]
+        params: list[Any] = [agent_name]
+        if project_id:
+            params.append(project_id)
+            conditions.append(f"project_id = ${len(params)}")
+        async with self._pool.acquire() as conn:
+            return int(await conn.fetchval(
+                f"SELECT COUNT(*) FROM shared.agent_messages WHERE {' AND '.join(conditions)}",
+                *params,
+            ))
 
     async def read_agent_message(
         self,
@@ -1207,14 +1846,15 @@ class Database:
     # =========================================================================
 
     async def ensure_researches_schema(self):
-        """Ensure research tables once per process and event loop."""
+        """Ensure research tables once per process and event loop (DDL 走系统面)。"""
         await self.connect()
         if self._researches_schema_ensured:
             return
         async with self._get_lock("researches_schema"):
             if self._researches_schema_ensured:
                 return
-            async with self._pool.acquire() as conn:
+            spool = await self._acquire_system()
+            async with spool.acquire() as conn:
                 await conn.execute("""
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pg_trgm;
