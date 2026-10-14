@@ -52,7 +52,8 @@ async def _hard_reset():
         await conn.execute("DELETE FROM shared.devlogs WHERE project_id IN ($1, $2)", P_OPEN, P_CLOSED)
         await conn.execute("DELETE FROM shared.groups WHERE group_name LIKE 'mu_%'")
         await conn.execute("DELETE FROM shared.principals WHERE agent_name LIKE 'mu_%'")
-        await conn.execute("ALTER DATABASE logbook RESET logbook.mailbox_cap")
+        dbname = await conn.fetchval("SELECT current_database()")
+        await conn.execute(f'ALTER DATABASE "{dbname}" RESET logbook.mailbox_cap')
 
 
 async def _setup_fixtures():
@@ -329,7 +330,8 @@ async def test_13_mailbox_capacity_rejects_delivery():
     """容量上限: GUC logbook.mailbox_cap 调低后超额投递被拒; 读销一封后余量恢复。"""
     spool = await db._acquire_system()
     async with spool.acquire() as conn:
-        await conn.execute("ALTER DATABASE logbook SET logbook.mailbox_cap = '2'")
+        dbname = await conn.fetchval("SELECT current_database()")
+        await conn.execute(f'ALTER DATABASE "{dbname}" SET logbook.mailbox_cap = \'2\'')
         # 清空 bob 未读, 保证容量计数从零起算
         await conn.execute("UPDATE shared.agent_messages SET is_read = TRUE WHERE to_agent = $1", BOB)
     await db.reset_data_pool()
@@ -362,7 +364,7 @@ async def test_13_mailbox_capacity_rejects_delivery():
     await db.reset_data_pool()
     spool = await db._acquire_system()
     async with spool.acquire() as conn:
-        await conn.execute("ALTER DATABASE logbook RESET logbook.mailbox_cap")
+        await conn.execute(f'ALTER DATABASE "{dbname}" RESET logbook.mailbox_cap')
     await db.reset_data_pool()
 
 
