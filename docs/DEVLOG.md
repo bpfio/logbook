@@ -9,10 +9,12 @@
 
 ---
 
-## 一、任务台账 (23)
+## 一、任务台账 (25)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| MU-2 | closed | feat | 站内邮箱完成面: 回复/会话/已发送/搜索/归档 + agent_messages 点对点 RLS + 容量防灌爆 + brief 未读角标 | 7c7b010 | sql/10_mailbox_completion.sql + 5 新 MCP 工具 + 收件人注册告警; 14 新测试全绿, 回归 99/99 (DEV-2026-10-14-01) |
+| MU-1 | closed | feat | 多用户分组权限层: principals/群组三表 + 双平面池 SET ROLE 降权 + RLS 硬隔离 + allow_cross_project 收口 | 7c7b010 | 语义方案A 组内互见互写/跨组不可见; acl_* SECURITY DEFINER + admin 门禁 + project_init 自动挂组 + 存量回填脚本 opt-in (DEV-2026-10-14-01) |
 | L15 | closed | feat | rule_record MCP 写入原语落地, 闭合架构铁律 SSOT 读写环 (0.4.2) | 837ff87 | db.upsert_rule 早有但从未暴露; 0.4.2 上线生产, 回环验证通过并写入首条铁律 RULE-DEPLOY-01 (DevLog #92, DEV-2026-10-13-06) |
 | L-STAB | closed | fix | 审计 A-01~A-08 稳定性整改与生产验收 | 08c0461 | S0~S4 提交 + 9c9d239 版本辨识；0.4.1 已上线生产, 终验 9/9 全绿 (DevLog #91, DEV-2026-10-13-05) |
 | L-AUD-01 | closed | audit | Logbook 稳定性专项审计报告落盘 | 08c0461 | `docs/AUDIT_LOGBOOK_STABILITY_2026-10-13.md`; P0×1 / P1×6 / P2×1 全部转入 L-STAB 修复流, 报告随提交入库办结 |
@@ -59,6 +61,18 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-10-14-01] 多用户分组权限层 + 站内邮箱完成面 — ✅ 闭环 (未部署)
+
+语义方案 A 定稿 (组内互见互写, 跨组不可见; 未挂组项目 legacy 全通零破坏; admin 全见), 设计决策入库 research[11]:
+
+1. **权限层 (MU-1)**: sql/09 建 principals/群组三表 + `acl_*` SECURITY DEFINER 裁决函数, 对 shared.projects/devlogs/researches/file_leases 启用 RLS 硬隔离 (表 owner 天然豁免, 存量单用户行为零变化); db.py 升级双平面连接池 —— 数据面 init 钩子 `SET ROLE lb_u_<principal>` 降权 + `logbook.agent` 会话变量, 系统面承载 DDL/授权/引导; 群组管理面 (group_* 6 工具) 走 admin 门禁; project_init 建库自动挂调用者群组 (挂载即收口), 不可见项目返回 PROJECT_NOT_VISIBLE; `allow_cross_project` 降级为只能收紧 (PG 角色硬边界兜底);
+2. **站内邮箱 (MU-2)**: sql/10 加归档列 + agent_messages 点对点 RLS (仅收发双方可见) + trgm 检索索引; 新增 message_reply/thread/sent/search/archive 5 工具; 收件人未注册投递告警; `acl_mailbox_has_room` 容量防灌爆 (GUC logbook.mailbox_cap, 缺省 500); logbook_brief 增本人未读角标; 砍掉 SMTP/IMAP/附件/CC 群发 (轻量铁律);
+3. **关键排障**: asyncpg 连接池归还默认执行 RESET ALL 会清掉自定义 GUC (角色保留但身份丢失, RLS 静默失效) —— 以自定义 reset 钩子在归还时重新断言会话身份修复, 已沉淀 DevLog;
+4. **验证**: 新增 tests/test_permissions_mailbox.py 14 用例 (权限矩阵/加组显隐/摘组回开/信箱隐私/回复会话/归档/容量/管理面门禁) 全绿; 全量回归 99/99 通过 (含迁移链计数、并发桩、双平面适配);
+5. **回滚与上线**: 未部署 (按指示)。上线前置: `migrate up` 应用 09/10 → 评估 scripts/backfill_permissions.py --discover 挂组收口 → LOGBOOK_ADMIN_AGENTS 声明 admin → stdio 仅限本机、远程只走 SSH。回滚 = revert 7c7b010 + 重建容器 (RLS 对 owner 透明, 旧版本可直接读回全部数据)。
 
 ---
 

@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14 (未部署)
+
+### Added
+- 多用户分组权限层 (MU-1): `principals`/`groups`/`principal_groups`/`project_groups` 四表 + PG 原生 role/GRANT/RLS 硬隔离; 语义方案 A —— 组内互见互写、跨组不可见、未挂组项目 legacy 全通、admin 全见; 双平面连接池 (数据面 SET ROLE 降权 / 系统面 DDL 授权); 群组管理工具组 `group_record/grant/revoke/member_add/member_remove/query` + `principal_query` (admin 门禁); `project_init` 建库自动挂调用者群组; 存量回填脚本 `scripts/backfill_permissions.py` (opt-in)。
+- 站内邮箱完成面 (MU-2): `message_reply/message_thread/message_sent/message_search/message_archive` 五工具; 信箱点对点 RLS (仅收发双方可见); 收件人未注册投递告警; 收件箱容量防灌爆 (`logbook.mailbox_cap`, 缺省 500); `logbook_brief` 本人未读角标。
+
+### Changed
+- `allow_cross_project` 降级为只能收紧不能放宽授权 (跨组边界改由 PG 角色硬性执行)。
+- 迁移链新增 `09_multi_user_acl.sql` / `10_mailbox_completion.sql` (09/10)。
+
+### Security
+- 跨组项目数据 (任务/手记/调研/租约/项目元数据) 对未授权身份在 PG 层硬不可见, 不再依赖应用层逐路径检查。
+
 > 依据设计正典 `docs/PLAN_OPT_2026-10-08.md`（六病一根图）三波实施预填；
 > 各条目随对应波次验证门（pytest + 真机 MCP 回归 + QNAP 重建部署）通过后正式落版。
 
