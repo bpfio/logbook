@@ -77,6 +77,7 @@
 4. **生产兼容结论**: 维持 session_state §8 判定 — 迁移纯增量/owner 豁免 RLS/存量 schema 引导补 legacy 全通授权, 部署零影响; 三项非破坏行为变化 (brief 仅本人未读/双池连接/未读 500 上限) 已知悉;
 5. **发版前必修**: F-REL-01 版本号未随批次提升 (不修则 serverInfo.version 辨识失败) + F-REL-02 部署示例缺 LOGBOOK_ADMIN_AGENTS; 两者均一行级修改;
 6. **部署提醒**: backfill_permissions.py 回填是唯一改变行为面的动作, 保持 opt-in 先 --dry-run; 部署按 session_state_2026-10-14.md §6/§8 清单执行 (备份先行/自动迁移/部署后三项验证)。
+7. **状态归档**: 完整会话状态 (提交链/审查执行/台账锚点/问答澄清/接续指引) 保存于 `docs/session_state_2026-10-15.md`; MCP 侧 batch DEV-2026-10-15-01 + L-AUD-03 + F-REL-01/02 + DevLog #113。
 
 ---
 
