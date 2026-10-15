@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (25)
+## 一、任务台账 (26)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-AUD-03 | closed | audit | 0.5.0 上线前审查: 权限链实证 + 门禁复跑 + 发版收口项落盘 | (本归档提交) | 复核 26 既有工具零影响 + gate full 5/5 + PG18.6 实测群组继承语义有效; 发现 F-REL-01/F-REL-02 待修; 代码面具备上线条件 (DEV-2026-10-15-01) |
 | MU-2 | closed | feat | 站内邮箱完成面: 回复/会话/已发送/搜索/归档 + agent_messages 点对点 RLS + 容量防灌爆 + brief 未读角标 | 7c7b010 | sql/10_mailbox_completion.sql + 5 新 MCP 工具 + 收件人注册告警; 14 新测试全绿, 回归 99/99 (DEV-2026-10-14-01) |
 | MU-1 | closed | feat | 多用户分组权限层: principals/群组三表 + 双平面池 SET ROLE 降权 + RLS 硬隔离 + allow_cross_project 收口 | 7c7b010 | 语义方案A 组内互见互写/跨组不可见; acl_* SECURITY DEFINER + admin 门禁 + project_init 自动挂组 + 存量回填脚本 opt-in (DEV-2026-10-14-01) |
 | L15 | closed | feat | rule_record MCP 写入原语落地, 闭合架构铁律 SSOT 读写环 (0.4.2) | 837ff87 | db.upsert_rule 早有但从未暴露; 0.4.2 上线生产, 回环验证通过并写入首条铁律 RULE-DEPLOY-01 (DevLog #92, DEV-2026-10-13-06) |
@@ -44,10 +45,12 @@
 
 ---
 
-## 二、发现台账 (6)
+## 二、发现台账 (8)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-REL-02 | audit | P3 | open | 待修: deploy/qnap/compose.yaml.example 与 .env.example 补 LOGBOOK_ADMIN_AGENTS 文档行 | 部署清单 §6 第 2 步要求注入该变量, 照抄示例会漏配 (漏配仅群组管理面 ADMIN_REQUIRED, 非故障) |
+| F-REL-01 | audit | P2 | open | 待修: pyproject.toml bump 0.5.0 并对齐 __init__.py (现 0.4.2/0.3.0, CHANGELOG 已 0.5.0) | serverInfo.version 自包元数据注入 (mcp_server.py:61), 不升版则生产终验版本辨识失败 |
 | F-MSG-01 | zcode | P1 | fixed | 消除重复 DDL、写事务 shield 保护、管道流缓冲，彻底根治 -32000 Connection closed | message_* 每次调用执行 10 条 DDL 导致高时延，非交互式管道 EOF 触发 MCP AnyIO cancel_scope 取消在途任务 |
 | F-LOG-05 | simulation | P2 | fixed | 解耦非代码任务证据锚点，自动将实测 notes 锚定为合规 proof_link | 非代码任务（演练/调查/运维）强绑定 commit_hash 导致合规闭环失真或伪造占位符 |
 | F-LOG-04 | simulation | P2 | fixed | 引入 normalizer.py 并在 FastMCP 中通过 Pydantic BeforeValidator 实现前置同义词与Emoji归一化 | Pydantic Literal 强拦截导致带 Emoji 或同义词时抛 400 校验异常中断执行流 |
@@ -61,6 +64,19 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-10-15-01] 0.5.0 上线前审查 (多用户权限 + 站内邮箱) — ✅ 闭环 (未部署)
+
+对未部署批次 DEV-2026-10-14-01 (7c7b010..2692efc) 执行上线前审查, 代码面判定可上线, 发现 2 个发版收口项 (F-REL-01/02) 待修后构建镜像:
+
+1. **权限链有效性实证 (本审查关键项)**: 群组角色 `NOLOGIN NOINHERIT` + 数据面仅 `SET ROLE lb_u_*` 的组合, 在 PG 16+ 曾有成员关系继承语义变更疑点。于隔离 PG 18.6 (与生产同版本) 复刻完整角色拓扑实测: `GRANT 群组 TO 用户角色` 产生 `inherit_option=True`, 群组 schema 授权经用户角色直接生效; 配合 test_05 (加组显隐) 走真实降权路径 (切身份+池重建), 权限链确认有效;
+2. **安全面复核**: 全部动态 GRANT/REVOKE/SET ROLE 经 `_qi()` 引用转义 + 账户名 `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}` 正则约束 + 63 字节哈希截断; set_config 全参数化无注入面; 信箱 5 新工具全走 `_trusted_agent_identity` 无参数冒充; `_require_admin` 无身份放行属 stdio 本机 legacy 设计内, 远程只走 SSH (forced-command 注入可信身份); 引导在 stdio 与 SSH 子进程双入口均覆盖 (`logbook.cli mcp` → `run_stdio()`);
+3. **门禁复跑**: `scripts/gate.sh full` 本检出 5/5 全绿 (unit/integration/18 笔重放零差异/brief 276 token 达标/dedup dry-run), 99 用例;
+4. **生产兼容结论**: 维持 session_state §8 判定 — 迁移纯增量/owner 豁免 RLS/存量 schema 引导补 legacy 全通授权, 部署零影响; 三项非破坏行为变化 (brief 仅本人未读/双池连接/未读 500 上限) 已知悉;
+5. **发版前必修**: F-REL-01 版本号未随批次提升 (不修则 serverInfo.version 辨识失败) + F-REL-02 部署示例缺 LOGBOOK_ADMIN_AGENTS; 两者均一行级修改;
+6. **部署提醒**: backfill_permissions.py 回填是唯一改变行为面的动作, 保持 opt-in 先 --dry-run; 部署按 session_state_2026-10-14.md §6/§8 清单执行 (备份先行/自动迁移/部署后三项验证)。
 
 ---
 
