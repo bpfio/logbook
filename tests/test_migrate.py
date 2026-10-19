@@ -38,6 +38,8 @@ async def _verify_objects(database_url: str) -> None:
             "shared.agent_messages": True,
             "shared.file_leases": True,
             "shared.researches": True,
+            "shared.datasets": True,
+            "shared.records": True,
             "public.schema_migrations": True,
         }
         for identifier, present in expected.items():
@@ -51,7 +53,7 @@ async def _verify_objects(database_url: str) -> None:
             "SELECT count(*) FROM information_schema.columns "
             "WHERE table_schema = 'shared' AND table_name = 'devlogs' AND column_name = 'agent_ip'"
         ) == 1
-        assert await conn.fetchval("SELECT count(*) FROM public.schema_migrations") == 12
+        assert await conn.fetchval("SELECT count(*) FROM public.schema_migrations") == 13
     finally:
         await conn.close()
 
@@ -67,7 +69,7 @@ async def test_clean_database_migrates_twice_and_verifies():
     first = await migrate.up(database_url)
     assert first["ok"] is True
     assert first["adopted"] == []
-    assert len(first["applied"]) == 12
+    assert len(first["applied"]) == 13
 
     second = await migrate.up(database_url)
     assert second["ok"] is True
@@ -93,7 +95,7 @@ async def test_existing_partial_schema_is_adopted_then_completed():
     result = await migrate.up(database_url)
     assert result["ok"] is True
     assert result["adopted"] == ["01", "02"]
-    assert len(result["applied"]) == 10
+    assert len(result["applied"]) == 11
     assert (await migrate.verify(database_url))["ok"] is True
     await _verify_objects(database_url)
 
@@ -108,6 +110,6 @@ async def test_concurrent_up_applies_each_migration_once():
         migrate.up(database_url),
     )
     assert all(result["ok"] for result in results)
-    assert sum(len(result["applied"]) for result in results) == 12
+    assert sum(len(result["applied"]) for result in results) == 13
     assert (await migrate.verify(database_url))["ok"] is True
     await _verify_objects(database_url)

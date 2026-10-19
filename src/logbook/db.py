@@ -13,6 +13,8 @@ import logging
 import os
 import json
 import re
+from datetime import datetime, date
+from decimal import Decimal
 from typing import Any
 import asyncpg
 from .models import (
@@ -24,7 +26,8 @@ from .models import (
     Rule,
     Project, slug_to_schema_name,
     AgentMessage, FileLease,
-    Research, ResearchCategory, ResearchStatus
+    Research, ResearchCategory, ResearchStatus,
+    Dataset, DataRecord, DatasetCategory, RecordStatus
 )
 from .time_sync import get_beijing_now
 
@@ -83,6 +86,7 @@ class Database:
         self._async_locks: dict[str, asyncio.Lock] = {}
         self._messaging_schema_ensured: bool = False
         self._researches_schema_ensured: bool = False
+        self._datasets_and_records_schema_ensured: bool = False
         self._project_ready: set[str] = set()
         self._acl_bootstrapped: bool = False
         self._identity_active: bool = False
@@ -95,6 +99,7 @@ class Database:
             self._project_ready.clear()
             self._messaging_schema_ensured = False
             self._researches_schema_ensured = False
+            self._datasets_and_records_schema_ensured = False
         lock = self._async_locks.get(name)
         if lock is None:
             lock = asyncio.Lock()
@@ -200,6 +205,7 @@ class Database:
             self._project_ready.clear()
             self._messaging_schema_ensured = False
             self._researches_schema_ensured = False
+            self._datasets_and_records_schema_ensured = False
             if pool is not None:
                 if getattr(pool, "_loop", None) != loop:
                     try:
@@ -1156,6 +1162,8 @@ class Database:
                 ("rules", "SELECT, INSERT, UPDATE"),
                 ("devlogs", "SELECT, INSERT, UPDATE"),
                 ("researches", "SELECT, INSERT, UPDATE"),
+                ("datasets", "SELECT, INSERT, UPDATE"),
+                ("records", "SELECT, INSERT, UPDATE, DELETE"),
             ):
                 if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"shared.{table}"):
                     await conn.execute(f"GRANT {privs} ON shared.{self._qi(table)} TO {auth};")
@@ -2159,6 +2167,519 @@ class Database:
             rows = await conn.fetch(query, *params)
             return [Research(**dict(r)) for r in rows]
 
+    # =========================================================================
+    # 通用事实引擎与数据集 (shared.datasets & shared.records) (0.5.0)
+    # =========================================================================
+
+    async def ensure_datasets_and_records_schema(self):
+        """确保 shared.datasets 与 shared.records 物理表与索引就绪 (幂等)。"""
+        await self.connect()
+        if self._datasets_and_records_schema_ensured:
+            return
+        async with self._get_lock("datasets_records_schema"):
+            if self._datasets_and_records_schema_ensured:
+                return
+            spool = await self._acquire_system()
+            async with spool.acquire() as conn:
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS shared.datasets (
+                    code            VARCHAR(64) PRIMARY KEY,
+                    name            VARCHAR(256) NOT NULL,
+                    category        VARCHAR(32) NOT NULL DEFAULT 'general',
+                    field_schema    JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    alias_map       JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    description     TEXT,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_datasets_category ON shared.datasets(category);
+
+                CREATE TABLE IF NOT EXISTS shared.records (
+                    id              BIGSERIAL PRIMARY KEY,
+                    project_id      VARCHAR(64) NOT NULL,
+                    dataset_code    VARCHAR(64) NOT NULL REFERENCES shared.datasets(code) ON DELETE RESTRICT,
+                    parent_id       BIGINT REFERENCES shared.records(id) ON DELETE CASCADE,
+                    batch_id        VARCHAR(64),
+                    doc_no          VARCHAR(128) NOT NULL,
+                    entity_name     VARCHAR(256),
+                    amount          NUMERIC(18, 4) NOT NULL DEFAULT 0,
+                    currency        VARCHAR(16) NOT NULL DEFAULT 'CNY',
+                    event_date      DATE NOT NULL,
+                    status          VARCHAR(32) NOT NULL DEFAULT 'recorded',
+                    payload         JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    tsv_content     tsvector GENERATED ALWAYS AS (
+                        to_tsvector('simple', coalesce(doc_no, '') || ' ' || coalesce(entity_name, '') || ' ' || payload::text)
+                    ) STORED,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_records_scope ON shared.records (project_id, dataset_code, event_date);
+                CREATE INDEX IF NOT EXISTS idx_records_doc ON shared.records (project_id, doc_no);
+                CREATE INDEX IF NOT EXISTS idx_records_parent ON shared.records (parent_id) WHERE parent_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_records_payload ON shared.records USING GIN (payload jsonb_path_ops);
+                CREATE INDEX IF NOT EXISTS idx_records_tsv ON shared.records USING GIN (tsv_content);
+
+                ALTER TABLE shared.records ENABLE ROW LEVEL SECURITY;
+
+                DO $policy$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_proc nsp_p 
+                        JOIN pg_namespace nsp ON nsp.oid = nsp_p.pronamespace 
+                        WHERE nsp.nspname = 'shared' AND nsp_p.proname = 'acl_project_visible'
+                    ) THEN
+                        DROP POLICY IF EXISTS p_records_select ON shared.records;
+                        DROP POLICY IF EXISTS p_records_insert ON shared.records;
+                        DROP POLICY IF EXISTS p_records_update ON shared.records;
+                        DROP POLICY IF EXISTS p_records_delete ON shared.records;
+
+                        CREATE POLICY p_records_select ON shared.records
+                            FOR SELECT
+                            USING (shared.acl_project_visible(project_id));
+                        CREATE POLICY p_records_insert ON shared.records
+                            FOR INSERT
+                            WITH CHECK (shared.acl_project_visible(project_id));
+                        CREATE POLICY p_records_update ON shared.records
+                            FOR UPDATE
+                            USING (shared.acl_project_visible(project_id))
+                            WITH CHECK (shared.acl_project_visible(project_id));
+                        CREATE POLICY p_records_delete ON shared.records
+                            FOR DELETE
+                            USING (shared.acl_project_visible(project_id));
+                    END IF;
+                END $policy$;
+
+                DO $auth$
+                BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'logbook_authenticated') THEN
+                        GRANT SELECT, INSERT, UPDATE ON shared.datasets TO logbook_authenticated;
+                        GRANT SELECT, INSERT, UPDATE, DELETE ON shared.records TO logbook_authenticated;
+                        GRANT USAGE, SELECT ON SEQUENCE shared.records_id_seq TO logbook_authenticated;
+                    END IF;
+                END $auth$;
+                """)
+            self._datasets_and_records_schema_ensured = True
+
+    async def upsert_dataset(self, dataset: Dataset) -> dict:
+        """注册或更新数据集元数据规范 (幂等)。"""
+        await self.ensure_datasets_and_records_schema()
+        async with self._pool.acquire() as conn:
+            sql = """
+                INSERT INTO shared.datasets (
+                    code, name, category, field_schema, alias_map, description, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)
+                ON CONFLICT (code) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    category = EXCLUDED.category,
+                    field_schema = EXCLUDED.field_schema,
+                    alias_map = EXCLUDED.alias_map,
+                    description = COALESCE(EXCLUDED.description, shared.datasets.description),
+                    updated_at = EXCLUDED.updated_at
+                RETURNING code, name, category, field_schema, alias_map, description, created_at, updated_at;
+            """
+            row = await conn.fetchrow(
+                sql,
+                dataset.code,
+                dataset.name,
+                dataset.category,
+                json.dumps(dataset.field_schema, ensure_ascii=False),
+                json.dumps(dataset.alias_map, ensure_ascii=False),
+                dataset.description,
+                dataset.created_at,
+                dataset.updated_at,
+            )
+            d = dict(row)
+            if isinstance(d.get("field_schema"), str):
+                d["field_schema"] = json.loads(d["field_schema"])
+            if isinstance(d.get("alias_map"), str):
+                d["alias_map"] = json.loads(d["alias_map"])
+            return d
+
+    async def get_dataset(self, code: str) -> dict | None:
+        """获取单个数据集元数据规范。"""
+        await self.ensure_datasets_and_records_schema()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM shared.datasets WHERE code = $1;", code.strip().lower())
+            if not row:
+                return None
+            d = dict(row)
+            if isinstance(d.get("field_schema"), str):
+                d["field_schema"] = json.loads(d["field_schema"])
+            if isinstance(d.get("alias_map"), str):
+                d["alias_map"] = json.loads(d["alias_map"])
+            return d
+
+    async def list_datasets(self, category: str | None = None, limit: int = 50) -> list[dict]:
+        """查询数据集定义列表。"""
+        await self.ensure_datasets_and_records_schema()
+        limit = self._clamp_limit(limit, default=50)
+        conditions = []
+        params: list[Any] = []
+        if category:
+            params.append(category.strip().lower())
+            conditions.append(f"category = ${len(params)}")
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+        sql = f"""
+            SELECT code, name, category, field_schema, alias_map, description, created_at, updated_at
+            FROM shared.datasets
+            {where_clause}
+            ORDER BY code ASC
+            LIMIT ${len(params)};
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+            res = []
+            for r in rows:
+                d = dict(r)
+                if isinstance(d.get("field_schema"), str):
+                    d["field_schema"] = json.loads(d["field_schema"])
+                if isinstance(d.get("alias_map"), str):
+                    d["alias_map"] = json.loads(d["alias_map"])
+                res.append(d)
+            return res
+
+    async def upsert_record(self, record: DataRecord) -> dict:
+        """插入或更新单个事实记录 (如果指定 id 或匹配到同单号同主键则更新)。"""
+        await self.ensure_datasets_and_records_schema()
+        ev_date = record.event_date
+        if isinstance(ev_date, str):
+            cleaned = ev_date.strip().replace("/", "-")
+            if len(cleaned) == 8 and cleaned.isdigit():
+                ev_date = date(int(cleaned[:4]), int(cleaned[4:6]), int(cleaned[6:8]))
+            else:
+                ev_date = date.fromisoformat(cleaned[:10])
+
+        async with self._pool.acquire() as conn:
+            existing_id = record.id
+            if existing_id is None:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id FROM shared.records 
+                    WHERE project_id = $1 AND dataset_code = $2 AND doc_no = $3 
+                      AND parent_id IS NOT DISTINCT FROM $4
+                    LIMIT 1;
+                    """,
+                    record.project_id, record.dataset_code, record.doc_no, record.parent_id
+                )
+                if row:
+                    existing_id = row["id"]
+
+            if existing_id is not None:
+                update_sql = """
+                    UPDATE shared.records
+                    SET dataset_code = $2,
+                        parent_id = $3,
+                        batch_id = COALESCE($4, shared.records.batch_id),
+                        doc_no = $5,
+                        entity_name = COALESCE($6, shared.records.entity_name),
+                        amount = $7,
+                        currency = $8,
+                        event_date = $9,
+                        status = $10,
+                        payload = $11::jsonb,
+                        updated_at = NOW()
+                    WHERE id = $1 AND project_id = $12
+                    RETURNING id, project_id, dataset_code, parent_id, batch_id,
+                              doc_no, entity_name, amount, currency, event_date,
+                              status, payload, created_at, updated_at;
+                """
+                res = await conn.fetchrow(
+                    update_sql,
+                    existing_id,
+                    record.dataset_code,
+                    record.parent_id,
+                    record.batch_id,
+                    record.doc_no,
+                    record.entity_name,
+                    record.amount,
+                    record.currency,
+                    ev_date,
+                    record.status,
+                    json.dumps(record.payload, ensure_ascii=False),
+                    record.project_id,
+                )
+                if res:
+                    d = dict(res)
+                    if isinstance(d.get("payload"), str):
+                        d["payload"] = json.loads(d["payload"])
+                    return d
+
+            insert_sql = """
+                INSERT INTO shared.records (
+                    project_id, dataset_code, parent_id, batch_id,
+                    doc_no, entity_name, amount, currency, event_date,
+                    status, payload, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4,
+                    $5, $6, $7, $8, $9,
+                    $10, $11::jsonb, $12, $13
+                )
+                RETURNING id, project_id, dataset_code, parent_id, batch_id,
+                          doc_no, entity_name, amount, currency, event_date,
+                          status, payload, created_at, updated_at;
+            """
+            res = await conn.fetchrow(
+                insert_sql,
+                record.project_id,
+                record.dataset_code,
+                record.parent_id,
+                record.batch_id,
+                record.doc_no,
+                record.entity_name,
+                record.amount,
+                record.currency,
+                ev_date,
+                record.status,
+                json.dumps(record.payload, ensure_ascii=False),
+                record.created_at,
+                record.updated_at,
+            )
+            d = dict(res)
+            if isinstance(d.get("payload"), str):
+                d["payload"] = json.loads(d["payload"])
+            return d
+
+    async def bulk_import_records(self, records: list[DataRecord]) -> int:
+        """批量导入通用事实数据行 (事务内批处理)。返回成功入库条数。"""
+        await self.ensure_datasets_and_records_schema()
+        if not records:
+            return 0
+        insert_sql = """
+            INSERT INTO shared.records (
+                project_id, dataset_code, parent_id, batch_id,
+                doc_no, entity_name, amount, currency, event_date,
+                status, payload, created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4,
+                $5, $6, $7, $8, $9,
+                $10, $11::jsonb, $12, $13
+            );
+        """
+        count = 0
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for r in records:
+                    ev_date = r.event_date
+                    if isinstance(ev_date, str):
+                        cleaned = ev_date.strip().replace("/", "-")
+                        if len(cleaned) == 8 and cleaned.isdigit():
+                            ev_date = date(int(cleaned[:4]), int(cleaned[4:6]), int(cleaned[6:8]))
+                        else:
+                            ev_date = date.fromisoformat(cleaned[:10])
+                    await conn.execute(
+                        insert_sql,
+                        r.project_id,
+                        r.dataset_code,
+                        r.parent_id,
+                        r.batch_id,
+                        r.doc_no,
+                        r.entity_name,
+                        r.amount,
+                        r.currency,
+                        ev_date,
+                        r.status,
+                        json.dumps(r.payload, ensure_ascii=False),
+                        r.created_at,
+                        r.updated_at,
+                    )
+                    count += 1
+        return count
+
+    async def query_records(
+        self,
+        project_id: str,
+        dataset_code: str | None = None,
+        doc_no: str | None = None,
+        entity_name: str | None = None,
+        date_from: date | str | None = None,
+        date_to: date | str | None = None,
+        amount_min: Decimal | float | None = None,
+        amount_max: Decimal | float | None = None,
+        status: str | None = None,
+        batch_id: str | None = None,
+        parent_id: int | None = None,
+        payload_filter: dict | None = None,
+        query_text: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """多维度查询事实数据记录。"""
+        await self.ensure_datasets_and_records_schema()
+        limit = self._clamp_limit(limit, default=50)
+        try:
+            offset = max(0, int(offset or 0))
+        except (TypeError, ValueError):
+            offset = 0
+
+        conditions = ["project_id = $1"]
+        params: list[Any] = [project_id]
+
+        if dataset_code:
+            params.append(dataset_code.strip().lower())
+            conditions.append(f"dataset_code = ${len(params)}")
+        if doc_no:
+            params.append(doc_no.strip())
+            conditions.append(f"doc_no = ${len(params)}")
+        if entity_name:
+            params.append(f"%{entity_name.strip()}%")
+            conditions.append(f"entity_name ILIKE ${len(params)}")
+        if date_from:
+            d_from = date_from if isinstance(date_from, date) else date.fromisoformat(str(date_from).strip()[:10])
+            params.append(d_from)
+            conditions.append(f"event_date >= ${len(params)}")
+        if date_to:
+            d_to = date_to if isinstance(date_to, date) else date.fromisoformat(str(date_to).strip()[:10])
+            params.append(d_to)
+            conditions.append(f"event_date <= ${len(params)}")
+        if amount_min is not None:
+            params.append(Decimal(str(amount_min)))
+            conditions.append(f"amount >= ${len(params)}")
+        if amount_max is not None:
+            params.append(Decimal(str(amount_max)))
+            conditions.append(f"amount <= ${len(params)}")
+        if status:
+            params.append(status.strip().lower())
+            conditions.append(f"status = ${len(params)}")
+        if batch_id:
+            params.append(batch_id.strip())
+            conditions.append(f"batch_id = ${len(params)}")
+        if parent_id is not None:
+            params.append(int(parent_id))
+            conditions.append(f"parent_id = ${len(params)}")
+        if payload_filter:
+            params.append(json.dumps(payload_filter, ensure_ascii=False))
+            conditions.append(f"payload @> ${len(params)}::jsonb")
+
+        where_clause = " AND ".join(conditions)
+
+        if query_text and query_text.strip():
+            params.append(query_text.strip())
+            q_idx = len(params)
+            where_clause += f" AND tsv_content @@ plainto_tsquery('simple', ${q_idx})"
+            order_clause = f"ORDER BY ts_rank_cd(tsv_content, plainto_tsquery('simple', ${q_idx})) DESC, event_date DESC, id DESC"
+        else:
+            order_clause = "ORDER BY event_date DESC, id DESC"
+
+        params.append(limit)
+        lim_idx = len(params)
+        params.append(offset)
+        off_idx = len(params)
+
+        sql = f"""
+            SELECT id, project_id, dataset_code, parent_id, batch_id,
+                   doc_no, entity_name, amount, currency, event_date,
+                   status, payload, created_at, updated_at
+            FROM shared.records
+            WHERE {where_clause}
+            {order_clause}
+            LIMIT ${lim_idx} OFFSET ${off_idx};
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+            results = []
+            for r in rows:
+                d = dict(r)
+                if isinstance(d.get("payload"), str):
+                    d["payload"] = json.loads(d["payload"])
+                results.append(d)
+            return results
+
+    async def aggregate_record_stats(
+        self,
+        project_id: str,
+        dataset_code: str | None = None,
+        date_from: date | str | None = None,
+        date_to: date | str | None = None,
+        group_by: str = "month",
+    ) -> dict:
+        """统计与汇总事实数据指标 (总笔数、总金额、分组汇总)。"""
+        await self.ensure_datasets_and_records_schema()
+        conditions = ["project_id = $1"]
+        params: list[Any] = [project_id]
+
+        if dataset_code:
+            params.append(dataset_code.strip().lower())
+            conditions.append(f"dataset_code = ${len(params)}")
+        if date_from:
+            d_from = date_from if isinstance(date_from, date) else date.fromisoformat(str(date_from).strip()[:10])
+            params.append(d_from)
+            conditions.append(f"event_date >= ${len(params)}")
+        if date_to:
+            d_to = date_to if isinstance(date_to, date) else date.fromisoformat(str(date_to).strip()[:10])
+            params.append(d_to)
+            conditions.append(f"event_date <= ${len(params)}")
+
+        where_clause = " AND ".join(conditions)
+
+        async with self._pool.acquire() as conn:
+            summary_sql = f"""
+                SELECT COUNT(*)::bigint AS total_count,
+                       COALESCE(SUM(amount), 0) AS total_amount,
+                       COALESCE(MIN(amount), 0) AS min_amount,
+                       COALESCE(MAX(amount), 0) AS max_amount,
+                       COALESCE(AVG(amount), 0) AS avg_amount
+                FROM shared.records
+                WHERE {where_clause};
+            """
+            sum_row = await conn.fetchrow(summary_sql, *params)
+            summary = {
+                "total_count": sum_row["total_count"],
+                "total_amount": float(sum_row["total_amount"]),
+                "min_amount": float(sum_row["min_amount"]),
+                "max_amount": float(sum_row["max_amount"]),
+                "avg_amount": float(sum_row["avg_amount"]),
+            }
+
+            group_by_norm = (group_by or "none").strip().lower()
+            breakdown = []
+            if group_by_norm in ("day", "month", "year", "currency", "status", "entity", "dataset"):
+                if group_by_norm == "day":
+                    group_expr = "event_date::text"
+                elif group_by_norm == "month":
+                    group_expr = "to_char(event_date, 'YYYY-MM')"
+                elif group_by_norm == "year":
+                    group_expr = "to_char(event_date, 'YYYY')"
+                elif group_by_norm == "currency":
+                    group_expr = "currency"
+                elif group_by_norm == "status":
+                    group_expr = "status"
+                elif group_by_norm == "entity":
+                    group_expr = "COALESCE(entity_name, 'Unknown')"
+                elif group_by_norm == "dataset":
+                    group_expr = "dataset_code"
+                else:
+                    group_expr = "to_char(event_date, 'YYYY-MM')"
+
+                breakdown_sql = f"""
+                    SELECT {group_expr} AS dimension,
+                           COUNT(*)::bigint AS count,
+                           COALESCE(SUM(amount), 0) AS total_amount,
+                           COALESCE(AVG(amount), 0) AS avg_amount
+                    FROM shared.records
+                    WHERE {where_clause}
+                    GROUP BY dimension
+                    ORDER BY dimension ASC;
+                """
+                b_rows = await conn.fetch(breakdown_sql, *params)
+                for r in b_rows:
+                    breakdown.append({
+                        "dimension": r["dimension"],
+                        "count": r["count"],
+                        "total_amount": float(r["total_amount"]),
+                        "avg_amount": float(r["avg_amount"]),
+                    })
+
+            return {
+                "project_id": project_id,
+                "dataset_code": dataset_code,
+                "summary": summary,
+                "group_by": group_by_norm,
+                "breakdown": breakdown,
+            }
+
 
 db = Database()
+
 

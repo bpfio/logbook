@@ -14,6 +14,7 @@ import socket
 import asyncio
 import functools
 import asyncpg
+from datetime import datetime, date
 from typing import Any, Literal
 try:
     from mcp.server.mcpserver import MCPServer
@@ -28,6 +29,7 @@ from .models import (
     DevLog, DevLogVisibility, Rule,
     AgentMessage, FileLease,
     Research, ResearchCategory, ResearchStatus,
+    Dataset, DataRecord, DatasetCategory, RecordStatus,
     slug_to_schema_name,
 )
 from .sanitizer import sanitize_text
@@ -39,7 +41,8 @@ from .errors import tool_error, ToolError, pg_tool_error
 from .normalizer import (
     normalize_status, normalize_task_type, normalize_priority,
     normalize_severity, normalize_waiting_category,
-    normalize_research_category, normalize_research_status
+    normalize_research_category, normalize_research_status,
+    normalize_dataset_category, normalize_record_status
 )
 from .db import db
 # P1-1: brief digest 端点 (A1 并行开发中, 接口契约已锁 db.brief_project(project_id, devlog_limit=5) -> dict,
@@ -2290,6 +2293,260 @@ async def research_query(
     }
 
 
+# =============================================================================
+# 通用事实引擎与数据集管理 (0.5.0)
+# =============================================================================
+
+@mcp.tool()
+@tool_shell
+async def dataset_upsert(
+    code: str,
+    name: str,
+    category: str = "general",
+    field_schema: list[dict[str, Any]] | None = None,
+    alias_map: dict[str, str] | None = None,
+    description: str | None = None,
+) -> dict:
+    """注册或更新数据集元数据规范与字段定义 (Schema & Metadata).
+
+    - code: 必填。数据集唯一标识码 (2~64 位小写字母、数字、点或下划线，如 'safe_forex', 'oss_benchmark')。
+    - name: 必填。数据集全称或中文名称 (如 '人行涉外收汇申报')。
+    - category: 可选。业务领域分类: finance, oss_metrics, trade, tax, research, general。
+    - field_schema: 可选。字段元数据定义列表 [{"key": "...", "label": "...", "type": "..."}]。
+    - alias_map: 可选。历史版本与同义词映射表 {"结汇金额": "amount", "申报号": "doc_no"}。
+    - description: 可选。数据集口径与填报业务说明。
+    """
+    cat = normalize_dataset_category(category)
+    ds = Dataset(
+        code=code,
+        name=name,
+        category=cat,
+        field_schema=field_schema or [],
+        alias_map=alias_map or {},
+        description=description,
+    )
+    result = await db.upsert_dataset(ds)
+    for k in ("created_at", "updated_at"):
+        if isinstance(result.get(k), (datetime, date)):
+            result[k] = result[k].isoformat()
+    return {
+        "success": True,
+        "action": "upserted",
+        "dataset": result,
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def dataset_query(
+    code: str | None = None,
+    category: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """查询数据集定义元数据字典列表或详情。
+
+    - code: 可选。指定唯一编码精准检索单条数据集规范。
+    - category: 可选。按业务领域分类过滤: finance, oss_metrics, trade, tax, research, general。
+    - limit: 返回条数上限 (1..200, 缺省 50)。
+    """
+    if code:
+        res = await db.get_dataset(code)
+        if res:
+            for k in ("created_at", "updated_at"):
+                if isinstance(res.get(k), (datetime, date)):
+                    res[k] = res[k].isoformat()
+        return {
+            "success": True,
+            "total": 1 if res else 0,
+            "items": [res] if res else [],
+        }
+    cat = normalize_dataset_category(category) if category else None
+    items = await db.list_datasets(category=cat, limit=clamp_limit(limit))
+    for it in items:
+        for k in ("created_at", "updated_at"):
+            if isinstance(it.get(k), (datetime, date)):
+                it[k] = it[k].isoformat()
+    return {
+        "success": True,
+        "total": len(items),
+        "items": items,
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def record_upsert(
+    project: str,
+    dataset_code: str,
+    doc_no: str,
+    event_date: str,
+    amount: float | str | int = 0,
+    currency: str = "CNY",
+    entity_name: str | None = None,
+    status: str = "recorded",
+    payload: dict[str, Any] | None = None,
+    parent_id: int | None = None,
+    batch_id: str | None = None,
+    id: int | None = None,
+) -> dict:
+    """写入或更新通用业务/事实单据记录 (Strong Spine + Flexible Ribs)。
+
+    - project: 必填。归属项目代号 (必须显式传参)。
+    - dataset_code: 必填。关联的数据集定义编码 (如 'safe_forex', 'oss_benchmark')。
+    - doc_no: 必填。单据号/唯一标识 (发票号、关单号、跑分流水号)。
+    - event_date: 必填。业务发生日期或测试日期 (YYYY-MM-DD)。
+    - amount: 可选。核心数值/金额 (高精度 NUMERIC, 缺省 0)。
+    - currency: 可选。币种或量纲单位 (USD, CNY, QPS, MS 等，缺省 CNY)。
+    - entity_name: 可选。往来单位/境外付款人/组件仓库名。
+    - status: 可选。状态: recorded, reconciled, verified, cancelled (缺省 recorded)。
+    - payload: 可选。业务特有动态属性载荷 (JSONB 软肋骨)。
+    - parent_id: 可选。父单据记录 ID (支持主子表分录)。
+    - batch_id: 可选。导入批次标识。
+    - id: 可选。指定物理记录 ID 更新。
+    """
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=True)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    st = normalize_record_status(status)
+    record = DataRecord(
+        id=id,
+        project_id=proj,
+        dataset_code=dataset_code.strip().lower(),
+        parent_id=parent_id,
+        batch_id=batch_id,
+        doc_no=doc_no.strip(),
+        entity_name=entity_name.strip() if entity_name else None,
+        amount=amount,
+        currency=currency.strip().upper() if currency else "CNY",
+        event_date=event_date,
+        status=st,
+        payload=payload or {},
+    )
+    res = await db.upsert_record(record)
+    for k in ("event_date", "created_at", "updated_at"):
+        if isinstance(res.get(k), (datetime, date)):
+            res[k] = res[k].isoformat()
+    if "amount" in res:
+        res["amount"] = float(res["amount"])
+    return {
+        "success": True,
+        "action": "upserted",
+        "record": res,
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def record_query(
+    project: str,
+    dataset_code: str | None = None,
+    doc_no: str | None = None,
+    entity_name: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    amount_min: float | None = None,
+    amount_max: float | None = None,
+    status: str | None = None,
+    batch_id: str | None = None,
+    parent_id: int | None = None,
+    payload_filter: dict[str, Any] | None = None,
+    query_text: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    fields: list[str] | None = None,
+) -> dict:
+    """多维检索事实数据单据 (支持日期/金额区间、全文检索、JSONB 属性包含)。
+
+    - project: 必填。项目代号。
+    - dataset_code: 可选。数据集编码过滤。
+    - doc_no: 可选。单号精准检索。
+    - entity_name: 可选。往来单位模糊匹配。
+    - date_from / date_to: 可选。业务发生日期范围 (YYYY-MM-DD)。
+    - amount_min / amount_max: 可选。核心数值/金额区间。
+    - status: 可选。状态过滤 (recorded, reconciled, verified, cancelled)。
+    - batch_id: 可选。批次号过滤。
+    - parent_id: 可选。主子表分录父级 ID 过滤。
+    - payload_filter: 可选。JSONB 动态属性匹配 (如 {"customs_code": "0101"})。
+    - query_text: 可选。全文检索关键词 (跨 doc_no, entity_name 及 payload 全文检索)。
+    - limit: 返回条数 (1..200, 缺省 50)。
+    - offset: 分页偏移量 (缺省 0)。
+    - fields: 可选列投影，缺省返回全列。
+    """
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    st = normalize_record_status(status) if status else None
+    rows = await db.query_records(
+        project_id=proj,
+        dataset_code=dataset_code,
+        doc_no=doc_no,
+        entity_name=entity_name,
+        date_from=date_from,
+        date_to=date_to,
+        amount_min=amount_min,
+        amount_max=amount_max,
+        status=st,
+        batch_id=batch_id,
+        parent_id=parent_id,
+        payload_filter=payload_filter,
+        query_text=query_text,
+        limit=clamp_limit(limit),
+        offset=offset,
+    )
+    for r in rows:
+        for k in ("event_date", "created_at", "updated_at"):
+            if isinstance(r.get(k), (datetime, date)):
+                r[k] = r[k].isoformat()
+        if "amount" in r:
+            r["amount"] = float(r["amount"])
+
+    items = project_fields(rows, fields)
+    return {
+        "success": True,
+        "project": proj,
+        "total": len(items),
+        "items": items,
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def record_stats(
+    project: str,
+    dataset_code: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    group_by: str = "month",
+) -> dict:
+    """统计与汇总事实单据核心指标 (纯数据库引擎级 SUM/COUNT/AVG 极速聚合)。
+
+    - project: 必填。项目代号。
+    - dataset_code: 可选。数据集编码过滤。
+    - date_from / date_to: 可选。业务发生日期范围 (YYYY-MM-DD)。
+    - group_by: 可选。聚合维度: 'month' (缺省), 'day', 'year', 'currency', 'status', 'entity', 'dataset', 'none'。
+    """
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    stats = await db.aggregate_record_stats(
+        project_id=proj,
+        dataset_code=dataset_code,
+        date_from=date_from,
+        date_to=date_to,
+        group_by=group_by,
+    )
+    return {
+        "success": True,
+        "project": proj,
+        "stats": stats,
+    }
+
 
 def run_stdio():
     """以 Stdio 模式运行 MCP Server。"""
@@ -2303,3 +2560,4 @@ def run_stdio():
 
 if __name__ == "__main__":
     run_stdio()
+

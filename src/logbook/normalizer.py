@@ -270,3 +270,48 @@ def normalize_research_status(val: Any, default: str = "completed") -> str:
     c = clean_text(val)
     return RESEARCH_STATUS_MAP.get(c, default)
 
+
+# ============================================================================
+# 数据集与事实记录归一化 (0.5.0)
+# ============================================================================
+
+DATASET_CATEGORY_MAP = {
+    "finance": "finance",
+    "financial": "finance",
+    "oss_metrics": "oss_metrics",
+    "oss": "oss_metrics",
+    "benchmark": "oss_metrics",
+    "trade": "trade",
+    "customs": "trade",
+    "tax": "tax",
+    "research": "research",
+    "general": "general",
+}
+
+RECORD_STATUS_MAP = {
+    "recorded": "recorded",
+    "record": "recorded",
+    "new": "recorded",
+    "reconciled": "reconciled",
+    "checked": "reconciled",
+    "audited": "reconciled",
+    "verified": "verified",
+    "valid": "verified",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+    "void": "cancelled",
+}
+
+
+def normalize_dataset_category(val: Any, default: str = "general") -> str:
+    """将输入数据集分类归一化为正典合法的 DatasetCategory。"""
+    c = clean_text(val)
+    return DATASET_CATEGORY_MAP.get(c, default)
+
+
+def normalize_record_status(val: Any, default: str = "recorded") -> str:
+    """将输入记录状态归一化为正典合法的 RecordStatus。"""
+    c = clean_text(val)
+    return RECORD_STATUS_MAP.get(c, default)
+
+

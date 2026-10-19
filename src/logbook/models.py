@@ -7,7 +7,8 @@
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 from pydantic import BaseModel, Field, model_validator, field_validator
@@ -369,5 +370,79 @@ class Research(BaseModel):
             if not self.decision or len(self.decision.strip()) < 10 or not self.tradeoffs or len(self.tradeoffs.strip()) < 10:
                 raise ValueError("调研铁律：标记为 completed / in_force 的调研必须具备详实的选型决策/政策建议 (decision) 与对抗代价/利益博弈评估 (tradeoffs)！")
         return self
+
+
+# ============================================================================
+# 通用数据集与结构化事实记录模型 (0.5.0)
+# ============================================================================
+
+class DatasetCategory(str, Enum):
+    FINANCE = "finance"
+    OSS_METRICS = "oss_metrics"
+    TRADE = "trade"
+    TAX = "tax"
+    RESEARCH = "research"
+    GENERAL = "general"
+
+
+class Dataset(BaseModel):
+    """数据集字典定义模型 (Schema & Metadata)."""
+    code: str = Field(..., max_length=64, description="数据集唯一标识码，如 safe_forex, oss_benchmark")
+    name: str = Field(..., max_length=256, description="数据集全称或中文名称")
+    category: str = Field(default="general", max_length=32, description="业务领域分类")
+    field_schema: list[dict[str, Any]] = Field(default_factory=list, description="字段元数据规范列表")
+    alias_map: dict[str, str] = Field(default_factory=dict, description="历史版本与同义词映射表")
+    description: str | None = Field(default=None, description="数据集口径与业务填报规范说明")
+    created_at: datetime = Field(default_factory=get_beijing_now)
+    updated_at: datetime = Field(default_factory=get_beijing_now)
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v: str) -> str:
+        s = v.strip().lower()
+        if not re.match(r"^[a-z0-9_.-]{2,64}$", s):
+            raise ValueError(f"数据集编码非法: '{v}'，必须由 2~64 位小写字母、数字、点或下划线组成！")
+        return s
+
+
+class RecordStatus(str, Enum):
+    RECORDED = "recorded"
+    RECONCILED = "reconciled"
+    VERIFIED = "verified"
+    CANCELLED = "cancelled"
+
+
+class DataRecord(BaseModel):
+    """通用事实数据行模型 (Strong Spine + Flexible Ribs)."""
+    id: int | None = None
+    project_id: str = Field(..., max_length=64, description="归属项目代号")
+    dataset_code: str = Field(..., max_length=64, description="关联数据集唯一标识码")
+    parent_id: int | None = Field(default=None, description="父单据记录 ID (支持主子表分录)")
+    batch_id: str | None = Field(default=None, max_length=64, description="导入批次号")
+
+    # 强脊梁 (Strong Spine)
+    doc_no: str = Field(..., max_length=128, description="核心业务单号/关单号/发票号/组件版本")
+    entity_name: str | None = Field(default=None, max_length=256, description="往来单位/境外付款人/组件仓库名")
+    amount: Decimal = Field(default=Decimal("0.0000"), description="核心金额/指标数值 (高精度, 无浮点误差)")
+    currency: str = Field(default="CNY", max_length=16, description="币种或量纲单位，如 USD, CNY, QPS, MS")
+    event_date: date | str = Field(..., description="业务发生日期或测试日期 (YYYY-MM-DD)")
+    status: str = Field(default="recorded", max_length=32, description="单据状态")
+
+    # 软肋骨 (Flexible Ribs)
+    payload: dict[str, Any] = Field(default_factory=dict, description="动态属性载荷 (JSONB)")
+
+    created_at: datetime = Field(default_factory=get_beijing_now)
+    updated_at: datetime = Field(default_factory=get_beijing_now)
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def parse_amount(cls, v: Any) -> Decimal:
+        if v is None:
+            return Decimal("0.0000")
+        try:
+            return Decimal(str(v).strip())
+        except Exception:
+            raise ValueError(f"金额/数值格式非法: '{v}'")
+
 
 

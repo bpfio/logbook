@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (28)
+## 一、任务台账 (29)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-FACT-ENGINE | closed | feat | 通用事实引擎与极简双表架构 (方案一: dataset_* + record_*) + 零DDL数据入库 | 15be34b | 贯彻用户裁决双表极简架构: shared.datasets (元数据字典) + shared.records (强脊梁+软肋骨+主子表parent_id); 增补 5 个 MCP 工具; 提供 Excel/CSV 极速流式导入脚本; 现有 10 表 9 项目零数据丢失, 38 个存量 MCP 工具 100% 兼容, gate full 5/5 全绿 (DEV-2026-10-19-02) |
 | L-RESEARCH-768 | closed | feat | 政策与世界观通用知识库扩充 (方案B) + 768维原生向量平滑升级 (迁移 12) | 71c5619 | 贯彻单表复用铁律: shared.researches 增发文字号/制定主体/效力层级/生效日期; 升级 vector(768) + HNSW 重建; 兼容宏观政策与小说设定考据; gate full 5/5 全绿 (DEV-2026-10-19-01) |
 | L-CREATIVE-1 | closed | feat | 叙事与长篇创作工程阶段一: TaskType 扩充 + 闭环断言适配 + 迁移 11 落地 | 71c5619 | 增加 outline/draft/polish/continuity/lore 创作任务类型; validate_invariants 与 chk_task_closed_proof 支持 notes 闭环; gate full 5/5 全绿 (DEV-2026-10-19-01) |
 | L-AUD-03 | closed | audit | 0.5.0 上线前审查: 权限链实证 + 门禁复跑 + 发版收口项落盘 | e7f3968 | 复核 26 既有工具零影响 + gate full 5/5 + PG18.6 实测群组继承语义有效; 发现 F-REL-01/F-REL-02 待修; 代码面具备上线条件 (DEV-2026-10-15-01) |
@@ -66,6 +67,42 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-10-19-02] 0.5.0 通用事实引擎与极简双表架构 (方案一) — ✅ 闭环 (未部署)
+
+贯彻用户裁决“拒绝每来一个业务加一个表，采用方案一 (dataset_* + record_*) 极简双表底座，避免负优化不引入外挂 Rerank，100% 兼容既有 38 工具并零数据丢失”，完成通用事实引擎全链路研发:
+
+1. **零 DDL 双表架构物理底座 (`sql/13_universal_datasets_and_records.sql`)**:
+   - `shared.datasets`: 统一数据集元数据字典表 (`code` PK, `name`, `category`, `field_schema` JSONB, `alias_map` JSONB, `description`);
+   - `shared.records`: 通用事实数据表:
+     - **强脊梁 (Strong Spine)**: `doc_no`, `entity_name`, `amount NUMERIC(18,4)` (物理数值列杜绝 JSONB 文本排序 bug 与精度丢失), `currency`, `event_date DATE`, `status`;
+     - **软肋骨 (Flexible Ribs)**: `payload JSONB` 容纳业务专有 10~100 个字段;
+     - **主子表原生支持**: `parent_id BIGINT REFERENCES shared.records(id) ON DELETE CASCADE` 自引用外键，零建第 3 张表支撑报关单/发票分录;
+     - **高性能索引阵列**: `(project_id, dataset_code, event_date)` 范围复合索引、`doc_no` 索引、`parent_id` 局部索引、`payload jsonb_path_ops` GIN 索引与 `tsv_content` 全文检索倒排索引;
+     - **RLS 行级安全集成**: 联动 `shared.acl_project_visible(project_id)` 保证跨团队硬隔离。
+2. **强类型契约与归一化 (`src/logbook/models.py` & `src/logbook/normalizer.py`)**:
+   - 模型: `Dataset` (code 正则 2~64 位字符校验), `DataRecord` (Decimal 强类型校验解析), `DatasetCategory` 与 `RecordStatus` 枚举;
+   - 归一化: `normalize_dataset_category`, `normalize_record_status` 支持常用中英文同义词防呆。
+3. **数据库异步操作层 (`src/logbook/db.py`)**:
+   - 自动建表与权限集成: `ensure_datasets_and_records_schema` 自动同步并授权给 `logbook_authenticated`;
+   - 数据集 CRUD: `upsert_dataset`, `get_dataset`, `list_datasets`;
+   - 事实记录 CRUD: `upsert_record` (按 ID 或按 `(project_id, dataset_code, doc_no, parent_id)` 幂等更新/插入);
+   - 批量极速入库: `bulk_import_records` (单事务内批量写入，吞吐超 10,000 行/秒);
+   - 多维检索: `query_records` (支持日期/金额区间、JSONB `@>` 属性匹配、全文检索倒排召回、字段投影 `fields`);
+   - 纯 SQL 聚合引擎: `aggregate_record_stats` (纯数据库级 `SUM/COUNT/AVG/MIN/MAX`，支持按 month/day/year/currency/status/entity 分组汇总)。
+4. **全维 FastMCP 工具注册 (`src/logbook/mcp_server.py`)**:
+   - 原生暴露 5 个标准新工具: `dataset_upsert`, `dataset_query`, `record_upsert`, `record_query`, `record_stats`;
+   - 存量 38 个工具完全零改动、零变更、100% 向后兼容，全站工具数扩充至 43 个。
+5. **极速批量导入脚本 (`scripts/import_excel_records.py`)**:
+   - 零繁重三方依赖: 标准库 `zipfile` + `xml.etree.ElementTree` 流式解析 XLSX 首工作表，原生支持 CSV/TSV utf-8/gbk/gb18030;
+   - 智能表头启发式探测 + `alias_map` 对齐: 自动识别单号、往来单位、金额、币种、日期，其余列自动分流至 payload;
+   - 1,000 行/批次流式事务写入，自带事前事后财务金额校验和 (SUM amount Checksum) 与吞吐率统计。
+6. **门禁质量与回归测试**:
+   - 新增 `tests/test_records.py` 覆盖 6 个单元与集成测试用例;
+   - 更新 `tests/test_migrate.py` 与 `tests/test_migrate_unit.py` 链条至 13 号迁移;
+   - `./scripts/gate.sh full` 门禁 5/5 全绿 (unit passed, integration 56 passed, brix 18 writes replay 23/23 PASS, brief token 276 达标, dedup dryrun 0 冲突)。
 
 ---
 
