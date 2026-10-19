@@ -9,11 +9,13 @@
 
 ---
 
-## 一、任务台账 (26)
+## 一、任务台账 (28)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
-| L-AUD-03 | closed | audit | 0.5.0 上线前审查: 权限链实证 + 门禁复跑 + 发版收口项落盘 | (本归档提交) | 复核 26 既有工具零影响 + gate full 5/5 + PG18.6 实测群组继承语义有效; 发现 F-REL-01/F-REL-02 待修; 代码面具备上线条件 (DEV-2026-10-15-01) |
+| L-RESEARCH-768 | closed | feat | 政策与世界观通用知识库扩充 (方案B) + 768维原生向量平滑升级 (迁移 12) | 71c5619 | 贯彻单表复用铁律: shared.researches 增发文字号/制定主体/效力层级/生效日期; 升级 vector(768) + HNSW 重建; 兼容宏观政策与小说设定考据; gate full 5/5 全绿 (DEV-2026-10-19-01) |
+| L-CREATIVE-1 | closed | feat | 叙事与长篇创作工程阶段一: TaskType 扩充 + 闭环断言适配 + 迁移 11 落地 | 71c5619 | 增加 outline/draft/polish/continuity/lore 创作任务类型; validate_invariants 与 chk_task_closed_proof 支持 notes 闭环; gate full 5/5 全绿 (DEV-2026-10-19-01) |
+| L-AUD-03 | closed | audit | 0.5.0 上线前审查: 权限链实证 + 门禁复跑 + 发版收口项落盘 | e7f3968 | 复核 26 既有工具零影响 + gate full 5/5 + PG18.6 实测群组继承语义有效; 发现 F-REL-01/F-REL-02 待修; 代码面具备上线条件 (DEV-2026-10-15-01) |
 | MU-2 | closed | feat | 站内邮箱完成面: 回复/会话/已发送/搜索/归档 + agent_messages 点对点 RLS + 容量防灌爆 + brief 未读角标 | 7c7b010 | sql/10_mailbox_completion.sql + 5 新 MCP 工具 + 收件人注册告警; 14 新测试全绿, 回归 99/99 (DEV-2026-10-14-01) |
 | MU-1 | closed | feat | 多用户分组权限层: principals/群组三表 + 双平面池 SET ROLE 降权 + RLS 硬隔离 + allow_cross_project 收口 | 7c7b010 | 语义方案A 组内互见互写/跨组不可见; acl_* SECURITY DEFINER + admin 门禁 + project_init 自动挂组 + 存量回填脚本 opt-in (DEV-2026-10-14-01) |
 | L15 | closed | feat | rule_record MCP 写入原语落地, 闭合架构铁律 SSOT 读写环 (0.4.2) | 837ff87 | db.upsert_rule 早有但从未暴露; 0.4.2 上线生产, 回环验证通过并写入首条铁律 RULE-DEPLOY-01 (DevLog #92, DEV-2026-10-13-06) |
@@ -49,8 +51,8 @@
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
-| F-REL-02 | audit | P3 | open | 待修: deploy/qnap/compose.yaml.example 与 .env.example 补 LOGBOOK_ADMIN_AGENTS 文档行 | 部署清单 §6 第 2 步要求注入该变量, 照抄示例会漏配 (漏配仅群组管理面 ADMIN_REQUIRED, 非故障) |
-| F-REL-01 | audit | P2 | open | 待修: pyproject.toml bump 0.5.0 并对齐 __init__.py (现 0.4.2/0.3.0, CHANGELOG 已 0.5.0) | serverInfo.version 自包元数据注入 (mcp_server.py:61), 不升版则生产终验版本辨识失败 |
+| F-REL-02 | audit | P3 | fixed | deploy/qnap/compose.yaml.example 与 .env.example 补 LOGBOOK_ADMIN_AGENTS 文档行与示例 | 消除部署漏配风险，闭环 (DEV-2026-10-19-01) |
+| F-REL-01 | audit | P2 | fixed | pyproject.toml bump 0.5.0 并对齐 src/logbook/__init__.py 为 0.5.0 | serverInfo.version 对齐 0.5.0，闭环 (DEV-2026-10-19-01) |
 | F-MSG-01 | zcode | P1 | fixed | 消除重复 DDL、写事务 shield 保护、管道流缓冲，彻底根治 -32000 Connection closed | message_* 每次调用执行 10 条 DDL 导致高时延，非交互式管道 EOF 触发 MCP AnyIO cancel_scope 取消在途任务 |
 | F-LOG-05 | simulation | P2 | fixed | 解耦非代码任务证据锚点，自动将实测 notes 锚定为合规 proof_link | 非代码任务（演练/调查/运维）强绑定 commit_hash 导致合规闭环失真或伪造占位符 |
 | F-LOG-04 | simulation | P2 | fixed | 引入 normalizer.py 并在 FastMCP 中通过 Pydantic BeforeValidator 实现前置同义词与Emoji归一化 | Pydantic Literal 强拦截导致带 Emoji 或同义词时抛 400 校验异常中断执行流 |
@@ -64,6 +66,32 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-10-19-01] 0.5.0 收口 + 创作工程阶段一 + 政策知识库扩充 (方案B) & 768维向量升级 — ✅ 闭环 (未部署)
+
+完成 0.5.0 发版收口、网络长篇小说创作阶段一支撑，以及贯彻“单表复用”铁律的通用知识库扩充与 768 维向量升级:
+
+1. **发版收口项闭环**:
+   - `F-REL-01` (P2): `pyproject.toml` bump 0.5.0, 对齐 `src/logbook/__init__.py` 为 0.5.0;
+   - `F-REL-02` (P3): `deploy/qnap/compose.yaml.example` 补充 `LOGBOOK_ADMIN_AGENTS=${LOGBOOK_ADMIN_AGENTS:-agy}`, `.env.example` 补充对应说明与示例;
+2. **长篇小说创作阶段一支持**:
+   - `src/logbook/models.py`: [TaskType] 扩充 `outline` (大纲构思/细纲拆解), `draft` (正文起草), `polish` (文风润色), `continuity` (设定/逻辑稽核), `lore` (世界观考据);
+   - `validate_invariants` 闭环断言适配: 允许创作型任务以详实 `notes` 或 `commit_hash` 闭环; 研发代码任务（feat/fix）的 strict commit_hash 铁律保持不变;
+   - `src/logbook/normalizer.py`: 增加创作同义词映射 (`plot`, `beats`, `write`, `chapter`, `refine`, `revise`, `audit`, `setting`, `worldbuilding` 等);
+   - `sql/11_creative_task_types.sql`: 更新 `shared.init_project_schema(p_name)` 函数, 动态平滑升级所有存量业务项目 schema 的 `tasks.task_type` CHECK 约束与 `chk_task_closed_proof` 约束;
+3. **政策/世界观通用知识库扩充 (方案B) 与 768 维向量平滑升级**:
+   - 贯彻用户裁决“增加数据结构丰富度，严禁随意多一个业务加一个表”原则，复用 `shared.researches` 知识库底座;
+   - `src/logbook/models.py`: [ResearchCategory] 扩充 `policy_macro` (宏观规划), `policy_industry` (行业政策), `policy_tech` (科技监管), `policy_fiscal` (财税金融), `governance` (体制机制), `lore` (小说设定/世界观考据), `general` (通用); [ResearchStatus] 扩充 `in_force` (现行有效), `draft` (征求意见/草案), `revised` (已修订), `repealed` (已废止);
+   - 实体字段丰富度扩充: `doc_no` (发文字号/设定编号), `authority` (制定主体/发布机构), `legal_level` (效力位阶/分类体系), `effective_date` (生效施行日期);
+   - 向量维度升维: `src/logbook/vector.py` 缺省维度升至 768 (`EMBEDDING_DIM=768`)，直通国产星火/BGE原生768维无需有损截断，降级哈希同频产出 768 维;
+   - `sql/12_upgrade_768_and_enrich_research.sql`: 迁移平滑升级 `shared.devlogs` 与 `shared.researches` 的 embedding 为 `vector(768)`，重建 HNSW 索引，扩展 4 个新元数据字段并纳入 `tsv_content` 全文检索生成列; 提供 `scripts/reembed_768.py` 离线平滑重嵌脚本;
+   - MCP 工具面同步升级: `research_record`、`research_search`、`research_query` 支持 4 大新元数据写入与强类型检索;
+4. **门禁验证与知识库归档**:
+   - 新增 `tests/test_creative_tasks.py` 6 用例全绿; `tests/test_researches.py` 补充政策调研与 768 维模型测试;
+   - `scripts/gate.sh full` 5/5 全绿 (unit 53 passed / integration 54 passed / 18 笔重放通过 / brief token 276 达标 / dedup dry-run 0 冲突);
+   - 生产知识库已入库: 批次 `DEV-2026-10-19-01` (completed), 任务 `L-CREATIVE-1` / `L-RESEARCH-768` (closed), 发现 `F-REL-01` / `F-REL-02` (fixed), 沉淀根因手记 `DevLog #271` (星火API向量化已生成)。
 
 ---
 
