@@ -1873,11 +1873,15 @@ class Database:
                     tradeoffs TEXT NOT NULL,
                     decision TEXT NOT NULL,
                     "references" TEXT,
+                    doc_no VARCHAR(128),
+                    authority VARCHAR(128),
+                    legal_level VARCHAR(32),
+                    effective_date VARCHAR(32),
                     visibility VARCHAR(16) NOT NULL DEFAULT 'project_private',
                     tags VARCHAR(32)[] DEFAULT '{}',
-                    embedding vector(512),
+                    embedding vector(768),
                     tsv_content tsvector GENERATED ALWAYS AS (
-                        to_tsvector('simple', title || ' ' || objective || ' ' || market_landscape || ' ' || decision)
+                        to_tsvector('simple', COALESCE(title, '') || ' ' || COALESCE(doc_no, '') || ' ' || COALESCE(authority, '') || ' ' || COALESCE(objective, '') || ' ' || COALESCE(market_landscape, '') || ' ' || COALESCE(decision, ''))
                     ) STORED,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1885,10 +1889,16 @@ class Database:
                 ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS agent_ip VARCHAR(45) NOT NULL DEFAULT '0.0.0.0';
                 ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS batch_id VARCHAR(32);
                 ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS "references" TEXT;
+                ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS doc_no VARCHAR(128);
+                ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS authority VARCHAR(128);
+                ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS legal_level VARCHAR(32);
+                ALTER TABLE shared.researches ADD COLUMN IF NOT EXISTS effective_date VARCHAR(32);
                 CREATE INDEX IF NOT EXISTS idx_researches_project_vis ON shared.researches(project_id, visibility);
                 CREATE INDEX IF NOT EXISTS idx_researches_agent_ip ON shared.researches(project_id, agent_ip);
                 CREATE INDEX IF NOT EXISTS idx_researches_category ON shared.researches(category);
                 CREATE INDEX IF NOT EXISTS idx_researches_status ON shared.researches(status);
+                CREATE INDEX IF NOT EXISTS idx_researches_doc_no ON shared.researches(doc_no);
+                CREATE INDEX IF NOT EXISTS idx_researches_authority ON shared.researches(authority);
                 CREATE INDEX IF NOT EXISTS idx_researches_tsv ON shared.researches USING gin(tsv_content);
                 CREATE INDEX IF NOT EXISTS idx_researches_vector_hnsw ON shared.researches USING hnsw (embedding vector_cosine_ops)
                     WITH (m = 16, ef_construction = 64);
@@ -1926,7 +1936,7 @@ class Database:
             return None
 
     async def record_research(self, research: Research) -> Research:
-        """持久化全新调研知识 (支持 512 维向量索引)。"""
+        """持久化全新调研知识 (支持 768 维向量索引)。"""
         await self.ensure_researches_schema()
         vec_literal = None
         if research.embedding:
@@ -1935,10 +1945,12 @@ class Database:
             INSERT INTO shared.researches (
                 project_id, task_id, batch_id, title, category, author, agent_ip, status,
                 objective, market_landscape, tradeoffs, decision, "references",
+                doc_no, authority, legal_level, effective_date,
                 visibility, tags, embedding, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::vector, $17, $18)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::vector, $21, $22)
             RETURNING id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
                       objective, market_landscape, tradeoffs, decision, "references",
+                      doc_no, authority, legal_level, effective_date,
                       visibility, tags, created_at, updated_at;
         """
         async with self._pool.acquire() as conn:
@@ -1949,6 +1961,7 @@ class Database:
                 research.author, research.agent_ip,
                 research.status.value if isinstance(research.status, ResearchStatus) else str(research.status),
                 research.objective, research.market_landscape, research.tradeoffs, research.decision, research.references,
+                research.doc_no, research.authority, research.legal_level, research.effective_date,
                 research.visibility.value if isinstance(research.visibility, DevLogVisibility) else str(research.visibility),
                 research.tags, vec_literal, research.created_at, research.updated_at
             )
@@ -1974,6 +1987,10 @@ class Database:
         task_id: str | None = None,
         batch_id: str | None = None,
         agent_ip: str = "0.0.0.0",
+        doc_no: str | None = None,
+        authority: str | None = None,
+        legal_level: str | None = None,
+        effective_date: str | None = None,
     ) -> dict:
         """更新已有调研手记。若 embedding 为 None，保留原有向量。"""
         await self.ensure_researches_schema()
@@ -1985,16 +2002,18 @@ class Database:
                     SET title = $2, category = $3, author = $4, status = $5, objective = $6,
                         market_landscape = $7, tradeoffs = $8, decision = $9, "references" = $10,
                         visibility = $11, tags = $12, task_id = $13, batch_id = $14,
-                        embedding = $15::vector, agent_ip = $16, updated_at = NOW()
+                        embedding = $15::vector, agent_ip = $16, doc_no = $17, authority = $18,
+                        legal_level = $19, effective_date = $20, updated_at = NOW()
                     WHERE id = $1
                     RETURNING id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
                               objective, market_landscape, tradeoffs, decision, "references",
+                              doc_no, authority, legal_level, effective_date,
                               visibility, tags, created_at, updated_at;
                 """
                 row = await conn.fetchrow(
                     sql, research_id, title, category, author, status, objective,
                     market_landscape, tradeoffs, decision, references, visibility, tags,
-                    task_id, batch_id, vec_literal, agent_ip
+                    task_id, batch_id, vec_literal, agent_ip, doc_no, authority, legal_level, effective_date
                 )
             else:
                 sql = """
@@ -2002,16 +2021,18 @@ class Database:
                     SET title = $2, category = $3, author = $4, status = $5, objective = $6,
                         market_landscape = $7, tradeoffs = $8, decision = $9, "references" = $10,
                         visibility = $11, tags = $12, task_id = $13, batch_id = $14,
-                        agent_ip = $15, updated_at = NOW()
+                        agent_ip = $15, doc_no = $16, authority = $17,
+                        legal_level = $18, effective_date = $19, updated_at = NOW()
                     WHERE id = $1
                     RETURNING id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
                               objective, market_landscape, tradeoffs, decision, "references",
+                              doc_no, authority, legal_level, effective_date,
                               visibility, tags, created_at, updated_at;
                 """
                 row = await conn.fetchrow(
                     sql, research_id, title, category, author, status, objective,
                     market_landscape, tradeoffs, decision, references, visibility, tags,
-                    task_id, batch_id, agent_ip
+                    task_id, batch_id, agent_ip, doc_no, authority, legal_level, effective_date
                 )
             return dict(row)
 
@@ -2046,6 +2067,7 @@ class Database:
                 sql = f"""
                     SELECT id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
                            objective, market_landscape, tradeoffs, decision, "references",
+                           doc_no, authority, legal_level, effective_date,
                            visibility, tags, created_at, updated_at,
                            (1 - (embedding <=> ${vec_idx}::vector)) AS score
                     FROM shared.researches
@@ -2062,6 +2084,7 @@ class Database:
                 sql = f"""
                     SELECT id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
                            objective, market_landscape, tradeoffs, decision, "references",
+                           doc_no, authority, legal_level, effective_date,
                            visibility, tags, created_at, updated_at,
                            ts_rank_cd(tsv_content, plainto_tsquery('simple', ${txt_idx})) AS score
                     FROM shared.researches
@@ -2076,6 +2099,7 @@ class Database:
                 sql = f"""
                     SELECT id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
                            objective, market_landscape, tradeoffs, decision, "references",
+                           doc_no, authority, legal_level, effective_date,
                            visibility, tags, created_at, updated_at, 1.0 AS score
                     FROM shared.researches
                     WHERE {where_clause}
@@ -2097,6 +2121,8 @@ class Database:
         project: str,
         status: ResearchStatus | None = None,
         category: ResearchCategory | None = None,
+        authority: str | None = None,
+        doc_no: str | None = None,
         limit: int = 20
     ) -> list[Research]:
         """列表查询项目调研项。"""
@@ -2111,11 +2137,18 @@ class Database:
         if category:
             params.append(category.value if isinstance(category, ResearchCategory) else str(category))
             conditions.append(f"category = ${len(params)}")
+        if authority:
+            params.append(authority)
+            conditions.append(f"authority = ${len(params)}")
+        if doc_no:
+            params.append(doc_no)
+            conditions.append(f"doc_no = ${len(params)}")
 
         params.append(limit)
         query = f"""
             SELECT id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
                    objective, market_landscape, tradeoffs, decision, "references",
+                   doc_no, authority, legal_level, effective_date,
                    visibility, tags, created_at, updated_at
             FROM shared.researches
             WHERE {" AND ".join(conditions)}

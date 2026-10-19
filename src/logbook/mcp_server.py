@@ -2021,6 +2021,10 @@ async def research_record(
     tradeoffs: str,
     decision: str,
     references: str | None = None,
+    doc_no: str | None = None,
+    authority: str | None = None,
+    legal_level: str | None = None,
+    effective_date: str | None = None,
     category: ResearchCategoryArg = ResearchCategory.ARCHITECTURE,
     status: ResearchStatusArg = ResearchStatus.COMPLETED,
     author: str = "agy",
@@ -2033,18 +2037,22 @@ async def research_record(
     allow_cross_project: bool = False,
     full: bool = False,
 ) -> dict:
-    """结构化录入或更新研发调研知识库 (支持语义向量与全文检索 + 强制调研五要素 + 自动脱敏)。强制要求显式提供 project 参数。支持 author 与 IP 溯源。
+    """结构化录入或更新研发/政策/智库调研知识库 (支持语义向量与全文检索 + 强制调研五要素 + 自动脱敏)。强制要求显式提供 project 参数。支持 author 与 IP 溯源。
 
     调研结构化五要素必填项:
     - project: 必填。项目代号。
-    - title: 必填。调研主题 (如 'Python 高性能异步 SSH 客户端选型')。
+    - title: 必填。调研主题 (如 'Python 高性能异步 SSH 客户端选型' 或 '数据安全跨境流动管理细则研判')。
     - objective: 必填。【调研目标】业务诉求、问题边界与资源底线。
-    - market_landscape: 必填。【成熟方案全景】社区已有开源方案/成熟产品对比 (Star数/维护度/生产验证)。
-    - tradeoffs: 必填。【两路线评估与对抗成本】引入 vs 自研代价；对抗默认行为清单与代价。
-    - decision: 必填。【最终选型决策】选了什么、为什么不用自己写、设计哲学冲突规避策略。
-    - references: 可选。【事实依据与文献】官方文档、评测 Benchmark 链接、代码仓库锚点。
-    - category: 分类 ('architecture', 'database', 'network', 'kernel', 'security', 'library', 'tooling')。
-    - status: 调研状态 ('in_progress', 'completed', 'deprecated')。
+    - market_landscape: 必填。【成熟方案全景】社区已有方案/国内外政策演进对比。
+    - tradeoffs: 必填。【两路线评估与对抗成本】引入 vs 自研代价；各方利益博弈与合规成本。
+    - decision: 必填。【最终选型决策/政策建议】选了什么、为什么不用自己写、设计哲学冲突规避策略。
+    - references: 可选。【事实依据与文献】官方文档、Benchmark 数据源、法规发文字号。
+    - doc_no: 可选。权威字号/标准编号/法典编码 (如 '国发〔2026〕15号', 'RFC 9110')。
+    - authority: 可选。发文机构/起草部委/组织/学派 (如 '国家发改委', 'IETF')。
+    - legal_level: 可选。效力位阶/标准层级 (如 'law', 'regulation', 'standard')。
+    - effective_date: 可选。生效实施日期 (如 '2026-10-01')。
+    - category: 分类 (支持技术研发与政策智库分类，如 'architecture', 'policy_macro', 'policy_tech', 'governance' 等)。
+    - status: 调研状态 ('completed', 'in_force', 'in_progress', 'draft', 'revised', 'repealed')。
     - author: 调研人或责任 Agent (默认 'agy')。
     - agent_ip: 可选。节点 IP 地址 (缺省自动探测填充)。
     - task_id: 可选。关联任务编号。
@@ -2068,6 +2076,10 @@ async def research_record(
     s_to = sanitize_text(tradeoffs).clean_text
     s_dec = sanitize_text(decision).clean_text
     s_ref = sanitize_text(references).clean_text if references else None
+    s_doc_no = sanitize_text(doc_no).clean_text if doc_no else None
+    s_auth = sanitize_text(authority).clean_text if authority else None
+    s_legal = sanitize_text(legal_level).clean_text if legal_level else None
+    s_eff = sanitize_text(effective_date).clean_text if effective_date else None
 
     cat_val = category.value if isinstance(category, ResearchCategory) else normalize_research_category(category)
     st_val = status.value if isinstance(status, ResearchStatus) else normalize_research_status(status)
@@ -2080,7 +2092,9 @@ async def research_record(
             existing.get("objective") == s_obj and
             existing.get("market_landscape") == s_ml and
             existing.get("tradeoffs") == s_to and
-            existing.get("decision") == s_dec
+            existing.get("decision") == s_dec and
+            existing.get("doc_no") == s_doc_no and
+            existing.get("authority") == s_auth
         )
         if content_unchanged:
             updated = await db.update_research(
@@ -2100,6 +2114,10 @@ async def research_record(
                 task_id=task_id,
                 batch_id=batch_id,
                 agent_ip=caller_ip,
+                doc_no=s_doc_no,
+                authority=s_auth,
+                legal_level=s_legal,
+                effective_date=s_eff,
             )
             return {
                 "success": True,
@@ -2110,7 +2128,7 @@ async def research_record(
                 "message": f"调研记录 [{updated['id']}] 内容未变化，已更新元数据并复用已有向量缓存"
             }
         else:
-            full_text = f"{s_title} {s_obj} {s_ml} {s_dec}"
+            full_text = f"{s_title} {s_doc_no or ''} {s_auth or ''} {s_obj} {s_ml} {s_dec}"
             embed_res = await get_embedding(full_text)
             updated = await db.update_research(
                 research_id=existing["id"],
@@ -2129,6 +2147,10 @@ async def research_record(
                 task_id=task_id,
                 batch_id=batch_id,
                 agent_ip=caller_ip,
+                doc_no=s_doc_no,
+                authority=s_auth,
+                legal_level=s_legal,
+                effective_date=s_eff,
             )
             return {
                 "success": True,
@@ -2136,11 +2158,11 @@ async def research_record(
                 "research_id": updated["id"],
                 "project": proj,
                 "vector_source": embed_res.source,
-                "message": f"调研记录 [{updated['id']}] 内容已更新并重新生成向量索引"
+                "message": f"调研记录 [{updated['id']}] 内容已更新并重新生成 768 维向量索引"
             }
 
     # 2. 全新调研入库
-    full_text = f"{s_title} {s_obj} {s_ml} {s_dec}"
+    full_text = f"{s_title} {s_doc_no or ''} {s_auth or ''} {s_obj} {s_ml} {s_dec}"
     embed_res = await get_embedding(full_text)
 
     research = Research(
@@ -2157,6 +2179,10 @@ async def research_record(
         tradeoffs=s_to,
         decision=s_dec,
         references=s_ref,
+        doc_no=s_doc_no,
+        authority=s_auth,
+        legal_level=s_legal,
+        effective_date=s_eff,
         visibility=DevLogVisibility(visibility),
         tags=tags or [],
         embedding=embed_res.embedding,
@@ -2168,7 +2194,7 @@ async def research_record(
         "research_id": saved.id,
         "project": proj,
         "vector_source": embed_res.source,
-        "message": f"研发调研知识已成功入库 [{proj}] 并生成 512 维向量索引"
+        "message": f"调研知识已成功入库 [{proj}] 并生成 768 维向量索引"
     }
     if full:
         slim["research"] = saved.model_dump(mode="json")
@@ -2180,15 +2206,15 @@ async def research_record(
 async def research_search(
     project: str,
     query: str,
-    category: Literal["architecture", "database", "network", "kernel", "security", "library", "tooling"] | None = None,
+    category: str | None = None,
     limit: int = 5,
     fields: list[str] | None = None,
 ) -> dict:
-    """语义向量与全文混合检索跨项目研发调研知识。开工前必查，避免重复调研。返回标准化包装对象。
+    """语义向量与全文混合检索跨项目调研知识 (支持研发选型与政策智库)。开工前必查，避免重复调研。返回标准化包装对象。
 
     - project: 必填。当前项目代号。
-    - query: 必填。检索关键词或技术问题。
-    - category: 可选。按技术分类过滤。
+    - query: 必填。检索关键词、政策主题或技术问题。
+    - category: 可选。按分类过滤。
     - limit: 返回条数上限 (1..200, 缺省 5, 超界自动钳制)。
     - fields: 可选列投影，缺省回全列。
     """
@@ -2221,16 +2247,20 @@ async def research_search(
 @tool_shell
 async def research_query(
     project: str,
-    status: Literal["in_progress", "completed", "deprecated"] | None = None,
-    category: Literal["architecture", "database", "network", "kernel", "security", "library", "tooling"] | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    authority: str | None = None,
+    doc_no: str | None = None,
     limit: int = 20,
     fields: list[str] | None = None,
 ) -> dict:
-    """列表与看板查询研发调研记录。返回标准化包装对象。
+    """列表与看板查询调研记录 (支持发文机关、字号、分类与状态过滤)。返回标准化包装对象。
 
     - project: 必填。项目代号。
-    - status: 可选。调研状态过滤。
-    - category: 可选。技术分类过滤。
+    - status: 可选。调研/政策状态过滤。
+    - category: 可选。分类过滤。
+    - authority: 可选。发文机关/起草部委过滤。
+    - doc_no: 可选。权威字号/标准编号过滤。
     - limit: 返回条数上限 (1..200, 缺省 20, 超界自动钳制)。
     - fields: 可选列投影，缺省回全列。
     """
@@ -2243,7 +2273,14 @@ async def research_query(
     st_enum = ResearchStatus(normalize_research_status(status)) if status else None
     cat_enum = ResearchCategory(normalize_research_category(category)) if category else None
 
-    researches = await db.query_researches(proj, status=st_enum, category=cat_enum, limit=limit)
+    researches = await db.query_researches(
+        proj,
+        status=st_enum,
+        category=cat_enum,
+        authority=authority,
+        doc_no=doc_no,
+        limit=limit
+    )
     items = project_fields([r.model_dump(mode="json") for r in researches], fields)
     return {
         "success": True,

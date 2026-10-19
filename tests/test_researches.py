@@ -131,3 +131,49 @@ async def test_mcp_research_tools_signatures_and_negotiation():
     # 3. research_query 触发协商
     err_query = await research_query(project="", status="completed")
     assert err_query.get("isError") is True
+
+
+def test_policy_research_model_fields_and_enums():
+    """测试政策智库多领域分类、发文元数据与状态流转。"""
+    assert ResearchCategory.POLICY_MACRO == "policy_macro"
+    assert ResearchCategory.POLICY_TECH == "policy_tech"
+    assert ResearchCategory.GOVERNANCE == "governance"
+    assert ResearchStatus.IN_FORCE == "in_force"
+    assert ResearchStatus.REPEALED == "repealed"
+
+    # 归一化
+    assert normalize_research_category("macro") == "policy_macro"
+    assert normalize_research_category("data_security") == "policy_tech"
+    assert normalize_research_category("compliance") == "governance"
+    assert normalize_research_status("effective") == "in_force"
+    assert normalize_research_status("repealed") == "repealed"
+
+    # 政策模型实例化
+    policy = Research(
+        project_id="policy_study",
+        title="生成式人工智能服务安全基本要求深度研判",
+        objective="评估大模型数据标注、语料合规与安全评估的监管红线",
+        market_landscape="网信办《生成式人工智能服务管理暂行办法》与 TC260 行业安全规范",
+        tradeoffs="安全合规要求严格但增加初创团队显存与审核成本；需防范过度合规抑制创新",
+        decision="前置建立关键词机审防线与人工双审流，严格落实未公开数据集脱敏要求",
+        doc_no="TC260-PG-20241A",
+        authority="国家互联网信息办公室 / 全国信安标委",
+        legal_level="standard",
+        effective_date="2024-03-01",
+        category=ResearchCategory.POLICY_TECH,
+        status=ResearchStatus.IN_FORCE,
+    )
+    assert policy.doc_no == "TC260-PG-20241A"
+    assert policy.authority == "国家互联网信息办公室 / 全国信安标委"
+    assert policy.legal_level == "standard"
+    assert policy.effective_date == "2024-03-01"
+    assert policy.status == ResearchStatus.IN_FORCE
+
+
+@pytest.mark.asyncio
+async def test_embedding_768_dimension():
+    """验证向量生成网关输出严格为 768 维。"""
+    from logbook.vector import get_embedding
+    res = await get_embedding("数据跨境合规与安全自评估")
+    assert res.embedding is not None
+    assert len(res.embedding) == 768

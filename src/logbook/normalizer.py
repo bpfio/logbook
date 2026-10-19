@@ -72,6 +72,22 @@ TYPE_MAP = {
     "maintenance": "ops",
     "deploy": "deploy",
     "release": "deploy",
+    # 叙事工程 / 创作类型
+    "outline": "outline",
+    "plot": "outline",
+    "beats": "outline",
+    "draft": "draft",
+    "write": "draft",
+    "chapter": "draft",
+    "polish": "polish",
+    "refine": "polish",
+    "revise": "polish",
+    "continuity": "continuity",
+    "audit": "continuity",
+    "check": "continuity",
+    "lore": "lore",
+    "setting": "lore",
+    "worldbuilding": "lore",
 }
 
 # 优先级映射
@@ -195,6 +211,28 @@ RESEARCH_CATEGORY_MAP = {
     "tools": "tooling",
     "ops": "tooling",
     "deploy": "tooling",
+    # 政策法规、智库研判与治理 (0.5.0+)
+    "policy_macro": "policy_macro",
+    "macro": "policy_macro",
+    "policy": "policy_macro",
+    "strategy": "policy_macro",
+    "policy_industry": "policy_industry",
+    "industry": "policy_industry",
+    "market": "policy_industry",
+    "policy_tech": "policy_tech",
+    "tech_policy": "policy_tech",
+    "data_security": "policy_tech",
+    "data_governance": "policy_tech",
+    "policy_fiscal": "policy_fiscal",
+    "fiscal": "policy_fiscal",
+    "finance": "policy_fiscal",
+    "tax": "policy_fiscal",
+    "governance": "governance",
+    "standard": "governance",
+    "compliance": "governance",
+    "regulation": "governance",
+    "lore": "lore",
+    "general": "general",
 }
 
 RESEARCH_STATUS_MAP = {
@@ -209,6 +247,15 @@ RESEARCH_STATUS_MAP = {
     "deprecated": "deprecated",
     "abandoned": "deprecated",
     "obsolete": "deprecated",
+    # 政策生命周期状态扩展 (0.5.0+)
+    "in_force": "in_force",
+    "effective": "in_force",
+    "valid": "in_force",
+    "draft": "draft",
+    "revised": "revised",
+    "amended": "revised",
+    "repealed": "repealed",
+    "abolished": "repealed",
 }
 
 

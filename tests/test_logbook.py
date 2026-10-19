@@ -121,7 +121,7 @@ async def test_devlog_record_and_search():
     """测试根因四要素手记录入与向量/全文检索。"""
     vec_res = await get_embedding("xdp reconcile EBUSY bpf_link")
     assert vec_res.embedding is not None
-    assert len(vec_res.embedding) == 512
+    assert len(vec_res.embedding) == 768
 
     devlog = DevLog(
         project_id="test_proj",

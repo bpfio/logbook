@@ -31,6 +31,7 @@ class TaskPriority(str, Enum):
 
 
 class TaskType(str, Enum):
+    # 软件研发类型
     FEAT = "feat"
     FIX = "fix"
     VERIFY = "verify"
@@ -39,6 +40,12 @@ class TaskType(str, Enum):
     DOCS = "docs"
     OPS = "ops"
     DEPLOY = "deploy"
+    # 叙事工程 / 创作类型 (0.5.0+)
+    OUTLINE = "outline"          # 大纲构思与细纲拆解
+    DRAFT = "draft"              # 章节与场景正文起草
+    POLISH = "polish"            # 文风润色与修辞优化
+    CONTINUITY = "continuity"    # 设定与逻辑一致性稽核
+    LORE = "lore"                # 世界观与背景设定考据
 
 
 class FindingSeverity(str, Enum):
@@ -80,6 +87,7 @@ class DevLogVisibility(str, Enum):
 
 
 class ResearchCategory(str, Enum):
+    # 软件与系统架构研发
     ARCHITECTURE = "architecture"
     DATABASE = "database"
     NETWORK = "network"
@@ -87,12 +95,25 @@ class ResearchCategory(str, Enum):
     SECURITY = "security"
     LIBRARY = "library"
     TOOLING = "tooling"
+    # 政策法规、智库研判与治理 (0.5.0+)
+    POLICY_MACRO = "policy_macro"       # 宏观政策与国家战略
+    POLICY_INDUSTRY = "policy_industry" # 产业政策与行业监管
+    POLICY_TECH = "policy_tech"         # 科技规制与数据治理
+    POLICY_FISCAL = "policy_fiscal"     # 财税金融与经济规制
+    GOVERNANCE = "governance"           # 治理规范与行业标准
+    LORE = "lore"                       # 背景通识与考据
+    GENERAL = "general"                 # 综合调研与其它
 
 
 class ResearchStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     DEPRECATED = "deprecated"
+    # 政策法规与生命周期状态 (0.5.0+)
+    IN_FORCE = "in_force"               # 现行有效
+    DRAFT = "draft"                     # 征求意见 / 草案
+    REVISED = "revised"                 # 已修订
+    REPEALED = "repealed"               # 已废止 / 停止执行
 
 
 # ============================================================================
@@ -125,12 +146,16 @@ class Task(BaseModel):
     def validate_invariants(self) -> "Task":
         # 1. 闭环铁律断言：closed 状态必须提供真实提交或验证凭证
         if self.status == TaskStatus.CLOSED:
+            notes_supported_types = (
+                TaskType.DRILL, TaskType.INVESTIGATION, TaskType.OPS, TaskType.DOCS,
+                TaskType.OUTLINE, TaskType.DRAFT, TaskType.POLISH, TaskType.CONTINUITY, TaskType.LORE,
+            )
             has_evidence = bool(
                 self.commit_hash or self.proof_link or
-                (self.notes and self.task_type in (TaskType.DRILL, TaskType.INVESTIGATION, TaskType.OPS, TaskType.DOCS))
+                (self.notes and self.task_type in notes_supported_types)
             )
             if not has_evidence:
-                raise ValueError("闭环铁律：标记为 closed 的任务必须提供 commit_hash、proof_link 或非代码演练实测 notes 证据锚点！")
+                raise ValueError("闭环铁律：标记为 closed 的任务必须提供 commit_hash、proof_link 或非代码演练/创作实测 notes 证据锚点！")
             if not self.closed_at:
                 self.closed_at = get_beijing_now()
             if self.started_at and not self.duration_seconds:
@@ -325,6 +350,12 @@ class Research(BaseModel):
     decision: str = Field(..., description="最终选型结论，为什么不用自己写，设计哲学冲突规避")
     references: str | None = Field(default=None, description="官方文档、Benchmark 数据源锚点")
 
+    # 权威发布与政策智库元数据 (方案 B 扩展)
+    doc_no: str | None = Field(default=None, max_length=128, description="发文字号/标准编号/权威编码")
+    authority: str | None = Field(default=None, max_length=128, description="发文机构/起草部委/组织/学派")
+    legal_level: str | None = Field(default=None, max_length=32, description="效力位阶/标准层级/权威度")
+    effective_date: str | None = Field(default=None, max_length=32, description="生效实施日期 (YYYY-MM-DD)")
+
     visibility: DevLogVisibility = Field(default=DevLogVisibility.PROJECT_PRIVATE)
     tags: list[str] = Field(default_factory=list)
     embedding: list[float] | None = None
@@ -333,10 +364,10 @@ class Research(BaseModel):
 
     @model_validator(mode="after")
     def validate_invariants(self) -> "Research":
-        # 铁律断言：completed 状态必须具备清晰的选型决策和对抗代价评估
-        if self.status == ResearchStatus.COMPLETED:
+        # 铁律断言：completed 与 in_force 状态必须具备清晰的选型决策/政策建议和对抗代价/博弈评估
+        if self.status in (ResearchStatus.COMPLETED, ResearchStatus.IN_FORCE):
             if not self.decision or len(self.decision.strip()) < 10 or not self.tradeoffs or len(self.tradeoffs.strip()) < 10:
-                raise ValueError("调研铁律：标记为 completed 的调研必须具备详实的选型决策 (decision) 与对抗代价评估 (tradeoffs)！")
+                raise ValueError("调研铁律：标记为 completed / in_force 的调研必须具备详实的选型决策/政策建议 (decision) 与对抗代价/利益博弈评估 (tradeoffs)！")
         return self
 
 
