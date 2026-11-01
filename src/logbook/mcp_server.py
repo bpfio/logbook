@@ -61,10 +61,13 @@ ResearchStatusArg = Annotated[ResearchStatus, BeforeValidator(normalize_research
 
 # 创建 MCP Server 实例 (version 注入用于生产部署构建辨识)
 try:
-    from importlib.metadata import version as _pkg_version
-    _SERVER_VERSION = _pkg_version("logbook")
+    from logbook import __version__ as _SERVER_VERSION
 except Exception:
-    _SERVER_VERSION = "0.4.2"
+    try:
+        from importlib.metadata import version as _pkg_version
+        _SERVER_VERSION = _pkg_version("logbook")
+    except Exception:
+        _SERVER_VERSION = "0.5.0"
 
 mcp = MCPServer("logbook-mcp-server", version=_SERVER_VERSION)
 

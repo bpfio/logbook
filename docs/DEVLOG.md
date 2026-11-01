@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (29)
+## 一、任务台账 (30)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-DEP-050 | closed | deploy | QNAP 生产环境 0.5.0 全维上线与故障原子自愈 (双表事实引擎+768维重嵌+43工具实证) | HEAD | 修复 10-30 网络命名空间断裂故障; 备份 1.3MB 库; 平滑执行迁移 09~13; 319 devlogs + 34 researches 100% 768维重嵌; 43 工具真机验证全绿, 栈内存 ~79.7MB (DEV-2026-11-01-01) |
 | L-FACT-ENGINE | closed | feat | 通用事实引擎与极简双表架构 (方案一: dataset_* + record_*) + 零DDL数据入库 | 15be34b | 贯彻用户裁决双表极简架构: shared.datasets (元数据字典) + shared.records (强脊梁+软肋骨+主子表parent_id); 增补 5 个 MCP 工具; 提供 Excel/CSV 极速流式导入脚本; 现有 10 表 9 项目零数据丢失, 38 个存量 MCP 工具 100% 兼容, gate full 5/5 全绿 (DEV-2026-10-19-02) |
 | L-RESEARCH-768 | closed | feat | 政策与世界观通用知识库扩充 (方案B) + 768维原生向量平滑升级 (迁移 12) | 71c5619 | 贯彻单表复用铁律: shared.researches 增发文字号/制定主体/效力层级/生效日期; 升级 vector(768) + HNSW 重建; 兼容宏观政策与小说设定考据; gate full 5/5 全绿 (DEV-2026-10-19-01) |
 | L-CREATIVE-1 | closed | feat | 叙事与长篇创作工程阶段一: TaskType 扩充 + 闭环断言适配 + 迁移 11 落地 | 71c5619 | 增加 outline/draft/polish/continuity/lore 创作任务类型; validate_invariants 与 chk_task_closed_proof 支持 notes 闭环; gate full 5/5 全绿 (DEV-2026-10-19-01) |
@@ -70,7 +71,29 @@
 
 ---
 
-## [DEV-2026-10-19-02] 0.5.0 通用事实引擎与极简双表架构 (方案一) — ✅ 闭环 (未部署)
+## [DEV-2026-11-01-01] 0.5.0 生产环境部署上线与故障原子自愈 — ✅ 闭环
+
+响应用户指令“两步走，更新到0.5.0，注意不要丢失数据。查找当前故障原因并修复。不要影响到NAS本身稳定性”，彻底排查并根治故障，完成 0.5.0 生产环境全维热升级：
+
+1. **当前故障根因定位与原子修复 (步骤一: 先止血自愈)**:
+   - **故障根因**: QNAP 容器编排架构中，PostgreSQL 容器采用 `network_mode: "service:logbook-app"`。10 月 30 日 18:05 前后 `logbook-app` 曾发生异常单独重启，其原有 network namespace 销毁，而 `logbook-postgres` 滞留在旧网络句柄中未同步重启。新 `logbook-app` 尝试连接 `127.0.0.1:5432` 报 `ConnectionRefusedError: [Errno 111]`，重试 60 次后退出，导致 macvlan IP `192.168.1.68` 彻底下线并引发全网 `No route to host`。
+   - **数据兜底与网络重整**: 停机前执行物理级全量冷备落盘 `backups/logbook_pre_fix_20261101_130645.dump` (1.3MB)；执行 `docker compose down && docker compose up -d` 重建共享网络栈，0.4.2 率先成功恢复并在 66MB 内存下验证全绿。
+2. **0.5.0 全维镜像构建与推流部署 (步骤二: 严密升维发布)**:
+   - **本地构建**: 采用 `--network=host` 消除本地 bridge DNS 瓶颈，构建 `logbook:0.5.0`，修正 `mcp_server.py` 的 `serverInfo.version` 动态引用；
+   - **推流与编排更新**: 管道推流 `docker save | ssh docker load` 加载至 NAS，备份并在 NAS 更新 `compose.yaml` (升维 `EMBEDDING_DIM=768`，注入 `LOGBOOK_ADMIN_AGENTS=agy`)；
+   - **平滑迁移 09~13 自动生效**: 启动阶段自动应用 09 (多用户ACL), 10 (邮箱), 11 (创作工程TaskType), 12 (768维HNSW升级), 13 (通用事实双表架构)，耗时 4.1 秒，0 报错。
+3. **数据完整性核验与 768 维全量向量重嵌**:
+   - **数据 0 丢失**: 13 个项目、319 条 devlogs 完整无缺；
+   - **星火 API 生产重嵌**: 运行 `scripts/reembed_768.py` 为 319 条 DevLogs 及 34 条 Researches 全量生成原生 768 维星火嵌入向量 (`spark_maas`)，余弦检索与 HNSW 索引 100% 填充生效。
+4. **端到端回归实测验证**:
+   - **Brix 写入幂等门禁**: `replay_brix_writes.py --ssh` 23/23 笔真实写入 100% 通过；
+   - **事实引擎闭环**: 验证 `dataset_upsert`, `record_upsert`, `record_stats` 单次调用耗时均在毫秒级；
+   - **系统健康与资源稳态**: `logbook doctor` 时钟同步正常 (漂移 +0.023s)；全栈物理内存 79.7MB (App 37.6MB + DB 42.1MB，严格压制在 140MB 以内)，CPU 0.00%；NAS 其它服务 (gitea, kms 等) 0 干扰。
+   - **NAS 管理通道优化**: 将开发机 ED25519 公钥写入 NAS `authorized_keys`，实现免交互口令直连。
+
+---
+
+## [DEV-2026-10-19-02] 0.5.0 通用事实引擎与极简双表架构 (方案一) — ✅ 闭环 (已部署)
 
 贯彻用户裁决“拒绝每来一个业务加一个表，采用方案一 (dataset_* + record_*) 极简双表底座，避免负优化不引入外挂 Rerank，100% 兼容既有 38 工具并零数据丢失”，完成通用事实引擎全链路研发:
 
