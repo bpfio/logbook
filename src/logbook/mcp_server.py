@@ -42,7 +42,8 @@ from .normalizer import (
     normalize_status, normalize_task_type, normalize_priority,
     normalize_severity, normalize_waiting_category,
     normalize_research_category, normalize_research_status,
-    normalize_dataset_category, normalize_record_status
+    normalize_dataset_category, normalize_record_status,
+    extract_record_embed_text
 )
 from .db import db
 # P1-1: brief digest 端点 (A1 并行开发中, 接口契约已锁 db.brief_project(project_id, devlog_limit=5) -> dict,
@@ -611,6 +612,58 @@ async def project_init(
         "groups_attached": attached,
         "message": f"项目 [{proj.slug}] 研发台账空间已成功开通！物理 Schema: [{proj.schema_name}]"
                    + (f"；已挂载群组: {attached} (组内互见互写, 跨组不可见)" if attached else "；当前为 legacy 开放态 (未挂组)"),
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def project_update(
+    project: str,
+    title: str | None = None,
+    description: str | None = None,
+) -> dict:
+    """修改既有项目的研发台账空间元数据 (标题、描述)。
+
+    字段说明:
+    - project: 必填。项目短名 (如 'taxbase') 或权威 Git 仓库标识 (如 'bpfio/brix', 'io/TS')。
+    - title: 可选。新项目全称或中文名称 (如 '税收法规库')。
+    - description: 可选。新项目背景与核心职责简述。
+    """
+    clean_proj = sanitize_text(project).clean_text.strip()
+    if not clean_proj:
+        return tool_error("INVALID_ARGUMENT", "project 参数为必填项，禁止为空！", tool="project_update")
+
+    clean_title = sanitize_text(title).clean_text.strip() if title is not None else None
+    clean_desc = sanitize_text(description).clean_text.strip() if description is not None else None
+
+    if clean_title is None and clean_desc is None:
+        return tool_error("INVALID_ARGUMENT", "title 与 description 至少需要提供一项进行更新！", tool="project_update")
+
+    identity = os.getenv("LOGBOOK_AGENT_ID", "").strip() or None
+    probe = await db.probe_project(clean_proj, agent=identity)
+    if not probe["exists"]:
+        return tool_error("PROJECT_NOT_FOUND", f"项目 [{clean_proj}] 不存在，请先使用 project_init 创建。", tool="project_update")
+
+    if not probe["visible"] and not (identity and await db.is_admin(identity)):
+        return tool_error(
+            "PROJECT_NOT_VISIBLE",
+            f"项目 [{clean_proj}] 已存在且已挂载群组, 您的账户无访问权 (跨组不可见); 如需修改请联系 admin 将您加入对应群组。",
+            project=clean_proj,
+            tool="project_update",
+        )
+
+    updated = await db.update_project(clean_proj, title=clean_title, description=clean_desc)
+    if not updated:
+        return tool_error("PROJECT_NOT_FOUND", f"未找到匹配的项目 [{clean_proj}] 元数据。", tool="project_update")
+
+    return {
+        "success": True,
+        "ok": True,
+        "project": updated.schema_name,
+        "repo": updated.slug,
+        "title": updated.title,
+        "description": updated.description,
+        "message": f"项目 [{updated.slug}] 元数据已成功更新！标题: [{updated.title}]",
     }
 
 
@@ -2391,6 +2444,7 @@ async def record_upsert(
     parent_id: int | None = None,
     batch_id: str | None = None,
     id: int | None = None,
+    with_embedding: bool = False,
 ) -> dict:
     """写入或更新通用业务/事实单据记录 (Strong Spine + Flexible Ribs)。
 
@@ -2406,6 +2460,7 @@ async def record_upsert(
     - parent_id: 可选。父单据记录 ID (支持主子表分录)。
     - batch_id: 可选。导入批次标识。
     - id: 可选。指定物理记录 ID 更新。
+    - with_embedding: 可选。是否同步生成 768 维语义向量 (缺省 False)。
     """
     try:
         proj = await validate_and_negotiate_project(project, is_write=True)
@@ -2427,6 +2482,12 @@ async def record_upsert(
         status=st,
         payload=payload or {},
     )
+    if with_embedding or os.getenv("LOGBOOK_AUTO_EMBED_RECORDS", "0") == "1":
+        txt = extract_record_embed_text(record)
+        if txt:
+            emb = await get_embedding(txt)
+            record.embedding = emb.embedding
+
     res = await db.upsert_record(record)
     for k in ("event_date", "created_at", "updated_at"):
         if isinstance(res.get(k), (datetime, date)):
@@ -2548,6 +2609,146 @@ async def record_stats(
         "success": True,
         "project": proj,
         "stats": stats,
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def record_search(
+    project: str,
+    query: str,
+    dataset_code: str | None = None,
+    status: str | None = None,
+    limit: int = 10,
+    offset: int = 0,
+    fields: list[str] | None = None,
+) -> dict:
+    """语义向量与全文混合检索事实数据单据 (支持 768 维自然语言意图理解与知识库精准召回)。
+
+    适用于财税法规库 (taxbase)、业务单据、技术评测流水的自然语言意图检索。
+    优先调用 768 维 HNSW 余弦相似度召回；若未生成向量或外部 API 超时，自动平滑降级至 GIN 倒排全文检索。
+
+    参数说明:
+    - project: 必填。项目代号 (如 'taxbase', 'brix')。
+    - query: 必填。自然语言提问、法规主题或搜索关键词。
+    - dataset_code: 可选。限定数据集编码过滤 (如 'tax_regulation')。
+    - status: 可选。状态过滤 (recorded, reconciled, verified, cancelled)。
+    - limit: 返回条数上限 (1..100, 缺省 10)。
+    - offset: 分页偏移量 (缺省 0)。
+    - fields: 可选列投影，缺省返回全列。
+    """
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=False)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    limit = clamp_limit(limit, maximum=100)
+    s_query = sanitize_text(query).clean_text
+    embed_res = await get_embedding(s_query)
+
+    st = normalize_record_status(status) if status else None
+    rows = await db.search_records(
+        project_id=proj,
+        query_vector=embed_res.embedding,
+        query_text=s_query if not embed_res.embedding else None,
+        dataset_code=dataset_code,
+        status=st,
+        limit=limit,
+        offset=offset,
+    )
+    for r in rows:
+        for k in ("event_date", "created_at", "updated_at"):
+            if isinstance(r.get(k), (datetime, date)):
+                r[k] = r[k].isoformat()
+        if "amount" in r:
+            r["amount"] = float(r["amount"])
+
+    items = project_fields(rows, fields)
+    return {
+        "success": True,
+        "project": proj,
+        "dataset_code": dataset_code,
+        "query": s_query,
+        "search_mode": "semantic_vector" if embed_res.embedding else "fulltext_fallback",
+        "total": len(items),
+        "items": items,
+    }
+
+
+@mcp.tool()
+@tool_shell
+async def records_bulk_upsert(
+    project: str,
+    records: list[dict],
+    dataset_code: str | None = None,
+    batch_id: str | None = None,
+    with_embedding: bool = False,
+) -> dict:
+    """原子批量写入或更新事实单据记录 (单事务批量落盘，彻底消除单条 5000 次网络 RTT 往返开销)。
+
+    - project: 必填。归属项目代号 (如 'taxbase')。
+    - records: 必填。单据列表，每项为字典 (必须含 doc_no, event_date; 可选 amount, entity_name, payload 等)。
+    - dataset_code: 可选。全局缺省数据集编码 (若记录项未显式指定 dataset_code 时采用此值)。
+    - batch_id: 可选。导入批次号 (缺省自动生成 'batch_YYYYMMDD_...')。
+    - with_embedding: 可选。是否同步生成 768 维语义向量 (缺省 False；5000 条大数据量建议先快速入库再离线向量化)。
+    """
+    try:
+        proj = await validate_and_negotiate_project(project, is_write=True)
+    except ProjectNegotiationError as e:
+        return e.to_dict()
+
+    if not records:
+        return tool_error("INVALID_ARGUMENT", "records 列表不能为空！", tool="records_bulk_upsert")
+
+    import time
+    t0 = time.time()
+
+    bid = batch_id or f"mcp_bulk_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    data_records: list[DataRecord] = []
+
+    for idx, r in enumerate(records, start=1):
+        d_code = (r.get("dataset_code") or dataset_code or "").strip().lower()
+        if not d_code:
+            return tool_error("INVALID_ARGUMENT", f"第 {idx} 条记录缺失 dataset_code 且未提供全局 dataset_code！", tool="records_bulk_upsert")
+        doc = str(r.get("doc_no") or "").strip()
+        if not doc:
+            doc = f"{bid}#{idx:06d}"
+        ev_date = str(r.get("event_date") or date.today().isoformat())
+        st = normalize_record_status(r.get("status", "recorded"))
+
+        rec = DataRecord(
+            project_id=proj,
+            dataset_code=d_code,
+            parent_id=r.get("parent_id"),
+            batch_id=r.get("batch_id") or bid,
+            doc_no=doc,
+            entity_name=str(r["entity_name"]).strip() if r.get("entity_name") else None,
+            amount=r.get("amount", 0),
+            currency=str(r.get("currency", "CNY")).strip().upper(),
+            event_date=ev_date,
+            status=st,
+            payload=r.get("payload") or {},
+        )
+        if with_embedding:
+            txt = extract_record_embed_text(rec)
+            if txt:
+                emb = await get_embedding(txt)
+                rec.embedding = emb.embedding
+
+        data_records.append(rec)
+
+    res = await db.bulk_upsert_records(data_records)
+    elapsed_ms = round((time.time() - t0) * 1000, 2)
+
+    return {
+        "success": True,
+        "project": proj,
+        "batch_id": bid,
+        "total_submitted": len(records),
+        "total_inserted": res.get("inserted", 0),
+        "total_updated": res.get("updated", 0),
+        "elapsed_ms": elapsed_ms,
+        "message": f"成功批量落库 {len(records)} 条单据 (新增: {res.get('inserted', 0)}, 更新: {res.get('updated', 0)}, 耗时: {elapsed_ms}ms)！",
     }
 
 

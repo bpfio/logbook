@@ -28,8 +28,8 @@ RUN uv pip install --system \
 COPY src/ /app/src/
 COPY sql/ /app/sql/
 
-# Expose SSH (22) for Agent MCP & CLI access
-EXPOSE 22
+# Expose SSH (22) for Agent MCP & CLI access, and HTTP (8000) for FastMCP SSE
+EXPOSE 22 8000
 
 # Volume for persistent host keys and local data
 VOLUME ["/app/data"]

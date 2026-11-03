@@ -331,11 +331,23 @@ async def handle_ssh_process(process: asyncssh.SSHServerProcess) -> None:
             cmd_args = [sys.executable, "-m", "logbook.cli"] + tokens[1:]
         elif tokens and tokens[0] in ("doctor", "status", "show", "import", "export"):
             cmd_args = [sys.executable, "-m", "logbook.cli"] + tokens
+        elif tokens and tokens[0] == "echo":
+            # 允许 echo 探针命令直接回显，消除自动化测试或外部 Agent 裸连探测误判
+            out = (" ".join(tokens[1:]) if len(tokens) > 1 else "") + "\r\n"
+            process.stdout.write(out.encode("utf-8"))
+            process.exit(0)
+            return
+        elif tokens and tokens[0] in ("ping", "test"):
+            # 允许 ping 探针命令直接响应
+            process.stdout.write(b"pong\r\n")
+            process.exit(0)
+            return
         else:
-            process.stderr.write(
+            msg = (
                 f"Logbook SSH: Command '{raw_cmd}' is not recognized.\r\n"
-                f"Supported commands: 'mcp' (JSON-RPC), 'logbook doctor', 'logbook status <project>', etc.\r\n"
+                f"Supported commands: 'mcp' (JSON-RPC), 'logbook doctor', 'logbook status <project>', 'echo <text>', 'ping', etc.\r\n"
             )
+            process.stderr.write(msg.encode("utf-8"))
             process.exit(1)
             return
 
@@ -373,7 +385,7 @@ async def handle_ssh_process(process: asyncssh.SSHServerProcess) -> None:
             env=env
         )
     except Exception as e:
-        process.stderr.write(f"Failed to spawn Logbook process: {e}\r\n")
+        process.stderr.write(f"Failed to spawn Logbook process: {e}\r\n".encode("utf-8"))
         process.exit(1)
         return
 
@@ -470,6 +482,52 @@ async def start_ssh_server(host: str = "127.0.0.1", port: int = 22):
     return server
 
 
+async def start_sse_server(host: str = "0.0.0.0", port: int = 8000):
+    """启动 FastMCP SSE HTTP 服务端 (0.5.1+: 支持 /sse 端点与 /health 探针)"""
+    import uvicorn
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+    from logbook.mcp_server import mcp, _session_bootstrap, _SERVER_VERSION
+
+    if not os.getenv("LOGBOOK_AGENT_ID"):
+        os.environ["LOGBOOK_AGENT_ID"] = os.getenv("LOGBOOK_DEFAULT_AGENT_ID", "agy")
+
+    try:
+        await _session_bootstrap()
+    except Exception as e:
+        logger.warning(f"SSE session bootstrap notice: {e}")
+
+    app = mcp.sse_app(
+        sse_path="/sse",
+        message_path="/messages/",
+        host=host,
+    )
+
+    async def health_endpoint(request):
+        return JSONResponse({
+            "status": "ok",
+            "service": "logbook",
+            "version": _SERVER_VERSION,
+            "transport": "sse",
+            "sse_endpoint": "/sse",
+            "messages_endpoint": "/messages/",
+        })
+
+    app.routes.append(Route("/health", health_endpoint))
+    app.routes.append(Route("/ping", health_endpoint))
+
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        access_log=False,
+    )
+    server = uvicorn.Server(config)
+    logger.info(f"Logbook FastMCP SSE Server listening on http://{host}:{port}/sse (health: /health)")
+    await server.serve()
+
+
 async def run_server():
     logging.basicConfig(
         level=logging.INFO,
@@ -487,7 +545,26 @@ async def run_server():
     host = os.getenv("SSH_HOST", "127.0.0.1")
     server = await start_ssh_server(host, port)
     logger.info(f"Logbook Server Ready on {host}:{port}")
-    await server.wait_closed()
+
+    # 并行拉起 FastMCP 原生 SSE HTTP 服务 (0.5.1)
+    sse_enabled = _env_enabled("LOGBOOK_ENABLE_SSE", default=True)
+    sse_port = int(os.getenv("LOGBOOK_SSE_PORT", "8000"))
+    sse_host = os.getenv("LOGBOOK_SSE_HOST", "0.0.0.0")
+
+    tasks = [asyncio.create_task(server.wait_closed())]
+    if sse_enabled:
+        tasks.append(asyncio.create_task(start_sse_server(sse_host, sse_port)))
+
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":

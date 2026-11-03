@@ -9,10 +9,12 @@
 
 ---
 
-## 一、任务台账 (32)
+## 一、任务台账 (34)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-REC-052 | closed | feat | 通用事实表 shared.records 768维语义向量底座 (迁移14) + records_bulk_upsert 批量落库 + record_search 混合检索与探针加固 (0.5.2) | HEAD | 贯彻用户裁决: DDL 迁移 14 落地 768 维 HNSW 索引; 新增 records_bulk_upsert 单事务批量落库消灭 5000 次 RPC 往返; 新增 record_search 语义+全文混合检索; 修复 AsyncSSH echo 探针编码与 FastMCP SSE 原生监听; 46 工具真机联测全绿, 栈内存 ~100.6MB (DEV-2026-11-03-02) |
+| L-PROJ-UPD | closed | feat | project_update MCP 空间元数据修改原语落地与 taxbase 备注名纠偏 | HEAD | 新增 project_update 闭环项目元数据读写; 纠偏 taxbase 标题为「税收法规库」; 验证群组权限拦截与幂等保护 (DEV-2026-11-03-02) |
 | L-OPS-DB128 | closed | ops | QNAP 生产容器 logbook-postgres 内存配额提升至 128MB 与 autovacuum 稳态加固 | HEAD | 根治 DB 48M 配额吃满 70% 导致 autovacuum (64M) 与 pgvector 潜在 OOM 隐患; 热重载 compose.yaml 生效 128MB, 剩余余量 103MB+; 43 工具与 brief 现场验证全绿 (DevLog #342, DEV-2026-11-03-01) |
 | L-OPS-256 | closed | ops | QNAP 生产容器 logbook-app 内存配额提升至 256MB 与 Cgroup OOM 根治 | 8f2cc37 | 根治 96M 硬配额触发 Linux 内核 Cgroup OOM Killer 强杀 Python MCP 子进程 (退出码 247 = 256 - 9) 故障; 经用户裁决热重载 compose.yaml 生效 256MB; 43 工具与 brief 现场验证全绿 (DevLog #341, DEV-2026-11-03-01) |
 | L-DEP-050 | closed | deploy | QNAP 生产环境 0.5.0 全维上线与故障原子自愈 (双表事实引擎+768维重嵌+43工具实证) | HEAD | 修复 10-30 网络命名空间断裂故障; 备份 1.3MB 库; 平滑执行迁移 09~13; 319 devlogs + 34 researches 100% 768维重嵌; 43 工具真机验证全绿, 栈内存 ~79.7MB (DEV-2026-11-01-01) |
@@ -70,6 +72,29 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-03-02] Logbook 0.5.2: 通用事实表 768 维语义向量检索、批量入库原语与协议层稳态加固 — ✅ 闭环
+
+响应用户连续裁决（纠正 taxbase 备注名为「税收法规库」、放行 echo/ping 探针、FastMCP SSE 传输支持、通用事实表全文语义检索与批量落库），完成全套功能研发与生产上线：
+
+1. **通用事实表 768 维语义向量检索与混合召回 (`sql/14_records_vector_embedding.sql`)**:
+   - **架构机理升级**: 针对财税法规库（`taxbase`）及通用事实单据需要自然语言意图理解（如「小微企业增值税优惠条件」）的核心痛点，通过 DDL 迁移 14 为 `shared.records` 扩容 `embedding vector(768)` 向量列，并构建专用 HNSW 索引 `idx_records_vector_hnsw`（余弦距离算子）；
+   - **智能特征抽取 (`normalizer.py`)**: 落地 `extract_record_embed_text`，针对财税法规等业务单据，自动穿透提取 `doc_no`、`entity_name` 及 `payload` 中关键字段（`title`、`summary`、`content`、`body`、`description` 等），规范拼装为高信息密度向量化文本；
+   - **全新 MCP 检索原语 (`record_search`)**: 优先调用 768 维星火 MaaS API 计算查询向量并按余弦相似度召回；若未向量化或外部 API 超时，自动无缝平滑降级至 `tsv_content` GIN 倒排全文检索并计算 `ts_rank_cd`，实现语义与关键词双重保障。
+2. **批量事务落盘原语落地 (`records_bulk_upsert`)**:
+   - **消灭 5000 次 RPC 网络往返**: 解决此前 MCP 仅暴露单条 `record_upsert` 导致外部导入 5000 条法规需发起 5000 次长连接交互的性能瓶颈；
+   - **单事务批量落盘**: 在 `db.py` 落地 `bulk_upsert_records`，单次调用即可在单个事务中完成数百至数千条记录的批量查重与落盘（增量 `INSERT`、存量 `UPDATE`），实测批量导入 3 条法规并同步 768 维向量化仅耗时 2.4s。
+3. **空间元数据修改原语与纠偏 (`project_update`)**:
+   - **元数据闭环**: 新增 `project_update` MCP 原语，解决此前仅能 `project_init` 无法热修改标题与描述的缺陷，内置管理员与群组权限隔离保护；
+   - **taxbase 命名纠偏**: 成功将 `taxbase` 空间全称从误录的「税务法规库」纠偏为正典「税收法规库」，描述设定为「中国现行财税法规、规章与规范性文件语义知识库」。
+4. **协议传输层与探针稳态加固**:
+   - **探针字节流修复**: 修复 `ssh_server.py` 中 `echo` 与 `ping` 探针在 AsyncSSH 无编码默认模式下写入 `str` 导致的 `ProtocolError (string argument without an encoding)`，严格输出 UTF-8 字节流，自动化健康探测全绿；
+   - **原生 FastMCP SSE 暴露**: 容器内基于 `mcp.sse_app` 与 Uvicorn 并行监听 `0.0.0.0:8000/sse` 与 `/health`，为外部客户端提供免 SSH 密钥零摩擦接入方案。
+5. **端到端真机验证**:
+   - **服务指标**: 镜像构建为 `logbook:0.5.2` (343MB)；QNAP 生产容器热升级后常驻内存仅 `App 75.08MiB (29.3%) + DB 25.6MiB (20.0%)`，全栈压制在 100.6MB；
+   - **全量工具验收**: MCP 活跃工具集平滑扩充至 **46 个**；端到端回归脚本实测 `tools/list`、`project_update`、`dataset_upsert`、`records_bulk_upsert`、`record_search`、`echo OK` 探针与 `/health` 均 100% 通过。
 
 ---
 

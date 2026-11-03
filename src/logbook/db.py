@@ -275,6 +275,12 @@ class Database:
             await conn.execute("SELECT shared.init_project_schema($1)", s_name)
             if self._acl_bootstrapped:
                 await self._ensure_schema_open_grants(conn, s_name)
+            # 若已存在同名 schema_name 但 slug 不同的历史记录，做幂等保护更新
+            existing_by_schema = await conn.fetchval(
+                "SELECT slug FROM shared.projects WHERE schema_name = $1", s_name
+            )
+            target_slug = existing_by_schema or slug
+
             row = await conn.fetchrow("""
                 INSERT INTO shared.projects (slug, schema_name, title, description)
                 VALUES ($1, $2, $3, $4)
@@ -284,8 +290,34 @@ class Database:
                     description = COALESCE(EXCLUDED.description, shared.projects.description),
                     updated_at = CURRENT_TIMESTAMP
                 RETURNING slug, schema_name, title, description, created_at, updated_at;
-            """, slug, s_name, title, description)
+            """, target_slug, s_name, title, description)
             return Project(**dict(row))
+
+    async def update_project(
+        self,
+        identifier: str,
+        title: str | None = None,
+        description: str | None = None,
+    ) -> Project | None:
+        """更新项目元数据 (title, description)。通过 slug 或 schema_name 匹配。"""
+        await self.connect()
+        proj = await self.get_project(identifier)
+        if not proj:
+            return None
+
+        spool = await self._acquire_system()
+        async with spool.acquire() as conn:
+            row = await conn.fetchrow("""
+                UPDATE shared.projects
+                SET title = COALESCE($2, title),
+                    description = COALESCE($3, description),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE slug = $1 OR schema_name = $1
+                RETURNING slug, schema_name, title, description, created_at, updated_at;
+            """, proj.slug, title, description)
+            if row:
+                return Project(**dict(row))
+            return None
 
     async def get_project(self, identifier: str) -> Project | None:
         """按 slug (如 bpfio/brix) 或 schema_name (如 brix) 获取项目元数据。"""
@@ -2220,6 +2252,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_records_payload ON shared.records USING GIN (payload jsonb_path_ops);
                 CREATE INDEX IF NOT EXISTS idx_records_tsv ON shared.records USING GIN (tsv_content);
 
+                ALTER TABLE shared.records ADD COLUMN IF NOT EXISTS embedding vector(768);
+                CREATE INDEX IF NOT EXISTS idx_records_vector_hnsw ON shared.records USING hnsw (embedding vector_cosine_ops)
+                    WITH (m = 16, ef_construction = 64);
+
                 ALTER TABLE shared.records ENABLE ROW LEVEL SECURITY;
 
                 DO $policy$
@@ -2351,6 +2387,8 @@ class Database:
             else:
                 ev_date = date.fromisoformat(cleaned[:10])
 
+        vec_literal = f"[{','.join(str(x) for x in record.embedding)}]" if record.embedding else None
+
         async with self._pool.acquire() as conn:
             existing_id = record.id
             if existing_id is None:
@@ -2379,8 +2417,9 @@ class Database:
                         event_date = $9,
                         status = $10,
                         payload = $11::jsonb,
+                        embedding = COALESCE($12::vector, shared.records.embedding),
                         updated_at = NOW()
-                    WHERE id = $1 AND project_id = $12
+                    WHERE id = $1 AND project_id = $13
                     RETURNING id, project_id, dataset_code, parent_id, batch_id,
                               doc_no, entity_name, amount, currency, event_date,
                               status, payload, created_at, updated_at;
@@ -2398,6 +2437,7 @@ class Database:
                     ev_date,
                     record.status,
                     json.dumps(record.payload, ensure_ascii=False),
+                    vec_literal,
                     record.project_id,
                 )
                 if res:
@@ -2410,11 +2450,11 @@ class Database:
                 INSERT INTO shared.records (
                     project_id, dataset_code, parent_id, batch_id,
                     doc_no, entity_name, amount, currency, event_date,
-                    status, payload, created_at, updated_at
+                    status, payload, embedding, created_at, updated_at
                 ) VALUES (
                     $1, $2, $3, $4,
                     $5, $6, $7, $8, $9,
-                    $10, $11::jsonb, $12, $13
+                    $10, $11::jsonb, $12::vector, $13, $14
                 )
                 RETURNING id, project_id, dataset_code, parent_id, batch_id,
                           doc_no, entity_name, amount, currency, event_date,
@@ -2433,6 +2473,7 @@ class Database:
                 ev_date,
                 record.status,
                 json.dumps(record.payload, ensure_ascii=False),
+                vec_literal,
                 record.created_at,
                 record.updated_at,
             )
@@ -2450,11 +2491,11 @@ class Database:
             INSERT INTO shared.records (
                 project_id, dataset_code, parent_id, batch_id,
                 doc_no, entity_name, amount, currency, event_date,
-                status, payload, created_at, updated_at
+                status, payload, embedding, created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4,
                 $5, $6, $7, $8, $9,
-                $10, $11::jsonb, $12, $13
+                $10, $11::jsonb, $12::vector, $13, $14
             );
         """
         count = 0
@@ -2468,6 +2509,7 @@ class Database:
                             ev_date = date(int(cleaned[:4]), int(cleaned[4:6]), int(cleaned[6:8]))
                         else:
                             ev_date = date.fromisoformat(cleaned[:10])
+                    vec_literal = f"[{','.join(str(x) for x in r.embedding)}]" if r.embedding else None
                     await conn.execute(
                         insert_sql,
                         r.project_id,
@@ -2481,11 +2523,114 @@ class Database:
                         ev_date,
                         r.status,
                         json.dumps(r.payload, ensure_ascii=False),
+                        vec_literal,
                         r.created_at,
                         r.updated_at,
                     )
                     count += 1
         return count
+
+    async def bulk_upsert_records(self, records: list[DataRecord]) -> dict:
+        """批量写入或更新通用事实单据 (单事务批处理，支持同单号幂等更新)。返回统计字典。"""
+        await self.ensure_datasets_and_records_schema()
+        if not records:
+            return {"inserted": 0, "updated": 0, "total": 0}
+
+        inserted_cnt = 0
+        updated_cnt = 0
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                proj = records[0].project_id
+                dataset = records[0].dataset_code
+                doc_nos = [r.doc_no for r in records]
+
+                existing_rows = await conn.fetch(
+                    """
+                    SELECT id, doc_no FROM shared.records
+                    WHERE project_id = $1 AND dataset_code = $2 AND doc_no = ANY($3)
+                      AND parent_id IS NULL;
+                    """,
+                    proj, dataset, doc_nos
+                )
+                existing_map = {row["doc_no"]: row["id"] for row in existing_rows}
+
+                insert_sql = """
+                    INSERT INTO shared.records (
+                        project_id, dataset_code, parent_id, batch_id,
+                        doc_no, entity_name, amount, currency, event_date,
+                        status, payload, embedding, created_at, updated_at
+                    ) VALUES (
+                        $1, $2, $3, $4,
+                        $5, $6, $7, $8, $9,
+                        $10, $11::jsonb, $12::vector, $13, $14
+                    );
+                """
+
+                update_sql = """
+                    UPDATE shared.records
+                    SET parent_id = $2,
+                        batch_id = COALESCE($3, shared.records.batch_id),
+                        entity_name = COALESCE($4, shared.records.entity_name),
+                        amount = $5,
+                        currency = $6,
+                        event_date = $7,
+                        status = $8,
+                        payload = $9::jsonb,
+                        embedding = COALESCE($10::vector, shared.records.embedding),
+                        updated_at = NOW()
+                    WHERE id = $1 AND project_id = $11;
+                """
+
+                for r in records:
+                    ev_date = r.event_date
+                    if isinstance(ev_date, str):
+                        cleaned = ev_date.strip().replace("/", "-")
+                        if len(cleaned) == 8 and cleaned.isdigit():
+                            ev_date = date(int(cleaned[:4]), int(cleaned[4:6]), int(cleaned[6:8]))
+                        else:
+                            ev_date = date.fromisoformat(cleaned[:10])
+
+                    vec_literal = f"[{','.join(str(x) for x in r.embedding)}]" if r.embedding else None
+
+                    target_id = existing_map.get(r.doc_no) if r.parent_id is None else None
+                    if target_id is not None:
+                        await conn.execute(
+                            update_sql,
+                            target_id,
+                            r.parent_id,
+                            r.batch_id,
+                            r.entity_name,
+                            r.amount,
+                            r.currency,
+                            ev_date,
+                            r.status,
+                            json.dumps(r.payload, ensure_ascii=False),
+                            vec_literal,
+                            r.project_id,
+                        )
+                        updated_cnt += 1
+                    else:
+                        await conn.execute(
+                            insert_sql,
+                            r.project_id,
+                            r.dataset_code,
+                            r.parent_id,
+                            r.batch_id,
+                            r.doc_no,
+                            r.entity_name,
+                            r.amount,
+                            r.currency,
+                            ev_date,
+                            r.status,
+                            json.dumps(r.payload, ensure_ascii=False),
+                            vec_literal,
+                            r.created_at,
+                            r.updated_at,
+                        )
+                        inserted_cnt += 1
+
+        return {"inserted": inserted_cnt, "updated": updated_cnt, "total": len(records)}
 
     async def query_records(
         self,
@@ -2577,6 +2722,122 @@ class Database:
             LIMIT ${lim_idx} OFFSET ${off_idx};
         """
         async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+            results = []
+            for r in rows:
+                d = dict(r)
+                if isinstance(d.get("payload"), str):
+                    d["payload"] = json.loads(d["payload"])
+                results.append(d)
+            return results
+
+    async def search_records(
+        self,
+        project_id: str,
+        query_vector: list[float] | None = None,
+        query_text: str | None = None,
+        dataset_code: str | None = None,
+        status: str | None = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> list[dict]:
+        """语义向量与全文混合检索事实数据记录 (支持 768 维 HNSW 余弦与 tsvector 降级)。"""
+        await self.ensure_datasets_and_records_schema()
+        limit = self._clamp_limit(limit, default=10)
+        try:
+            offset = max(0, int(offset or 0))
+        except (TypeError, ValueError):
+            offset = 0
+
+        conditions = ["project_id = $1"]
+        params: list[Any] = [project_id]
+
+        if dataset_code:
+            params.append(dataset_code.strip().lower())
+            conditions.append(f"dataset_code = ${len(params)}")
+        if status:
+            params.append(status.strip().lower())
+            conditions.append(f"status = ${len(params)}")
+
+        where_clause = " AND ".join(conditions)
+
+        async with self._pool.acquire() as conn:
+            if query_vector:
+                vec_literal = f"[{','.join(str(x) for x in query_vector)}]"
+                params.append(vec_literal)
+                vec_idx = len(params)
+                params.append(limit)
+                lim_idx = len(params)
+                params.append(offset)
+                off_idx = len(params)
+
+                sql = f"""
+                    SELECT id, project_id, dataset_code, parent_id, batch_id,
+                           doc_no, entity_name, amount, currency, event_date,
+                           status, payload, created_at, updated_at,
+                           (1 - (embedding <=> ${vec_idx}::vector)) AS score
+                    FROM shared.records
+                    WHERE {where_clause} AND embedding IS NOT NULL
+                    ORDER BY embedding <=> ${vec_idx}::vector ASC
+                    LIMIT ${lim_idx} OFFSET ${off_idx};
+                """
+                rows = await conn.fetch(sql, *params)
+                if rows:
+                    results = []
+                    for r in rows:
+                        d = dict(r)
+                        if isinstance(d.get("payload"), str):
+                            d["payload"] = json.loads(d["payload"])
+                        if "score" in d:
+                            d["score"] = round(float(d["score"]), 4)
+                        results.append(d)
+                    return results
+
+            # 降级分支: 全文关键词检索 (tsvector)
+            if query_text and query_text.strip():
+                params.append(query_text.strip())
+                q_idx = len(params)
+                where_clause += f" AND tsv_content @@ plainto_tsquery('simple', ${q_idx})"
+                params.append(limit)
+                lim_idx = len(params)
+                params.append(offset)
+                off_idx = len(params)
+
+                sql = f"""
+                    SELECT id, project_id, dataset_code, parent_id, batch_id,
+                           doc_no, entity_name, amount, currency, event_date,
+                           status, payload, created_at, updated_at,
+                           ts_rank_cd(tsv_content, plainto_tsquery('simple', ${q_idx})) AS score
+                    FROM shared.records
+                    WHERE {where_clause}
+                    ORDER BY ts_rank_cd(tsv_content, plainto_tsquery('simple', ${q_idx})) DESC, event_date DESC, id DESC
+                    LIMIT ${lim_idx} OFFSET ${off_idx};
+                """
+                rows = await conn.fetch(sql, *params)
+                results = []
+                for r in rows:
+                    d = dict(r)
+                    if isinstance(d.get("payload"), str):
+                        d["payload"] = json.loads(d["payload"])
+                    if "score" in d:
+                        d["score"] = round(float(d["score"]), 4)
+                    results.append(d)
+                return results
+
+            # 若无向量也无 query_text，按常规时间倒序
+            params.append(limit)
+            lim_idx = len(params)
+            params.append(offset)
+            off_idx = len(params)
+            sql = f"""
+                SELECT id, project_id, dataset_code, parent_id, batch_id,
+                       doc_no, entity_name, amount, currency, event_date,
+                       status, payload, created_at, updated_at
+                FROM shared.records
+                WHERE {where_clause}
+                ORDER BY event_date DESC, id DESC
+                LIMIT ${lim_idx} OFFSET ${off_idx};
+            """
             rows = await conn.fetch(sql, *params)
             results = []
             for r in rows:

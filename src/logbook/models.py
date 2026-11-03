@@ -431,6 +431,9 @@ class DataRecord(BaseModel):
     # 软肋骨 (Flexible Ribs)
     payload: dict[str, Any] = Field(default_factory=dict, description="动态属性载荷 (JSONB)")
 
+    # 语义检索向量 (768 维，讯飞星火 MaaS / 本地降级向量)
+    embedding: list[float] | None = Field(default=None, description="768 维语义向量")
+
     created_at: datetime = Field(default_factory=get_beijing_now)
     updated_at: datetime = Field(default_factory=get_beijing_now)
 

@@ -315,3 +315,41 @@ def normalize_record_status(val: Any, default: str = "recorded") -> str:
     return RECORD_STATUS_MAP.get(c, default)
 
 
+def extract_record_embed_text(record: Any) -> str:
+    """提取单据或事实记录的关键文本用于 768 维语义向量化。"""
+    if record is None:
+        return ""
+    if isinstance(record, dict):
+        doc_no = str(record.get("doc_no") or "").strip()
+        entity = str(record.get("entity_name") or "").strip()
+        payload = record.get("payload") or {}
+    else:
+        doc_no = str(getattr(record, "doc_no", "") or "").strip()
+        entity = str(getattr(record, "entity_name", "") or "").strip()
+        payload = getattr(record, "payload", {}) or {}
+
+    parts = []
+    if doc_no:
+        parts.append(doc_no)
+    if entity:
+        parts.append(entity)
+
+    if isinstance(payload, dict):
+        priority_keys = ["title", "name", "subject", "summary", "content", "body", "text", "description", "remark", "clause", "law_name"]
+        found = False
+        for k in priority_keys:
+            v = payload.get(k)
+            if v and isinstance(v, (str, int, float)):
+                parts.append(str(v).strip())
+                found = True
+        if not found:
+            for k, v in payload.items():
+                if v and isinstance(v, (str, int, float)):
+                    parts.append(f"{k}:{v}")
+    elif isinstance(payload, str) and payload.strip():
+        parts.append(payload.strip())
+
+    full_text = " ".join(parts).strip()
+    return full_text[:2048]
+
+
