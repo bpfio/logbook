@@ -9,11 +9,12 @@
 
 ---
 
-## 一、任务台账 (31)
+## 一、任务台账 (32)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
-| L-OPS-256 | closed | ops | QNAP 生产容器 logbook-app 内存配额提升至 256MB 与 Cgroup OOM 根治 | HEAD | 根治 96M 硬配额触发 Linux 内核 Cgroup OOM Killer 强杀 Python MCP 子进程 (退出码 247 = 256 - 9) 故障; 经用户裁决热重载 compose.yaml 生效 256MB; 43 工具与 brief 现场验证全绿 (DevLog #341, DEV-2026-11-03-01) |
+| L-OPS-DB128 | closed | ops | QNAP 生产容器 logbook-postgres 内存配额提升至 128MB 与 autovacuum 稳态加固 | HEAD | 根治 DB 48M 配额吃满 70% 导致 autovacuum (64M) 与 pgvector 潜在 OOM 隐患; 热重载 compose.yaml 生效 128MB, 剩余余量 103MB+; 43 工具与 brief 现场验证全绿 (DevLog #342, DEV-2026-11-03-01) |
+| L-OPS-256 | closed | ops | QNAP 生产容器 logbook-app 内存配额提升至 256MB 与 Cgroup OOM 根治 | 8f2cc37 | 根治 96M 硬配额触发 Linux 内核 Cgroup OOM Killer 强杀 Python MCP 子进程 (退出码 247 = 256 - 9) 故障; 经用户裁决热重载 compose.yaml 生效 256MB; 43 工具与 brief 现场验证全绿 (DevLog #341, DEV-2026-11-03-01) |
 | L-DEP-050 | closed | deploy | QNAP 生产环境 0.5.0 全维上线与故障原子自愈 (双表事实引擎+768维重嵌+43工具实证) | HEAD | 修复 10-30 网络命名空间断裂故障; 备份 1.3MB 库; 平滑执行迁移 09~13; 319 devlogs + 34 researches 100% 768维重嵌; 43 工具真机验证全绿, 栈内存 ~79.7MB (DEV-2026-11-01-01) |
 | L-FACT-ENGINE | closed | feat | 通用事实引擎与极简双表架构 (方案一: dataset_* + record_*) + 零DDL数据入库 | 15be34b | 贯彻用户裁决双表极简架构: shared.datasets (元数据字典) + shared.records (强脊梁+软肋骨+主子表parent_id); 增补 5 个 MCP 工具; 提供 Excel/CSV 极速流式导入脚本; 现有 10 表 9 项目零数据丢失, 38 个存量 MCP 工具 100% 兼容, gate full 5/5 全绿 (DEV-2026-10-19-02) |
 | L-RESEARCH-768 | closed | feat | 政策与世界观通用知识库扩充 (方案B) + 768维原生向量平滑升级 (迁移 12) | 71c5619 | 贯彻单表复用铁律: shared.researches 增发文字号/制定主体/效力层级/生效日期; 升级 vector(768) + HNSW 重建; 兼容宏观政策与小说设定考据; gate full 5/5 全绿 (DEV-2026-10-19-01) |
@@ -72,20 +73,21 @@
 
 ---
 
-## [DEV-2026-11-03-01] QNAP 生产容器内存配额提升至 256MB 与 Cgroup OOM 强杀故障根治 — ✅ 闭环
+## [DEV-2026-11-03-01] QNAP 生产全栈内存配额双向升级 (App 256M + DB 128M) 与 OOM 隐患根治 — ✅ 闭环
 
-响应用户“批准：调整至256M”裁决，彻底纠正上一轮排查误判，定位物理根因并完成生产环境资源重配与验证：
+响应用户连续裁决（“批准：调整至256M”、“批准：提升DB至128M”），彻底纠正上一轮排查误判，定位物理根因并完成生产环境应用与数据库全栈资源重配与验证：
 
-1. **误判纠偏与物理机理穿透 (DevLog #341)**:
+1. **误判纠偏与物理机理穿透 (DevLog #341, #342)**:
    - **架构特性厘清**: 确证 192.168.1.68 为 `logbook-app` macvlan 独立容器，原生基于 AsyncSSH 协议驱动，内置命令白名单仅放行 `mcp` 协议与 `logbook <subcommand>` 指令，前序将 `ssh echo ok` 被拒误诊为“通道故障 / 22 端口被 AsyncSSH 冒充”属认识偏差；
-   - **内核级 OOM 铁证**: QNAP 宿主机 `dmesg` 确证存在 `Memory cgroup out of memory: Killed process 992 (python) oom_memcg=/docker/027f2dab95f1...`。原 `compose.yaml` 配置 `memory: 96M`，容器空载占用 35.4MB，一旦 Agent 接入加载 FastMCP + Pydantic + asyncpg + OpenAI 向量客户端即冲高至 83.5MB (87%)。并发连接或大检索瞬间超限，触发内核 OOM Killer 投递 `SIGKILL (signal 9)`。AsyncSSH 捕获后向上层转译退出码 `256 - 9 = 247`，导致客户端出现 `exit status 247`。
+   - **内核级 OOM 铁证 (App)**: QNAP 宿主机 `dmesg` 确证存在 `Memory cgroup out of memory: Killed process 992 (python) oom_memcg=/docker/027f2dab95f1...`。原 `compose.yaml` 配置 `memory: 96M`，容器空载占用 35.4MB，一旦 Agent 接入加载 FastMCP + Pydantic + asyncpg + OpenAI 向量客户端即冲高至 83.5MB (87%)。并发连接或大检索瞬间超限，触发内核 OOM Killer 投递 `SIGKILL (signal 9)`。AsyncSSH 捕获后向上层转译退出码 `256 - 9 = 247`，导致客户端出现 `exit status 247`；
+   - **数据库隐性炸弹穿透 (DB)**: 原配置 `logbook-postgres` 内存限额仅 48MB，物理常驻已达 33.8MB (70.4%)，仅剩 14MB 余量。而 PG 内部 `maintenance_work_mem = 64MB` 且 `autovacuum_work_mem = -1`，一旦后台自动触发死元组清理、HNSW 索引重构或复杂查询排序，申请内存必超 14MB 触发内核 OOM 强杀。
 2. **生产环境热重载与配置固化**:
-   - **本地仓库 SSOT 更新**: 将 `deploy/qnap/compose.yaml` 及 `compose.yaml.example` 中 `logbook-app` 的 `memory limit` 由 `96M` 更新为 `256M`；
-   - **QNAP 实机编排热重载**: 同步更新 QNAP NAS `/share/CACHEDEV1_DATA/Container/logbook/compose.yaml`，执行 `docker compose up -d` 重新应用容器配置。
+   - **本地仓库 SSOT 更新**: 将 `deploy/qnap/compose.yaml` 及 `compose.yaml.example` 中 `logbook-app` 由 `96M` 升至 `256M`，`logbook-postgres` 由 `48M` 升至 `128M`；
+   - **QNAP 实机编排热重载**: 同步更新 QNAP NAS `/share/CACHEDEV1_DATA/Container/logbook/compose.yaml`，执行 `docker compose up -d` 重新应用容器配置。全栈总内存上限 384MB，仅占宿主机 16GB 总内存的 2.4%。
 3. **端到端验证与健康基准**:
-   - **资源稳态实测**: `docker stats` 显示 `logbook-app` 内存限额成功生效为 256MiB，当前稳定运行在 46.59MiB / 256MiB (18.2%)，安全余量充足；
-   - **系统健康巡检**: `logbook doctor` 时钟同步正常 (漂移 +0.017s)，PostgreSQL 18.6 底座与 pgvector 扩展就绪；
-   - **MCP 全双工验证**: 真实 MCP 客户端测试 `initialize` (0.5.0), `tools/list` (全量 43 工具), `logbook_brief`, `task_upsert`, `devlog_record` 均毫秒级响应，成功录入 DevLog #341 并生成 768 维向量索引。
+   - **资源稳态实测**: `docker stats` 显示 `logbook-app` 内存限额成功生效为 256MiB，`logbook-postgres` 限额成功生效为 128MiB (占用 24.32MiB, 19.0%)，安全余量扩充至 103MB+，彻底消除 autovacuum 与 pgvector 隐患；
+   - **系统健康巡检**: `logbook doctor` 时钟同步正常 (漂移 +0.016s)，PostgreSQL 18.6 底座与 pgvector 扩展就绪；
+   - **MCP 全双工验证**: 真实 MCP 客户端测试 `initialize` (0.5.0), `tools/list` (全量 43 工具), `logbook_brief`, `task_upsert`, `devlog_record` 均毫秒级响应，成功录入 DevLog #341、#342 并生成 768 维向量索引。
 
 ---
 

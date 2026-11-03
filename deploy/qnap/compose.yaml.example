@@ -44,7 +44,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 48M
+          memory: 128M
     environment:
       - POSTGRES_DB=logbook
       - POSTGRES_USER=postgres
