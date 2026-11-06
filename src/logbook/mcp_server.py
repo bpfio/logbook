@@ -40,6 +40,7 @@ from .converter import export_devlog_markdown
 from .negotiation import validate_and_negotiate_project, ProjectNegotiationError
 from .errors import tool_error, ToolError, pg_tool_error
 from .normalizer import (
+    clean_text,
     normalize_status, normalize_task_type, normalize_priority,
     normalize_severity, normalize_waiting_category,
     normalize_research_category, normalize_research_status,
@@ -199,13 +200,45 @@ def clamp_limit(limit: int, maximum: int = QUERY_LIMIT_MAX) -> int:
     return n
 
 
-def project_fields(items: list[dict], fields: list[str] | None) -> list[dict]:
-    """P1-5: 查询结果 MCP 层键投影 (fields=None 返回全列)。"""
+VALID_RECORD_FIELDS = {
+    "id", "project_id", "dataset_code", "parent_id", "batch_id",
+    "doc_no", "entity_name", "amount", "currency", "event_date",
+    "status", "payload", "embedding", "created_at", "updated_at", "score",
+}
+
+VALID_TASK_FIELDS = {
+    "id", "project_id", "batch_id", "title", "task_type", "status",
+    "priority", "assignee", "reviewer", "notes", "tags", "parent_id",
+    "commit_hash", "proof_link", "agent_ip", "created_at", "started_at",
+    "closed_at", "duration_seconds", "updated_at",
+}
+
+VALID_FINDING_FIELDS = {
+    "id", "project_id", "source", "severity", "status", "task_id",
+    "reporter", "agent_ip", "summary", "resolution", "discovered_at", "resolved_at",
+}
+
+VALID_WAITING_FIELDS = {
+    "id", "project_id", "category", "status", "owner", "agent_ip",
+    "description", "resolution", "blocked_at", "resolved_at",
+}
+
+
+def project_fields(
+    items: list[dict],
+    fields: list[str] | None,
+    valid_keys: set[str] | None = None,
+) -> list[dict]:
+    """查询结果 MCP 层键投影 (fields=None 返回全列)。非法未知列严格报错阻断 (F-API-03)。"""
     if not fields:
         return items
     keys = [f.strip() for f in fields if isinstance(f, str) and f.strip()]
     if not keys:
         return items
+    if valid_keys is not None:
+        unknown = [k for k in keys if k not in valid_keys]
+        if unknown:
+            raise ToolError("INVALID_ARGUMENT", f"未知投影字段: {unknown}。合法字段为: {sorted(valid_keys)}")
     results = []
     for it in items:
         projected = {k: it[k] for k in keys if k in it}
@@ -1014,8 +1047,8 @@ async def tasks_bulk_upsert(
 @tool_shell
 async def task_query(
     project: str,
-    status: list[Literal["planned", "running", "blocked", "closed", "wontfix"]] | None = None,
-    priority: list[Literal["P0", "P1", "P2", "P3"]] | None = None,
+    status: list[Literal["planned", "running", "review", "blocked", "closed", "wontfix"]] | Literal["planned", "running", "review", "blocked", "closed", "wontfix"] | None = None,
+    priority: list[Literal["P0", "P1", "P2", "P3"]] | Literal["P0", "P1", "P2", "P3"] | None = None,
     batch_id: str | None = None,
     assignee: str | None = None,
     parent_id: str | None = None,
@@ -1024,6 +1057,8 @@ async def task_query(
 ) -> dict:
     """多维查询任务看板。强制要求显式提供 project 参数。返回标准化包装对象。
 
+    - status: 支持单值或数组 (planned, running, review, blocked, closed, wontfix)。
+    - priority: 支持单值或数组 (P0, P1, P2, P3)。
     - limit: 返回条数上限 (1..200, 缺省 50, 超界自动钳制)。
     - fields: 可选列投影 (如 ['id','status','priority','title'])，缺省回全列。
     """
@@ -1033,9 +1068,10 @@ async def task_query(
         return e.to_dict()
 
     limit = clamp_limit(limit)
-    if status:
+    if status is not None:
+        raw_status = [status] if isinstance(status, str) else list(status)
         st_enums = []
-        for s in status:
+        for s in raw_status:
             try:
                 st_enums.append(TaskStatus(normalize_status(s)))
             except ValueError as exc:
@@ -1043,9 +1079,10 @@ async def task_query(
     else:
         st_enums = None
 
-    if priority:
+    if priority is not None:
+        raw_priority = [priority] if isinstance(priority, str) else list(priority)
         pr_enums = []
-        for p in priority:
+        for p in raw_priority:
             try:
                 pr_enums.append(TaskPriority(normalize_priority(p)))
             except ValueError as exc:
@@ -1061,7 +1098,7 @@ async def task_query(
         parent_id=parent_id,
         limit=limit
     )
-    items = project_fields([t.model_dump(mode="json") for t in tasks], fields)
+    items = project_fields([t.model_dump(mode="json") for t in tasks], fields, valid_keys=VALID_TASK_FIELDS)
     return {
         "success": True,
         "project": proj,
@@ -1156,13 +1193,15 @@ async def finding_record(
 @tool_shell
 async def finding_query(
     project: str,
-    status: list[Literal["open", "infix", "fixed", "wontfix", "blocked"]] | None = None,
-    severity: list[Literal["P1", "P2", "P3"]] | None = None,
+    status: list[Literal["open", "infix", "fixed", "wontfix", "blocked"]] | Literal["open", "infix", "fixed", "wontfix", "blocked"] | None = None,
+    severity: list[Literal["P1", "P2", "P3"]] | Literal["P1", "P2", "P3"] | None = None,
     limit: int = 50,
     fields: list[str] | None = None,
 ) -> dict:
     """查询缺陷与审计发现项。强制要求显式提供 project 参数。返回标准化包装对象。
 
+    - status: 支持单值或数组 (open, infix, fixed, wontfix, blocked)。
+    - severity: 支持单值或数组 (P1, P2, P3)。
     - limit: 返回条数上限 (1..200, 缺省 50, 超界自动钳制)。
     - fields: 可选列投影 (如 ['id','severity','status','summary'])，缺省回全列。
     """
@@ -1172,9 +1211,10 @@ async def finding_query(
         return e.to_dict()
 
     limit = clamp_limit(limit)
-    if status:
+    if status is not None:
+        raw_status = [status] if isinstance(status, str) else list(status)
         st_enums = []
-        for s in status:
+        for s in raw_status:
             c = clean_text(s)
             valid = ["open", "infix", "fixed", "wontfix", "blocked"]
             if c not in valid:
@@ -1183,9 +1223,10 @@ async def finding_query(
     else:
         st_enums = None
 
-    if severity:
+    if severity is not None:
+        raw_severity = [severity] if isinstance(severity, str) else list(severity)
         sev_enums = []
-        for s in severity:
+        for s in raw_severity:
             try:
                 sev_enums.append(FindingSeverity(normalize_severity(s)))
             except ValueError as exc:
@@ -1193,7 +1234,7 @@ async def finding_query(
     else:
         sev_enums = None
     findings = await db.query_findings(proj, status=st_enums, severity=sev_enums, limit=limit)
-    items = project_fields([f.model_dump(mode="json") for f in findings], fields)
+    items = project_fields([f.model_dump(mode="json") for f in findings], fields, valid_keys=VALID_FINDING_FIELDS)
     return {
         "success": True,
         "project": proj,
@@ -1240,7 +1281,7 @@ async def waiting_query(
         rows = [w for w in await db.query_waitings(proj) if w.status in st_list]
 
     rows = sorted(rows, key=lambda w: w.blocked_at or 0, reverse=True)[:limit]
-    items = project_fields([w.model_dump(mode="json") for w in rows], fields)
+    items = project_fields([w.model_dump(mode="json") for w in rows], fields, valid_keys=VALID_WAITING_FIELDS)
     return {
         "success": True,
         "project": proj,
@@ -2707,8 +2748,10 @@ async def record_query(
         applied_filters["payload_filter"] = payload_filter
     if query_text:
         applied_filters["query_text"] = str(query_text).strip()
+    if fields is not None:
+        applied_filters["fields"] = fields
 
-    items = project_fields(rows, fields)
+    items = project_fields(rows, fields, valid_keys=VALID_RECORD_FIELDS)
     return {
         "success": True,
         "project": proj,
@@ -2801,8 +2844,13 @@ async def record_search(
     if min_score < 0.0 or min_score > 1.0:
         return tool_error("INVALID_ARGUMENT", f"min_score 必须在 0.0 至 1.0 之间，收到: {min_score}", tool="record_search")
 
+    if query is None or not str(query).strip():
+        return tool_error("INVALID_ARGUMENT", "query 不能为空！", tool="record_search")
+
     limit = clamp_limit(limit, maximum=100)
     s_query = sanitize_text(query).clean_text
+    if not s_query or not s_query.strip():
+        return tool_error("INVALID_ARGUMENT", "query 不能为空！", tool="record_search")
     embed_res = await get_embedding(s_query)
 
     st = None
@@ -2829,7 +2877,7 @@ async def record_search(
         if "amount" in r:
             r["amount"] = float(r["amount"])
 
-    items = project_fields(rows, fields)
+    items = project_fields(rows, fields, valid_keys=VALID_RECORD_FIELDS)
     return {
         "success": True,
         "project": proj,

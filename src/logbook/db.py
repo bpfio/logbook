@@ -2832,12 +2832,20 @@ class Database:
                         results.append(d)
                     return (results, "semantic_vector") if return_mode else results
 
-                # F-SEARCH-06: 若已执行语义向量检索但 0 命中，且 min_score >= 0.40 时，严禁静默穿透降级全文导致全文假命中
+                # F-SEARCH-06 & F-SEARCH-08:
+                # 若已执行语义向量检索但 0 命中：
+                # 仅当当前过滤范围内确实存在已建立的向量数据时，才阻断穿透降级并安全返回空 (杜绝假命中)；
+                # 若当前范围全量未建立向量 (如 probe 数据集 embedding 全为 NULL)，则平滑降级至全文检索分支 (F-SEARCH-08)
                 if parsed_min_score is not None and parsed_min_score >= 0.40:
-                    return ([], "semantic_vector") if return_mode else []
+                    has_vectors = await conn.fetchval(
+                        f"SELECT EXISTS(SELECT 1 FROM shared.records WHERE {' AND '.join(base_conditions)} AND embedding IS NOT NULL);",
+                        *base_params,
+                    )
+                    if has_vectors:
+                        return ([], "semantic_vector") if return_mode else []
 
             # 2. 降级分支: 全文关键词检索 (tsvector)
-            # 若无 query_vector 或向量检索未命中且 min_score < 0.40，且提供了有效 query_text 时尝试全文召回
+            # 若无 query_vector 或当前范围全量无向量 (F-SEARCH-08) 或向量检索未命中且 min_score < 0.40，且提供了有效 query_text 时尝试全文召回
             if query_text and query_text.strip():
                 params = list(base_params)
                 conditions = list(base_conditions)
@@ -2918,7 +2926,7 @@ class Database:
                 if isinstance(d.get("payload"), str):
                     d["payload"] = json.loads(d["payload"])
                 results.append(d)
-            return results
+            return (results, "browse") if return_mode else results
 
     async def aggregate_record_stats(
         self,

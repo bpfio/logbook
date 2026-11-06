@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (38)
+## 一、任务台账 (39)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-SRV-057 | closed | fix | 根治 clean_text NameError (F-API-08)、解包空串崩溃 (F-SEARCH-07)、补齐 task review 状态机与标量入参 (F-API-09)、无向量库全文平滑降级 (F-SEARCH-08)、project_fields 强校验与 fields 回显 (F-API-03) (0.5.7) | HEAD | waiting_query/finding_query 补齐 clean_text 导入与标量数组兼容 (F-API-08/09); search_records 翻页分支补齐元组返回, record_search 空串严格拦截 (F-SEARCH-07); task_query 纳入 review 状态机与标量兼容 (F-API-09); project_fields 校验未知投影列 (F-API-03); 无向量数据集 (probe) 平滑降级全文检索 (F-SEARCH-08); 65 项单元测试 100% 绿灯 (DEV-2026-11-06-05) |
 | L-SRV-056 | closed | fix | 根治全文静默穿透与超域得分 (F-SEARCH-06)、消除幽灵批次伪造与存在性强防呆 (F-API-07/06)、拦截空串与回显 (F-API-01)、全局 extra='forbid' 拦截笔误与 limit 越界告警 (F-API-03) (0.5.6) | HEAD | 向量 min_score>=0.40 0 命中时严禁降级全文并透出真实 search_mode; ts_rank_cd 单调归一化至 [0, 1) (F-SEARCH-06); 彻底删除 records_bulk 凭空建批, 显式 batch_id 强制预检存在性 (F-API-07/06); record_query status='' 拦截报错并增补 applied_filters (F-API-01); FastMCP 工具全局 extra='forbid' 拦截拼错参数, limit>maximum 阻断报错 (F-API-03); finding_record 支持增量状态流转免重传 summary; 59 单元测试全绿 (DEV-2026-11-06-04) |
 | L-SRV-055 | closed | fix | 服务端校验层结构化信封收口、防伪造、默认 0.40 cutoff 与 8000 端口安全收敛 (0.5.5) | HEAD | 拦截 FastMCP 顶层裸文本收口为 valid JSON 信封 (F-API-02); 非法枚举彻底拒绝静默改默认值 (F-API-04/01); 单据必填 doc_no 防伪造 (F-API-05); 批量建账与强校验 (F-API-06); limit<=0 与未知 fields 修复 (F-API-03); min_score 类型校验与默认 0.40 cutoff (F-SEARCH-04/05); 8000 端口收敛至 127.0.0.1 (F-NET-8000); 向量冷启动预热; 59 单元测试全绿 (DEV-2026-11-06-03) |
 | L-REC-054 | closed | fix | 落实 record_search 相关度契约与 min_score 截断 (F-SEARCH-02)、HNSW ef_search 动态自适应消除 40 条截断 (F-SEARCH-03) 与 SSH 正常断连退出码 0 归一 (0.5.4) | HEAD | record_search 新增 min_score 截断与 score 判读口径契约; HNSW 检索会话动态 SET hnsw.ef_search 消除 SSH 40 条截断; 修复 client_closed 时子进程 terminate 导致的 rc=255 误报; 补齐单元测试 (DEV-2026-11-06-02) |
@@ -57,10 +58,15 @@
 
 ---
 
-## 二、发现台账 (22)
+## 二、发现台账 (27)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-API-08 | accept | P1 | fixed | 补齐 clean_text 导入声明，消除 waiting_query 默认调用及 finding_query 带 status 时 NameError | 导入声明遗漏 clean_text 导致读面部分瘫痪 (DEV-2026-11-06-05) |
+| F-SEARCH-07 | accept | P1 | fixed | search_records 常规浏览分支补齐元组返回值，record_search 严格阻断空串 query | 翻页分支 return_mode 返回单值引发解包崩溃，空串 query 入口层校验拦截 (DEV-2026-11-06-05) |
+| F-API-09 | accept | P3 | fixed | task_query 补齐 review 状态机枚举，统一 query 入参同时兼容标量与数组 | 缺失 review 状态及标量字符串传参报错 (DEV-2026-11-06-05) |
+| F-SEARCH-08 | accept | P3 | fixed | 探测数据集向量存在性，全量无向量数据集平滑降级至 GIN 倒排全文检索并标注 fulltext_fallback | 0.5.6 min_score 截断导致 probe 17 行记录全量 embedding IS NULL 无法全文检索 (DEV-2026-11-06-05) |
+| F-CRED-01 | audit | P2 | fixed | 确证生产环境 SSH 原生仅支持密钥鉴权 (SSH_ENABLE_PASSWORD_AUTH=False)，旧口令物理失效 | 历史会话口令物理无法被用于登录，凭据硬锁 (DEV-2026-11-06-05) |
 | F-SEARCH-06 | accept | P2 | fixed | 消除向量 0 命中时静默穿透全文，归一化 ts_rank_cd 至 [0, 1) 契约域并透出真实 search_mode | 向量 min_score>=0.40 过滤为空时严禁 fallthrough 到全文且 score 2.2 越界 (DEV-2026-11-06-04) |
 | F-API-07 | accept | P2 | fixed | 彻底剔除 records_bulk_upsert 自动建批逻辑，对显式 batch_id 增加存在性预检 | 凭空自造 GHOST-BATCH-88 架空批次表权威性与任务外键 (DEV-2026-11-06-04) |
 | F-API-06 | audit | P2 | fixed | records.batch_id 增加 batches 存在性前置预检防呆 | 传入不存在批次号时直接阻断报错，单条与批量口径统一 (DEV-2026-11-06-04) |
@@ -90,6 +96,31 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-06-05] Logbook 0.5.7: clean_text 补齐、空串解包修复、review 状态机扩充、无向量平滑降级与投影强校验 — ✅ 闭环
+
+响应终态台账排查与验收探测反馈，完成 0.5.7 版本研发与加固：
+
+1. **根治 NameError 与入参形态对齐 (F-API-08, F-API-09)**:
+   - `mcp_server.py` 顶层补齐 `clean_text` 导入声明，消除 `waiting_query` 默认无参调用以及 `finding_query` 携带 `status` 过滤时的 `NameError: name 'clean_text' is not defined` 异常；
+   - `task_query` 签名与校验逻辑扩充 `review` 状态机枚举；
+   - 统一 `task_query`、`finding_query`、`waiting_query` 的 `status`、`priority`、`severity` 参数，同时兼容单值标量字符串（如 `status="open"`）与数组形态（如 `status=["open", "infix"]`），彻底消除调用摩擦。
+2. **根除 record_search 空串崩溃与翻页分支解包缺陷 (F-SEARCH-07)**:
+   - 入口层增加严格空串与纯空白检查，若 `query` 为空直接返回标准 `INVALID_ARGUMENT: query 不能为空！` 信封；
+   - 修复 `db.search_records` 常规翻页分支（分支 3）在 `return_mode=True` 时仅返回单值列表导致的 `ValueError: too many values to unpack (expected 2)` 根因，补齐 `(results, "browse")` 元组返回。
+3. **无向量数据集平滑回退全文检索 (F-SEARCH-08)**:
+   - 在执行语义向量检索 0 命中时，探测当前过滤范围（`project_id`、`dataset_code` 等）是否存在已建立的向量数据（`embedding IS NOT NULL`）；
+   - 若当前项目/数据集全量未建立向量（如隔离探针 `probe` 17 行记录全量 `embedding IS NULL`），平滑降级至 GIN 倒排全文检索，并如实标注 `search_mode: "fulltext_fallback"`，兼顾严格防越域与无向量项目可用性。
+4. **project_fields 强校验与生效维度透出 (F-API-03)**:
+   - 针对各核心实体构建权威合法投影列白名单集合（`VALID_RECORD_FIELDS`、`VALID_TASK_FIELDS`、`VALID_FINDING_FIELDS`、`VALID_WAITING_FIELDS`）；
+   - 当调用方传入未知或非法列（如 `fields=["bogus"]`）时，严格抛出 `ToolError("INVALID_ARGUMENT", "未知投影字段: ...")`，阻止幽灵列投影；
+   - `record_query` 在指定 `fields` 时，于 `applied_filters` 结构体中透明回显 `fields` 列表。
+5. **凭据安全与旧口令失效确证 (F-CRED-01)**:
+   - 确证生产环境 SSH 仅接受 ed25519 密钥认证（`SSH_ENABLE_PASSWORD_AUTH=False`），密码通道原生物理关闭；PostgreSQL 仅监听内部容器网络，历史明文口令物理无效，正式置为 `fixed`。
+6. **单元测试回归与新用例覆盖**:
+   - 新增 `tests/test_audit_v057_fixes.py` 专项覆盖 6 大场景，全库 65 项单元测试 100% 绿灯。
 
 ---
 
