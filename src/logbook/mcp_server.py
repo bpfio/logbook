@@ -187,14 +187,16 @@ def tool_shell(fn):
 
 
 def clamp_limit(limit: int, maximum: int = QUERY_LIMIT_MAX) -> int:
-    """LIMIT 参数校验与钳制 (1..maximum)。非法值或 <=0 严格报错阻断，拒绝静默容错。"""
+    """LIMIT 参数校验 (1..maximum)。非法值、<=0 或 >maximum 严格报错阻断，拒绝静默容错 (F-API-03)。"""
     try:
         n = int(limit)
     except (TypeError, ValueError):
         raise ToolError("INVALID_ARGUMENT", f"limit 必须为有效整数，收到: {limit!r}")
     if n <= 0:
         raise ToolError("INVALID_ARGUMENT", f"limit 必须为大于 0 的正整数，收到: {n}")
-    return min(n, maximum)
+    if n > maximum:
+        raise ToolError("INVALID_ARGUMENT", f"limit 超出允许上限 {maximum}，收到: {n}")
+    return n
 
 
 def project_fields(items: list[dict], fields: list[str] | None) -> list[dict]:
@@ -1073,7 +1075,7 @@ async def task_query(
 async def finding_record(
     project: str,
     id: str,
-    summary: str,
+    summary: str | None = None,
     source: str = "audit",
     severity: FindingSeverityArg = FindingSeverity.P2,
     status: Literal["open", "infix", "fixed", "wontfix", "blocked"] = "open",
@@ -1089,7 +1091,7 @@ async def finding_record(
     字段说明:
     - project: 必填。项目代号。
     - id: 必填。发现项 ID (如 'F-320', 'AUDIT-P1-1')。
-    - summary: 必填。缺陷现象描述与备注。
+    - summary: 可选 (更新已有项时可缺省以保留原描述；新建项必填)。缺陷现象描述与备注。
     - source: 发现来源 (如 'audit', 'realmachine', 'F-322池', 'drill-F15')。
     - severity: 严重级别 ('P1', 'P2', 'P3')。
     - status: 处置状态 ('open', 'infix', 'fixed', 'wontfix', 'blocked')。
@@ -1120,7 +1122,14 @@ async def finding_record(
                 project=proj, task_id=task_id, finding_id=id,
             )
 
-    s_summary = sanitize_text(summary).clean_text
+    s_summary = sanitize_text(summary).clean_text if summary and str(summary).strip() else None
+    if not s_summary:
+        async with db._pool.acquire() as conn:
+            hit = await conn.fetchrow(f'SELECT summary FROM "{proj}".findings WHERE id = $1', id)
+        if not hit:
+            return tool_error("INVALID_ARGUMENT", f"新建缺陷项 [{id}] 必须提供 summary 描述！", tool="finding_record")
+        s_summary = hit["summary"]
+
     s_resolution = sanitize_text(resolution).clean_text if resolution else None
 
     sev_val = severity.value if isinstance(severity, FindingSeverity) else normalize_severity(severity)
@@ -2557,12 +2566,20 @@ async def record_upsert(
         return e.to_dict()
 
     st = normalize_record_status(status)
+
+    b_id = str(batch_id).strip() if batch_id and str(batch_id).strip() else None
+    if b_id:
+        async with db._pool.acquire() as conn:
+            hit = await conn.fetchrow(f'SELECT 1 FROM "{proj}".batches WHERE id = $1', b_id)
+        if not hit:
+            return tool_error("INVALID_ARGUMENT", f"批次 [{b_id}] 在项目 [{proj}] 的批次表中不存在！必须先通过 batch_upsert 建立批次主档后方可关联单据。", tool="record_upsert")
+
     record = DataRecord(
         id=id,
         project_id=proj,
         dataset_code=dataset_code.strip().lower(),
         parent_id=parent_id,
-        batch_id=batch_id,
+        batch_id=b_id,
         doc_no=doc_no.strip(),
         entity_name=entity_name.strip() if entity_name else None,
         amount=amount,
@@ -2633,7 +2650,9 @@ async def record_query(
         return e.to_dict()
 
     st = None
-    if status:
+    if status is not None:
+        if str(status).strip() == "":
+            return tool_error("INVALID_ARGUMENT", "status 不能为空！", tool="record_query")
         try:
             st = normalize_record_status(status)
         except ValueError as exc:
@@ -2663,10 +2682,37 @@ async def record_query(
         if "amount" in r:
             r["amount"] = float(r["amount"])
 
+    applied_filters: dict[str, Any] = {}
+    if dataset_code:
+        applied_filters["dataset_code"] = dataset_code.strip().lower()
+    if doc_no:
+        applied_filters["doc_no"] = doc_no.strip()
+    if entity_name:
+        applied_filters["entity_name"] = entity_name.strip()
+    if date_from:
+        applied_filters["date_from"] = str(date_from).strip()
+    if date_to:
+        applied_filters["date_to"] = str(date_to).strip()
+    if amount_min is not None:
+        applied_filters["amount_min"] = float(amount_min)
+    if amount_max is not None:
+        applied_filters["amount_max"] = float(amount_max)
+    if st:
+        applied_filters["status"] = st
+    if batch_id:
+        applied_filters["batch_id"] = str(batch_id).strip()
+    if parent_id is not None:
+        applied_filters["parent_id"] = int(parent_id)
+    if payload_filter:
+        applied_filters["payload_filter"] = payload_filter
+    if query_text:
+        applied_filters["query_text"] = str(query_text).strip()
+
     items = project_fields(rows, fields)
     return {
         "success": True,
         "project": proj,
+        "applied_filters": applied_filters,
         "total": len(items),
         "items": items,
     }
@@ -2765,7 +2811,7 @@ async def record_search(
             st = normalize_record_status(status)
         except ValueError as exc:
             return tool_error("INVALID_ARGUMENT", str(exc), tool="record_search")
-    rows = await db.search_records(
+    rows, search_mode = await db.search_records(
         project_id=proj,
         query_vector=embed_res.embedding,
         query_text=s_query,
@@ -2774,6 +2820,7 @@ async def record_search(
         limit=limit,
         offset=offset,
         min_score=min_score,
+        return_mode=True,
     )
     for r in rows:
         for k in ("event_date", "created_at", "updated_at"):
@@ -2788,7 +2835,7 @@ async def record_search(
         "project": proj,
         "dataset_code": dataset_code,
         "query": s_query,
-        "search_mode": "semantic_vector" if embed_res.embedding else "fulltext_fallback",
+        "search_mode": search_mode,
         "min_score": min_score,
         "total": len(items),
         "items": items,
@@ -2825,11 +2872,14 @@ async def records_bulk_upsert(
     import time
     t0 = time.time()
 
-    if batch_id:
-        caller_ip = detect_caller_ip()
-        await db.upsert_batch(proj, Batch(id=batch_id, title=f"事实单据批次 {batch_id}", status=BatchStatus.RUNNING, agent_ip=caller_ip))
+    bid = str(batch_id).strip() if batch_id and str(batch_id).strip() else None
+    if bid:
+        async with db._pool.acquire() as conn:
+            hit = await conn.fetchrow(f'SELECT 1 FROM "{proj}".batches WHERE id = $1', bid)
+        if not hit:
+            return tool_error("INVALID_ARGUMENT", f"批次 [{bid}] 在项目 [{proj}] 的批次表中不存在！必须先通过 batch_upsert 建立批次主档后方可关联单据。", tool="records_bulk_upsert")
 
-    bid = batch_id or f"mcp_bulk_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    checked_batches: set[str] = {bid} if bid else set()
     data_records: list[DataRecord] = []
 
     for idx, r in enumerate(records, start=1):
@@ -2846,11 +2896,19 @@ async def records_bulk_upsert(
         except ValueError as exc:
             return tool_error("INVALID_ARGUMENT", f"第 {idx} 条记录状态校验失败: {exc}", tool="records_bulk_upsert")
 
+        r_bid = str(r.get("batch_id")).strip() if r.get("batch_id") and str(r.get("batch_id")).strip() else bid
+        if r_bid and r_bid not in checked_batches:
+            async with db._pool.acquire() as conn:
+                hit = await conn.fetchrow(f'SELECT 1 FROM "{proj}".batches WHERE id = $1', r_bid)
+            if not hit:
+                return tool_error("INVALID_ARGUMENT", f"第 {idx} 条记录的批次 [{r_bid}] 在项目 [{proj}] 的批次表中不存在！", tool="records_bulk_upsert")
+            checked_batches.add(r_bid)
+
         rec = DataRecord(
             project_id=proj,
             dataset_code=d_code,
             parent_id=r.get("parent_id"),
-            batch_id=r.get("batch_id") or bid,
+            batch_id=r_bid,
             doc_no=doc,
             entity_name=str(r["entity_name"]).strip() if r.get("entity_name") else None,
             amount=r.get("amount", 0),
@@ -2880,6 +2938,16 @@ async def records_bulk_upsert(
         "elapsed_ms": elapsed_ms,
         "message": f"成功批量落库 {len(records)} 条单据 (新增: {res.get('inserted', 0)}, 更新: {res.get('updated', 0)}, 耗时: {elapsed_ms}ms)！",
     }
+
+
+# -----------------------------------------------------------------------------
+# F-API-03: 开启全局 extra='forbid' 强校验，彻底杜绝笔误与未知入参被静默吞没
+# -----------------------------------------------------------------------------
+if hasattr(mcp, "_tool_manager"):
+    for _t in mcp._tool_manager.list_tools():
+        if hasattr(_t, "fn_metadata") and hasattr(_t.fn_metadata, "arg_model"):
+            _t.fn_metadata.arg_model.model_config["extra"] = "forbid"
+            _t.fn_metadata.arg_model.model_rebuild(force=True)
 
 
 async def warmup_embedding_probe() -> None:

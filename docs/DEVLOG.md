@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (37)
+## 一、任务台账 (38)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-SRV-056 | closed | fix | 根治全文静默穿透与超域得分 (F-SEARCH-06)、消除幽灵批次伪造与存在性强防呆 (F-API-07/06)、拦截空串与回显 (F-API-01)、全局 extra='forbid' 拦截笔误与 limit 越界告警 (F-API-03) (0.5.6) | HEAD | 向量 min_score>=0.40 0 命中时严禁降级全文并透出真实 search_mode; ts_rank_cd 单调归一化至 [0, 1) (F-SEARCH-06); 彻底删除 records_bulk 凭空建批, 显式 batch_id 强制预检存在性 (F-API-07/06); record_query status='' 拦截报错并增补 applied_filters (F-API-01); FastMCP 工具全局 extra='forbid' 拦截拼错参数, limit>maximum 阻断报错 (F-API-03); finding_record 支持增量状态流转免重传 summary; 59 单元测试全绿 (DEV-2026-11-06-04) |
 | L-SRV-055 | closed | fix | 服务端校验层结构化信封收口、防伪造、默认 0.40 cutoff 与 8000 端口安全收敛 (0.5.5) | HEAD | 拦截 FastMCP 顶层裸文本收口为 valid JSON 信封 (F-API-02); 非法枚举彻底拒绝静默改默认值 (F-API-04/01); 单据必填 doc_no 防伪造 (F-API-05); 批量建账与强校验 (F-API-06); limit<=0 与未知 fields 修复 (F-API-03); min_score 类型校验与默认 0.40 cutoff (F-SEARCH-04/05); 8000 端口收敛至 127.0.0.1 (F-NET-8000); 向量冷启动预热; 59 单元测试全绿 (DEV-2026-11-06-03) |
 | L-REC-054 | closed | fix | 落实 record_search 相关度契约与 min_score 截断 (F-SEARCH-02)、HNSW ef_search 动态自适应消除 40 条截断 (F-SEARCH-03) 与 SSH 正常断连退出码 0 归一 (0.5.4) | HEAD | record_search 新增 min_score 截断与 score 判读口径契约; HNSW 检索会话动态 SET hnsw.ef_search 消除 SSH 40 条截断; 修复 client_closed 时子进程 terminate 导致的 rc=255 误报; 补齐单元测试 (DEV-2026-11-06-02) |
 | L-REC-FIX | closed | fix | 根治 record_search 42P18 参数绑定穿透、SSH 管道 4MB 扩容与超时加固 (0.5.3) | HEAD | 彻底消除 search_records 0 命中 fallthrough 导致的 params 污染与 42P18 报错; SSH 子进程 StreamReader 扩容至 4MB 杜绝大单据 JSON-RPC 假死; 命令超时提升至 20s; 补齐单元测试与迁移链测试 (DEV-2026-11-06-01) |
@@ -56,16 +57,18 @@
 
 ---
 
-## 二、发现台账 (20)
+## 二、发现台账 (22)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-SEARCH-06 | accept | P2 | fixed | 消除向量 0 命中时静默穿透全文，归一化 ts_rank_cd 至 [0, 1) 契约域并透出真实 search_mode | 向量 min_score>=0.40 过滤为空时严禁 fallthrough 到全文且 score 2.2 越界 (DEV-2026-11-06-04) |
+| F-API-07 | accept | P2 | fixed | 彻底剔除 records_bulk_upsert 自动建批逻辑，对显式 batch_id 增加存在性预检 | 凭空自造 GHOST-BATCH-88 架空批次表权威性与任务外键 (DEV-2026-11-06-04) |
+| F-API-06 | audit | P2 | fixed | records.batch_id 增加 batches 存在性前置预检防呆 | 传入不存在批次号时直接阻断报错，单条与批量口径统一 (DEV-2026-11-06-04) |
+| F-API-01 | audit | P2 | fixed | record_query status='' 严格拦截报错并在响应体增补 applied_filters 回显 | status='' 导致过滤失效穿透全量，增补生效维度回显 (DEV-2026-11-06-04) |
+| F-API-03 | audit | P3 | fixed | FastMCP 全局启用 extra='forbid' 拦截笔误参数，limit>maximum 阻断告警 | 传 min_socre/bogus 等笔误参数静默被吞，limit>200 拦截报错 (DEV-2026-11-06-04) |
 | F-API-02 | audit | P2 | fixed | 拦截 FastMCP 顶层异常统一输出 JSON 信封消灭裸文本 | Pydantic 校验异常裸文本回包导致客户端 json.loads 崩溃，统一收口为 {isError, error_type, detail, tool} (DEV-2026-11-06-03) |
 | F-API-04 | audit | P2 | fixed | 消除枚举静默改默认值，非法值一律阻断报错 | normalizer.py 非法枚举拒绝默认容错，抛出 ValueError，状态机治理链杜绝无声篡改 (DEV-2026-11-06-03) |
-| F-API-01 | audit | P2 | fixed | record_query 非法状态与 record_stats 非法维度拦截 | 丢弃条件与返回空 breakdown 改为强校验抛 INVALID_ARGUMENT (DEV-2026-11-06-03) |
 | F-API-05 | audit | P2 | fixed | records_bulk_upsert 缺失 doc_no 拒绝伪造单号 | 彻底删除伪造 mcp_bulk_<timestamp>#... 逻辑，强制 doc_no 必填以保证入库原子性 (DEV-2026-11-06-03) |
-| F-API-06 | audit | P2 | fixed | records 批量写入自动建立 batch_id 记录，tasks 批量写入补齐枚举校验 | 补齐 batches 存在性兜底与任务状态/类型/优先级强校验 (DEV-2026-11-06-03) |
-| F-API-03 | audit | P3 | fixed | clamp_limit<=0 报错拦截，project_fields 空投影保留锚点 key | 消除 limit<=0 静默回 1 条与未知 fields 返回 {} 的误导行为 (DEV-2026-11-06-03) |
 | F-SEARCH-04 | audit | P3 | fixed | record_search min_score 非法类型与越界校验 | 拦截 1.5、-0.1、bool、None 等非法入参，返回合法范围提示 (DEV-2026-11-06-03) |
 | F-SEARCH-05 | accept | P3 | fixed | record_search 默认启用 0.40 cutoff 过滤低质噪音，新增模型连接预热 | 缺省 min_score=0.40 过滤 ~0.30 几何近邻噪音；新增 warmup_embedding_probe 消除冷启动首笔尖峰 (DEV-2026-11-06-03) |
 | F-NET-8000 | audit | P2 | fixed | 8000 端口局域网裸露收敛，默认仅监听 127.0.0.1 | LOGBOOK_ENABLE_SSE 默认关闭，LOGBOOK_SSE_HOST 默认 127.0.0.1，Dockerfile 移除 EXPOSE 8000 (DEV-2026-11-06-03) |
@@ -87,6 +90,31 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-06-04] Logbook 0.5.6: 检索模式契约拉齐、批次实体防伪造、全局笔误拦截与状态流转体验优化 — ✅ 闭环
+
+响应 72 点系统探测与验收反馈，落地 0.5.6 系统性加固：
+
+1. **检索模式真实性与全文分值域契约归一 (F-SEARCH-06)**:
+   - 彻底切断向量高阈值（`min_score >= 0.40`）0 命中时向全文检索分支的静默穿透，直接返回 `total: 0, items: []`，保全严格阈值的语义权威；
+   - `db.search_records` 显式返回实际命中的模式（`semantic_vector` 或 `fulltext_fallback`），上层 MCP 工具据实透出，严禁语义假标；
+   - 全文检索分支的 PostgreSQL `ts_rank_cd` 原始分经由单调递增映射 `round(score / (1.0 + score), 4)` 强制归一化至 `[0.0, 1.0)` 区间，彻底根除得分超过 1.0 的违约行为。
+2. **批次实体权威性防线与防伪造拉齐 (F-API-07, F-API-06)**:
+   - 彻底删除 `records_bulk_upsert` 中任何自动调用 `upsert_batch` 的伪造逻辑；
+   - `record_upsert` 与 `records_bulk_upsert` 统一增加批次存在性前置预检（`SELECT 1 FROM "{project}".batches WHERE id = $1`），若传入不存在的批次号，直接阻断报错 `INVALID_ARGUMENT`；单条与批量口径彻底一致；
+   - 未指定 `batch_id` 时落库为 `NULL`，不擅自伪造 `mcp_bulk_` 单据号。
+3. **空串过滤严格拦截与生效条件回显 (F-API-01)**:
+   - `record_query` 针对 `status=''` 空串严格抛错阻断（`status 不能为空！`），消除静默退化为未过滤全量的问题；
+   - 响应字典统一增补 `applied_filters` 结构体，透明回显所有实际参与 SQL 过滤的业务维度。
+4. **FastMCP 工具全局开启 extra='forbid' 与 limit 越界拦截 (F-API-03)**:
+   - 服务加载时遍历所有已注册工具，为 `arg_model.model_config` 注入 `extra='forbid'`，彻底杜绝 `min_socre=0.9`、`bogus=1` 等拼错或未知参数被静默吞没；
+   - `clamp_limit` 增加上限拦截，`limit > maximum` 时直接抛出 `ToolError("INVALID_ARGUMENT", ...)` 阻断告警。
+5. **消除状态流转摩擦与增量更新支持**:
+   - `finding_record` 的 `summary` 置为可选（`None`），在更新既有发现项时允许仅传 `status` / `resolution` 推进流转，由 SQL `COALESCE` 保留已有描述，免除调用方全文回读负担。
+6. **单元测试回归**:
+   - `tests/test_records.py` 增补针对高阈值截断、笔误参数拦截、批次防伪造存在性校验的完整测试用例，全库 59 项单元测试 100% 绿灯。
 
 ---
 

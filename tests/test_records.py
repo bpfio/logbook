@@ -237,7 +237,7 @@ async def test_search_records_sql_params_unit():
         # 6. 全文检索 + min_score 截断
         mock_conn.fetch.reset_mock()
         mock_conn.fetch.return_value = [
-            {"id": "rec_1", "doc_no": "D1", "score": 0.52, "payload": "{}"},
+            {"id": "rec_1", "doc_no": "D1", "score": 1.50, "payload": "{}"},
             {"id": "rec_2", "doc_no": "D2", "score": 0.20, "payload": "{}"},
         ]
         res = await db.search_records(
@@ -247,11 +247,12 @@ async def test_search_records_sql_params_unit():
         )
         assert len(res) == 1
         assert res[0]["doc_no"] == "D1"
+        assert res[0]["score"] == 0.6
         sql, *params = mock_conn.fetch.call_args[0]
-        # 参数结构: $1 (project_id), $2 (query_text), $3 (min_score), $4 (limit), $5 (offset)
+        # 参数结构: $1 (project_id), $2 (query_text), $3 (min_score 对应的 raw_cutoff), $4 (limit), $5 (offset)
         assert len(params) == 5
         assert params[1] == "增值税"
-        assert params[2] == 0.40
+        assert abs(params[2] - 0.40 / 0.60) < 1e-6
         assert "ts_rank_cd(tsv_content, plainto_tsquery('simple', $2)) >= $3" in sql
 
 
@@ -322,6 +323,63 @@ async def test_validation_layer_rejections_and_envelope_unit():
         assert parsed.get("isError") is True
         assert parsed.get("error_type") == "INVALID_ARGUMENT"
         assert parsed.get("tool") == "record_search"
+
+        # 8. F-API-01: record_query status='' 严格拦截
+        res_empty_st = await record_query(project="test_proj", status="")
+        assert res_empty_st.get("isError") is True
+        assert "status 不能为空" in res_empty_st.get("detail", "")
+
+        # 9. F-API-01: record_query 响应体增补 applied_filters
+        with patch.object(db, "query_records", AsyncMock(return_value=[])):
+            res_rq_ok = await record_query(project="test_proj", dataset_code="tax_reg", limit=10)
+            assert res_rq_ok.get("success") is True
+            assert "applied_filters" in res_rq_ok
+            assert res_rq_ok["applied_filters"].get("dataset_code") == "tax_reg"
+
+        # 10. F-API-03: limit 超过上限 200 拦截告警
+        res_lim_over = await record_search(project="test_proj", query="test", limit=201)
+        assert res_lim_over.get("isError") is True
+        assert "超出允许上限" in res_lim_over.get("detail", "")
+
+        # 11. F-API-03: extra='forbid' 拦截拼错参数 (min_socre=0.9)
+        class FakeTypoParams:
+            name = "record_search"
+            arguments = {"project": "test_proj", "query": "test", "min_socre": 0.9}
+
+        call_typo_res = await mcp._handle_call_tool(None, FakeTypoParams())
+        assert call_typo_res.is_error is True
+        parsed_typo = json.loads(call_typo_res.content[0].text)
+        assert parsed_typo.get("isError") is True
+        assert "Extra inputs are not permitted" in parsed_typo.get("detail", "")
+
+        # 12. F-API-06/07: records_bulk_upsert 批次不存在时拒绝写入，严禁伪造幽灵批次
+        mock_conn = AsyncMock()
+        mock_conn.fetchrow.return_value = None  # 模拟 batches 中不存在该批次
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+
+        with patch.object(db, "_pool", mock_pool):
+            res_ghost_batch = await records_bulk_upsert(
+                project="test_proj",
+                dataset_code="test_ds",
+                batch_id="GHOST-BATCH-88",
+                records=[{"doc_no": "D1", "event_date": "2026-11-06"}],
+            )
+            assert res_ghost_batch.get("isError") is True
+            assert "GHOST-BATCH-88" in res_ghost_batch.get("detail", "")
+            assert "不存在" in res_ghost_batch.get("detail", "")
+
+        # 13. F-SEARCH-06: 向量检索高阈值 (min_score=0.99) 0 命中时严禁降级全文导致假命中
+        with patch.object(db, "search_records", AsyncMock(return_value=([], "semantic_vector"))):
+            res_high_cutoff = await record_search(
+                project="test_proj",
+                query="测试高阈值",
+                min_score=0.99,
+            )
+            assert res_high_cutoff.get("success") is True
+            assert res_high_cutoff.get("total") == 0
+            assert res_high_cutoff.get("items") == []
+            assert res_high_cutoff.get("search_mode") == "semantic_vector"
 
 
 # =============================================================================

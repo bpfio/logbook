@@ -596,8 +596,8 @@ class Database:
                 task_id = EXCLUDED.task_id,
                 reporter = EXCLUDED.reporter,
                 agent_ip = EXCLUDED.agent_ip,
-                summary = EXCLUDED.summary,
-                resolution = EXCLUDED.resolution,
+                summary = COALESCE(NULLIF(EXCLUDED.summary, ''), "{project}".findings.summary),
+                resolution = COALESCE(EXCLUDED.resolution, "{project}".findings.resolution),
                 resolved_at = CASE
                     WHEN EXCLUDED.status = 'fixed'
                         THEN COALESCE("{project}".findings.resolved_at, EXCLUDED.resolved_at, NOW())
@@ -664,8 +664,8 @@ class Database:
                 task_id = EXCLUDED.task_id,
                 reporter = EXCLUDED.reporter,
                 agent_ip = EXCLUDED.agent_ip,
-                summary = EXCLUDED.summary,
-                resolution = EXCLUDED.resolution,
+                summary = COALESCE(NULLIF(EXCLUDED.summary, ''), "{project}".findings.summary),
+                resolution = COALESCE(EXCLUDED.resolution, "{project}".findings.resolution),
                 resolved_at = CASE
                     WHEN EXCLUDED.status = 'fixed'
                         THEN COALESCE("{project}".findings.resolved_at, EXCLUDED.resolved_at, NOW())
@@ -2752,7 +2752,8 @@ class Database:
         limit: int = 10,
         offset: int = 0,
         min_score: float | None = None,
-    ) -> list[dict]:
+        return_mode: bool = False,
+    ) -> list[dict] | tuple[list[dict], str]:
         """语义向量与全文混合检索事实数据记录 (支持 768 维 HNSW 余弦与 tsvector 降级)。"""
         await self.ensure_datasets_and_records_schema()
         limit = self._clamp_limit(limit, default=10)
@@ -2829,10 +2830,14 @@ class Database:
                             if d["score"] < parsed_min_score:
                                 continue
                         results.append(d)
-                    return results
+                    return (results, "semantic_vector") if return_mode else results
+
+                # F-SEARCH-06: 若已执行语义向量检索但 0 命中，且 min_score >= 0.40 时，严禁静默穿透降级全文导致全文假命中
+                if parsed_min_score is not None and parsed_min_score >= 0.40:
+                    return ([], "semantic_vector") if return_mode else []
 
             # 2. 降级分支: 全文关键词检索 (tsvector)
-            # 若无 query_vector 或向量检索未命中任何记录，且提供了有效 query_text 时尝试全文召回
+            # 若无 query_vector 或向量检索未命中且 min_score < 0.40，且提供了有效 query_text 时尝试全文召回
             if query_text and query_text.strip():
                 params = list(base_params)
                 conditions = list(base_conditions)
@@ -2842,7 +2847,12 @@ class Database:
                 conditions.append(f"tsv_content @@ plainto_tsquery('simple', ${q_idx})")
 
                 if parsed_min_score is not None:
-                    params.append(parsed_min_score)
+                    # 归一化得分 score_norm = raw / (1 + raw) >= min_score => raw >= min_score / (1 - min_score)
+                    if parsed_min_score < 1.0:
+                        raw_cutoff = parsed_min_score / (1.0 - parsed_min_score)
+                    else:
+                        raw_cutoff = 9999.0
+                    params.append(raw_cutoff)
                     ms_idx = len(params)
                     conditions.append(f"ts_rank_cd(tsv_content, plainto_tsquery('simple', ${q_idx})) >= ${ms_idx}")
 
@@ -2871,16 +2881,19 @@ class Database:
                         if isinstance(d.get("payload"), str):
                             d["payload"] = json.loads(d["payload"])
                         if "score" in d:
-                            d["score"] = round(float(d["score"]), 4)
+                            raw_score = float(d["score"])
+                            # F-SEARCH-06: 强制单调归一化至 [0.0, 1.0) 契约域
+                            d["score"] = round(raw_score / (1.0 + raw_score), 4)
                         if parsed_min_score is not None and d.get("score") is not None:
                             if d["score"] < parsed_min_score:
                                 continue
                         results.append(d)
-                    return results
+                    return (results, "fulltext_fallback") if return_mode else results
 
             # 若调用方显式提供了 query_vector 或 query_text，在未命中任何单据时安全返回空列表，绝不 Fallthrough 倾泻全表单据
             if query_vector or (query_text and query_text.strip()):
-                return []
+                mode = "semantic_vector" if query_vector else "fulltext_fallback"
+                return ([], mode) if return_mode else []
 
             # 3. 仅在调用方未提供任何搜索词/向量时，作为常规浏览按时间倒序翻页
             params = list(base_params)
