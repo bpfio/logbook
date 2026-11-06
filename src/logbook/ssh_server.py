@@ -299,8 +299,10 @@ async def mcp_bridge_streams(
         except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
             output_eof = True
         except Exception as exc:
-            logger.debug(f"MCP stdout bridge notice: {exc}")
+            logger.error(f"MCP stdout bridge exception: {exc}", exc_info=True)
             output_eof = True
+            maybe_close_child_stdin()
+            _finish_writer(client_writer)
 
     input_task = asyncio.create_task(input_loop())
     output_task = asyncio.create_task(output_loop())
@@ -382,6 +384,7 @@ async def handle_ssh_process(process: asyncssh.SSHServerProcess) -> None:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=4 * 1024 * 1024,
             env=env
         )
     except Exception as e:

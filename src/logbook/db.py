@@ -152,6 +152,7 @@ class Database:
                 pool = None
 
             if pool is None:
+                cmd_timeout = float(os.getenv("LOGBOOK_COMMAND_TIMEOUT", "20.0"))
                 pool = await asyncpg.create_pool(
                     host=self.host,
                     port=self.port,
@@ -160,7 +161,7 @@ class Database:
                     database=self.database,
                     min_size=1,
                     max_size=3,
-                    command_timeout=10.0,
+                    command_timeout=cmd_timeout,
                     init=init_hook,
                     reset=self._reset_data_conn if plane == "data" else None,
                 )
@@ -2749,20 +2750,24 @@ class Database:
         except (TypeError, ValueError):
             offset = 0
 
-        conditions = ["project_id = $1"]
-        params: list[Any] = [project_id]
+        base_conditions = ["project_id = $1"]
+        base_params: list[Any] = [project_id]
 
         if dataset_code:
-            params.append(dataset_code.strip().lower())
-            conditions.append(f"dataset_code = ${len(params)}")
+            base_params.append(dataset_code.strip().lower())
+            base_conditions.append(f"dataset_code = ${len(base_params)}")
         if status:
-            params.append(status.strip().lower())
-            conditions.append(f"status = ${len(params)}")
-
-        where_clause = " AND ".join(conditions)
+            base_params.append(status.strip().lower())
+            base_conditions.append(f"status = ${len(base_params)}")
 
         async with self._pool.acquire() as conn:
+            # 1. 语义向量检索优先
             if query_vector:
+                params = list(base_params)
+                conditions = list(base_conditions)
+                conditions.append("embedding IS NOT NULL")
+                where_clause = " AND ".join(conditions)
+
                 vec_literal = f"[{','.join(str(x) for x in query_vector)}]"
                 params.append(vec_literal)
                 vec_idx = len(params)
@@ -2777,7 +2782,7 @@ class Database:
                            status, payload, created_at, updated_at,
                            (1 - (embedding <=> ${vec_idx}::vector)) AS score
                     FROM shared.records
-                    WHERE {where_clause} AND embedding IS NOT NULL
+                    WHERE {where_clause}
                     ORDER BY embedding <=> ${vec_idx}::vector ASC
                     LIMIT ${lim_idx} OFFSET ${off_idx};
                 """
@@ -2793,11 +2798,17 @@ class Database:
                         results.append(d)
                     return results
 
-            # 降级分支: 全文关键词检索 (tsvector)
+            # 2. 降级分支: 全文关键词检索 (tsvector)
+            # 若无 query_vector 或向量检索未命中任何记录，且提供了有效 query_text 时尝试全文召回
             if query_text and query_text.strip():
-                params.append(query_text.strip())
+                params = list(base_params)
+                conditions = list(base_conditions)
+                q_text = query_text.strip()
+                params.append(q_text)
                 q_idx = len(params)
-                where_clause += f" AND tsv_content @@ plainto_tsquery('simple', ${q_idx})"
+                conditions.append(f"tsv_content @@ plainto_tsquery('simple', ${q_idx})")
+                where_clause = " AND ".join(conditions)
+
                 params.append(limit)
                 lim_idx = len(params)
                 params.append(offset)
@@ -2814,17 +2825,24 @@ class Database:
                     LIMIT ${lim_idx} OFFSET ${off_idx};
                 """
                 rows = await conn.fetch(sql, *params)
-                results = []
-                for r in rows:
-                    d = dict(r)
-                    if isinstance(d.get("payload"), str):
-                        d["payload"] = json.loads(d["payload"])
-                    if "score" in d:
-                        d["score"] = round(float(d["score"]), 4)
-                    results.append(d)
-                return results
+                if rows:
+                    results = []
+                    for r in rows:
+                        d = dict(r)
+                        if isinstance(d.get("payload"), str):
+                            d["payload"] = json.loads(d["payload"])
+                        if "score" in d:
+                            d["score"] = round(float(d["score"]), 4)
+                        results.append(d)
+                    return results
 
-            # 若无向量也无 query_text，按常规时间倒序
+            # 若调用方显式提供了 query_vector 或 query_text，在未命中任何单据时安全返回空列表，绝不 Fallthrough 倾泻全表单据
+            if query_vector or (query_text and query_text.strip()):
+                return []
+
+            # 3. 仅在调用方未提供任何搜索词/向量时，作为常规浏览按时间倒序翻页
+            params = list(base_params)
+            where_clause = " AND ".join(base_conditions)
             params.append(limit)
             lim_idx = len(params)
             params.append(offset)

@@ -13,6 +13,7 @@
 
 from datetime import date
 from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
@@ -33,6 +34,7 @@ from logbook.mcp_server import (
     record_upsert,
     record_query,
     record_stats,
+    record_search,
 )
 
 
@@ -136,6 +138,69 @@ async def test_mcp_record_tools_negotiation_unit():
 
     res3 = await record_stats(project="")
     assert res3.get("isError") is True
+
+    res4 = await record_search(project="", query="test")
+    assert res4.get("isError") is True
+
+
+@pytest.mark.asyncio
+async def test_search_records_sql_params_unit():
+    """单元测试: 验证 search_records 各分支参数绑定严格对齐，零未引用占位符，且 0 命中不穿透。"""
+    mock_conn = AsyncMock()
+    mock_conn.fetch.return_value = []
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+
+    with patch.object(db, "_pool", mock_pool), \
+         patch.object(db, "ensure_datasets_and_records_schema", AsyncMock()):
+
+        # 1. 向量分支 (无 dataset_code): 必须有且仅有 $1 (project_id), $2 (vec), $3 (limit), $4 (offset)
+        res = await db.search_records(project_id="brix", query_vector=[0.1] * 768)
+        assert res == []
+        assert mock_conn.fetch.call_count == 1
+        sql, *params = mock_conn.fetch.call_args[0]
+        assert len(params) == 4
+        assert params[0] == "brix"
+        assert params[1].startswith("[0.1,")
+        assert params[2] == 10
+        assert params[3] == 0
+        assert "$1" in sql and "$2::vector" in sql and "LIMIT $3 OFFSET $4" in sql
+
+        # 2. 向量分支 (带 dataset_code): 必须有且仅有 $1 (project_id), $2 (dataset_code), $3 (vec), $4 (limit), $5 (offset)
+        mock_conn.fetch.reset_mock()
+        res = await db.search_records(project_id="taxbase", dataset_code="tax_reg", query_vector=[0.1] * 768)
+        assert res == []
+        assert mock_conn.fetch.call_count == 1
+        sql, *params = mock_conn.fetch.call_args[0]
+        assert len(params) == 5
+        assert params[0] == "taxbase"
+        assert params[1] == "tax_reg"
+        assert params[2].startswith("[0.1,")
+        assert params[3] == 10
+        assert params[4] == 0
+        assert "$1" in sql and "dataset_code = $2" in sql and "$3::vector" in sql and "LIMIT $4 OFFSET $5" in sql
+
+        # 3. 降级全文检索 (带 query_text): 必须有且仅有 $1 (project_id), $2 (query_text), $3 (limit), $4 (offset)
+        mock_conn.fetch.reset_mock()
+        res = await db.search_records(project_id="taxbase", query_text="增值税")
+        assert res == []
+        assert mock_conn.fetch.call_count == 1
+        sql, *params = mock_conn.fetch.call_args[0]
+        assert len(params) == 4
+        assert params[0] == "taxbase"
+        assert params[1] == "增值税"
+        assert "$1" in sql and "plainto_tsquery('simple', $2)" in sql and "LIMIT $3 OFFSET $4" in sql
+
+        # 4. 常规浏览 (无 vector、无 query_text): 必须有且仅有 $1 (project_id), $2 (limit), $3 (offset)
+        mock_conn.fetch.reset_mock()
+        res = await db.search_records(project_id="taxbase")
+        assert res == []
+        assert mock_conn.fetch.call_count == 1
+        sql, *params = mock_conn.fetch.call_args[0]
+        assert len(params) == 3
+        assert params[0] == "taxbase"
+        assert "$1" in sql and "LIMIT $2 OFFSET $3" in sql
 
 
 # =============================================================================

@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (34)
+## 一、任务台账 (35)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-REC-FIX | closed | fix | 根治 record_search 42P18 参数绑定穿透、SSH 管道 4MB 扩容与超时加固 (0.5.3) | HEAD | 彻底消除 search_records 0 命中 fallthrough 导致的 params 污染与 42P18 报错; SSH 子进程 StreamReader 扩容至 4MB 杜绝大单据 JSON-RPC 假死; 命令超时提升至 20s; 补齐单元测试与迁移链测试 (DEV-2026-11-06-01) |
 | L-REC-052 | closed | feat | 通用事实表 shared.records 768维语义向量底座 (迁移14) + records_bulk_upsert 批量落库 + record_search 混合检索与探针加固 (0.5.2) | HEAD | 贯彻用户裁决: DDL 迁移 14 落地 768 维 HNSW 索引; 新增 records_bulk_upsert 单事务批量落库消灭 5000 次 RPC 往返; 新增 record_search 语义+全文混合检索; 修复 AsyncSSH echo 探针编码与 FastMCP SSE 原生监听; 46 工具真机联测全绿, 栈内存 ~100.6MB (DEV-2026-11-03-02) |
 | L-PROJ-UPD | closed | feat | project_update MCP 空间元数据修改原语落地与 taxbase 备注名纠偏 | HEAD | 新增 project_update 闭环项目元数据读写; 纠偏 taxbase 标题为「税收法规库」; 验证群组权限拦截与幂等保护 (DEV-2026-11-03-02) |
 | L-OPS-DB128 | closed | ops | QNAP 生产容器 logbook-postgres 内存配额提升至 128MB 与 autovacuum 稳态加固 | HEAD | 根治 DB 48M 配额吃满 70% 导致 autovacuum (64M) 与 pgvector 潜在 OOM 隐患; 热重载 compose.yaml 生效 128MB, 剩余余量 103MB+; 43 工具与 brief 现场验证全绿 (DevLog #342, DEV-2026-11-03-01) |
@@ -72,6 +73,24 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-06-01] Logbook 0.5.3: record_search 42P18 绑定参数穿透根治、SSH 管道扩容与稳态加固 — ✅ 闭环
+
+响应用户核验与修复授权，彻底排查并根治 `record_search` 在部署态暴露的 SQL 占位符报错与大单据假死缺陷：
+
+1. **根治 `search_records` 分支穿透与参数污染缺陷 (`src/logbook/db.py`)**:
+   - **根因消除**: 原代码中向量检索未命中（0 条）时因 `if rows: return` 评估为 False，未经拦截穿透（Fallthrough）至降级时间倒序分支；而此前 `params` 列表已被注入了 `$2`（`vec_literal`），降级分支又追加了新的 `limit` 与 `offset`（变为 `$5`、`$6`），导致传给预备语句的参数列表中 `$2`（或 `$3`）未被 SQL 引用，触发 PostgreSQL `42P18: could not determine data type of parameter $N`；
+   - **参数隔离与干净返回**: 各分支（向量召回、全文关键词降级、常规时间倒序）各自构建独立的 `params` 副本与 SQL 条件列表，严格保证占位符 `$1..$N` 与实参 100% 对应；显式指定检索词/向量且未命中时严格返回 `[]`，彻底阻断越界 Fallthrough。
+2. **根治 SSH MCP 管道 64KB 溢出与异常失联假死 (`src/logbook/ssh_server.py`)**:
+   - **4MB 单行缓冲扩容**: 在 `asyncio.create_subprocess_exec` 中显式设置 `limit=4 * 1024 * 1024`（4MB），彻底解决 Python `asyncio.StreamReader` 默认 64KB 限制在检索 10 条富文本大单据（如财税法规）时抛出 `ValueError: Chunk exceed the limit` 故障；
+   - **管道异常保护**: `output_loop` 遇到未捕获异常时主动关闭客户端 writer 并记录日志，杜绝服务端静默失联导致客户端挂起 3 分钟超时。
+3. **数据库命令超时自适应扩展 (`src/logbook/db.py`)**:
+   - 将 `Database.connect()` 连接池 `command_timeout` 提升为环境变量可配置项 `LOGBOOK_COMMAND_TIMEOUT`，默认值由 10.0s 放宽至 20.0s，为 5000+ 条通用事实单据的向量余弦扫描提供安全余量。
+4. **测试套件与迁移基线对齐**:
+   - 在 `tests/test_records.py` 中新增 `test_search_records_sql_params_unit` 单元测试，全量覆盖向量、全文、常规时间倒序全部分支的参数数量、SQL 占位符一致性及 0 命中不穿透断言；
+   - 修复 `tests/test_migrate_unit.py` 中因 0.5.2 迁移 14 新增后未更新的测试断言范围（`range(1, 15)`）；全库 58 项单元测试 100% 绿色通过。
 
 ---
 

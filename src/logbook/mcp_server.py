@@ -2650,7 +2650,7 @@ async def record_search(
     rows = await db.search_records(
         project_id=proj,
         query_vector=embed_res.embedding,
-        query_text=s_query if not embed_res.embedding else None,
+        query_text=s_query,
         dataset_code=dataset_code,
         status=st,
         limit=limit,
