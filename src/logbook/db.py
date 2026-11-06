@@ -2780,8 +2780,16 @@ class Database:
             base_conditions.append(f"status = ${len(base_params)}")
 
         async with self._pool.acquire() as conn:
-            # 1. 语义向量检索优先
+            # 探测当前过滤范围下是否存在已建立向量的记录 (F-SEARCH-08)
+            has_vectors = False
             if query_vector:
+                has_vectors = await conn.fetchval(
+                    f"SELECT EXISTS(SELECT 1 FROM shared.records WHERE {' AND '.join(base_conditions)} AND embedding IS NOT NULL);",
+                    *base_params,
+                )
+
+            # 1. 语义向量检索优先 (仅当当前过滤范围内存在已建向量时执行)
+            if query_vector and has_vectors:
                 params = list(base_params)
                 conditions = list(base_conditions)
                 conditions.append("embedding IS NOT NULL")
@@ -2832,20 +2840,12 @@ class Database:
                         results.append(d)
                     return (results, "semantic_vector") if return_mode else results
 
-                # F-SEARCH-06 & F-SEARCH-08:
-                # 若已执行语义向量检索但 0 命中：
-                # 仅当当前过滤范围内确实存在已建立的向量数据时，才阻断穿透降级并安全返回空 (杜绝假命中)；
-                # 若当前范围全量未建立向量 (如 probe 数据集 embedding 全为 NULL)，则平滑降级至全文检索分支 (F-SEARCH-08)
+                # F-SEARCH-06: 该项目已建立向量，若语义向量检索 0 命中且 min_score >= 0.40，严禁静默穿透降级全文导致全文假命中
                 if parsed_min_score is not None and parsed_min_score >= 0.40:
-                    has_vectors = await conn.fetchval(
-                        f"SELECT EXISTS(SELECT 1 FROM shared.records WHERE {' AND '.join(base_conditions)} AND embedding IS NOT NULL);",
-                        *base_params,
-                    )
-                    if has_vectors:
-                        return ([], "semantic_vector") if return_mode else []
+                    return ([], "semantic_vector") if return_mode else []
 
             # 2. 降级分支: 全文关键词检索 (tsvector)
-            # 若无 query_vector 或当前范围全量无向量 (F-SEARCH-08) 或向量检索未命中且 min_score < 0.40，且提供了有效 query_text 时尝试全文召回
+            # 若无 query_vector 或当前范围全量无向量 (not has_vectors) 或向量检索未命中且 min_score < 0.40，且提供了有效 query_text 时尝试全文召回
             if query_text and query_text.strip():
                 params = list(base_params)
                 conditions = list(base_conditions)
@@ -2854,7 +2854,10 @@ class Database:
                 q_idx = len(params)
                 conditions.append(f"tsv_content @@ plainto_tsquery('simple', ${q_idx})")
 
-                if parsed_min_score is not None:
+                # 注意: 若是无向量库平滑降级 (query_vector 存在但 not has_vectors)，
+                # parsed_min_score 是为向量余弦相似度设定的默认截断阈值，不应用于阻断全文精确匹配 (F-SEARCH-08)
+                is_vector_fallback = bool(query_vector and not has_vectors)
+                if parsed_min_score is not None and not is_vector_fallback:
                     # 归一化得分 score_norm = raw / (1 + raw) >= min_score => raw >= min_score / (1 - min_score)
                     if parsed_min_score < 1.0:
                         raw_cutoff = parsed_min_score / (1.0 - parsed_min_score)
@@ -2892,7 +2895,7 @@ class Database:
                             raw_score = float(d["score"])
                             # F-SEARCH-06: 强制单调归一化至 [0.0, 1.0) 契约域
                             d["score"] = round(raw_score / (1.0 + raw_score), 4)
-                        if parsed_min_score is not None and d.get("score") is not None:
+                        if parsed_min_score is not None and not is_vector_fallback and d.get("score") is not None:
                             if d["score"] < parsed_min_score:
                                 continue
                         results.append(d)
@@ -2900,7 +2903,7 @@ class Database:
 
             # 若调用方显式提供了 query_vector 或 query_text，在未命中任何单据时安全返回空列表，绝不 Fallthrough 倾泻全表单据
             if query_vector or (query_text and query_text.strip()):
-                mode = "semantic_vector" if query_vector else "fulltext_fallback"
+                mode = "semantic_vector" if (query_vector and has_vectors) else "fulltext_fallback"
                 return ([], mode) if return_mode else []
 
             # 3. 仅在调用方未提供任何搜索词/向量时，作为常规浏览按时间倒序翻页
