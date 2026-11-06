@@ -39,7 +39,9 @@ def test_research_enums_and_normalizer():
     assert normalize_research_category("arch") == "architecture"
     assert normalize_research_category("lib") == "library"
     assert normalize_research_category("net") == "network"
-    assert normalize_research_category("unknown_xyz") == "architecture"
+    with pytest.raises(ValueError, match="无效的 research category"):
+        normalize_research_category("unknown_xyz")
+    assert normalize_research_category("unknown_xyz", default="architecture") == "architecture"
 
     assert normalize_research_status("done") == "completed"
     assert normalize_research_status("wip") == "in_progress"

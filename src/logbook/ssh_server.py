@@ -555,10 +555,14 @@ async def run_server():
     server = await start_ssh_server(host, port)
     logger.info(f"Logbook Server Ready on {host}:{port}")
 
-    # 并行拉起 FastMCP 原生 SSE HTTP 服务 (0.5.1)
-    sse_enabled = _env_enabled("LOGBOOK_ENABLE_SSE", default=True)
+    # 并行拉起 FastMCP 原生 SSE HTTP 服务 (默认仅回环 127.0.0.1 监听，消除局域网裸露隐患 F-NET-8000)
+    sse_enabled = _env_enabled("LOGBOOK_ENABLE_SSE", default=False)
     sse_port = int(os.getenv("LOGBOOK_SSE_PORT", "8000"))
-    sse_host = os.getenv("LOGBOOK_SSE_HOST", "0.0.0.0")
+    sse_host = os.getenv("LOGBOOK_SSE_HOST", "127.0.0.1")
+
+    # 启动后台预热任务 (消除客户端首笔请求的冷启动握手尖峰 F-SEARCH-05)
+    from logbook.mcp_server import warmup_embedding_probe
+    asyncio.create_task(warmup_embedding_probe())
 
     tasks = [asyncio.create_task(server.wait_closed())]
     if sse_enabled:

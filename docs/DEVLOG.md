@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (36)
+## 一、任务台账 (37)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-SRV-055 | closed | fix | 服务端校验层结构化信封收口、防伪造、默认 0.40 cutoff 与 8000 端口安全收敛 (0.5.5) | HEAD | 拦截 FastMCP 顶层裸文本收口为 valid JSON 信封 (F-API-02); 非法枚举彻底拒绝静默改默认值 (F-API-04/01); 单据必填 doc_no 防伪造 (F-API-05); 批量建账与强校验 (F-API-06); limit<=0 与未知 fields 修复 (F-API-03); min_score 类型校验与默认 0.40 cutoff (F-SEARCH-04/05); 8000 端口收敛至 127.0.0.1 (F-NET-8000); 向量冷启动预热; 59 单元测试全绿 (DEV-2026-11-06-03) |
 | L-REC-054 | closed | fix | 落实 record_search 相关度契约与 min_score 截断 (F-SEARCH-02)、HNSW ef_search 动态自适应消除 40 条截断 (F-SEARCH-03) 与 SSH 正常断连退出码 0 归一 (0.5.4) | HEAD | record_search 新增 min_score 截断与 score 判读口径契约; HNSW 检索会话动态 SET hnsw.ef_search 消除 SSH 40 条截断; 修复 client_closed 时子进程 terminate 导致的 rc=255 误报; 补齐单元测试 (DEV-2026-11-06-02) |
 | L-REC-FIX | closed | fix | 根治 record_search 42P18 参数绑定穿透、SSH 管道 4MB 扩容与超时加固 (0.5.3) | HEAD | 彻底消除 search_records 0 命中 fallthrough 导致的 params 污染与 42P18 报错; SSH 子进程 StreamReader 扩容至 4MB 杜绝大单据 JSON-RPC 假死; 命令超时提升至 20s; 补齐单元测试与迁移链测试 (DEV-2026-11-06-01) |
 | L-REC-052 | closed | feat | 通用事实表 shared.records 768维语义向量底座 (迁移14) + records_bulk_upsert 批量落库 + record_search 混合检索与探针加固 (0.5.2) | HEAD | 贯彻用户裁决: DDL 迁移 14 落地 768 维 HNSW 索引; 新增 records_bulk_upsert 单事务批量落库消灭 5000 次 RPC 往返; 新增 record_search 语义+全文混合检索; 修复 AsyncSSH echo 探针编码与 FastMCP SSE 原生监听; 46 工具真机联测全绿, 栈内存 ~100.6MB (DEV-2026-11-03-02) |
@@ -55,10 +56,20 @@
 
 ---
 
-## 二、发现台账 (10)
+## 二、发现台账 (20)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-API-02 | audit | P2 | fixed | 拦截 FastMCP 顶层异常统一输出 JSON 信封消灭裸文本 | Pydantic 校验异常裸文本回包导致客户端 json.loads 崩溃，统一收口为 {isError, error_type, detail, tool} (DEV-2026-11-06-03) |
+| F-API-04 | audit | P2 | fixed | 消除枚举静默改默认值，非法值一律阻断报错 | normalizer.py 非法枚举拒绝默认容错，抛出 ValueError，状态机治理链杜绝无声篡改 (DEV-2026-11-06-03) |
+| F-API-01 | audit | P2 | fixed | record_query 非法状态与 record_stats 非法维度拦截 | 丢弃条件与返回空 breakdown 改为强校验抛 INVALID_ARGUMENT (DEV-2026-11-06-03) |
+| F-API-05 | audit | P2 | fixed | records_bulk_upsert 缺失 doc_no 拒绝伪造单号 | 彻底删除伪造 mcp_bulk_<timestamp>#... 逻辑，强制 doc_no 必填以保证入库原子性 (DEV-2026-11-06-03) |
+| F-API-06 | audit | P2 | fixed | records 批量写入自动建立 batch_id 记录，tasks 批量写入补齐枚举校验 | 补齐 batches 存在性兜底与任务状态/类型/优先级强校验 (DEV-2026-11-06-03) |
+| F-API-03 | audit | P3 | fixed | clamp_limit<=0 报错拦截，project_fields 空投影保留锚点 key | 消除 limit<=0 静默回 1 条与未知 fields 返回 {} 的误导行为 (DEV-2026-11-06-03) |
+| F-SEARCH-04 | audit | P3 | fixed | record_search min_score 非法类型与越界校验 | 拦截 1.5、-0.1、bool、None 等非法入参，返回合法范围提示 (DEV-2026-11-06-03) |
+| F-SEARCH-05 | accept | P3 | fixed | record_search 默认启用 0.40 cutoff 过滤低质噪音，新增模型连接预热 | 缺省 min_score=0.40 过滤 ~0.30 几何近邻噪音；新增 warmup_embedding_probe 消除冷启动首笔尖峰 (DEV-2026-11-06-03) |
+| F-NET-8000 | audit | P2 | fixed | 8000 端口局域网裸露收敛，默认仅监听 127.0.0.1 | LOGBOOK_ENABLE_SSE 默认关闭，LOGBOOK_SSE_HOST 默认 127.0.0.1，Dockerfile 移除 EXPOSE 8000 (DEV-2026-11-06-03) |
+| F-CRED-01 | audit | P2 | fixed | 生产环境 SSH 鉴权加固与旧口令失效确认 | 确认凭据硬锁与环境变量脱敏 (DEV-2026-11-06-03) |
 | F-SEARCH-03 | accept | P2 | fixed | 动态 SET hnsw.ef_search 消除 pgvector 默认 40 截断并归一 SSH 退出码为 0 | SSH 检索 limit>40 硬钳 40 破坏一致性; 客户端正常断连后子进程 terminate 报 rc=255 误报 (DEV-2026-11-06-02) |
 | F-SEARCH-02 | accept | P2 | fixed | record_search 增加 min_score 过滤并在工具描述中确立 score >= 0.45 判读契约 | 密集向量 Top-K 近邻导致无意义查询返回 ~0.35 弱近邻且下游 Agent 无法判定置信度 (DEV-2026-11-06-02) |
 | F-REL-02 | audit | P3 | fixed | deploy/qnap/compose.yaml.example 与 .env.example 补 LOGBOOK_ADMIN_AGENTS 文档行与示例 | 消除部署漏配风险，闭环 (DEV-2026-10-19-01) |
@@ -76,6 +87,32 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-06-03] Logbook 0.5.5: 服务端校验层信封收口、防伪造、默认 0.40 cutoff 与 8000 端口收敛 — ✅ 闭环
+
+响应全量缺陷台账复查，落地校验层健壮化、防伪造保障、检索降噪与端口安全收敛：
+
+1. **FastMCP 顶层异常信封收口 (F-API-02 SSOT)**:
+   - 注入 `_safe_mcp_handle_call_tool`，拦截 FastMCP 在参数解析阶段捕获的所有裸文本异常（Pydantic `ValidationError` 等），将其标准化包装为结构化 JSON 信封 `{isError: true, error_type: "INVALID_ARGUMENT", detail: text, tool: name}`，彻底消除客户端 `json.loads` 崩溃。
+2. **枚举值合法性强校验 (F-API-04, F-API-01)**:
+   - 改造 `normalizer.py`：对 `status`、`priority`、`severity`、`task_type`、`dataset_category`、`record_status` 等枚举值，非法输入且未指定 default 时一律抛出 `ValueError`，杜绝静默改默认值篡改状态机；
+   - `task_query`、`finding_query`、`waiting_query`、`record_query`、`record_stats` 全面增加合法枚举强校验，非法维度与非法状态直接返回标准化 `INVALID_ARGUMENT` 报错。
+3. **单据 doc_no 防伪造与批量事务保障 (F-API-05, F-API-06)**:
+   - `records_bulk_upsert`: 彻底删除缺失 `doc_no` 时伪造 `#000004` 的逻辑，强制单据编号必填，缺失即报错阻断；若传入 `batch_id` 则自动建账保障外键一致性；
+   - `tasks_bulk_upsert`: 增加对每项任务 `id`、`title` 必填性及 `status`、`task_type`、`priority` 的枚举合法性逐项校验。
+4. **参数极限钳制与投影锚点 (F-API-03)**:
+   - `clamp_limit`: 针对非法整数或 `<=0` 严格抛出 `ToolError("INVALID_ARGUMENT", ...)`，拒绝静默容错；
+   - `project_fields`: 修复字段全不匹配时返回空字典 `{}` 的误读行为，空投影保留唯一主键锚点（如 `id` 或 `doc_no`）。
+5. **检索相关度降噪与冷启动消除 (F-SEARCH-04, F-SEARCH-05)**:
+   - `record_search`: `min_score` 缺省值设为 `0.40`，低于 0.40 的弱相关几何近邻默认截断，传 `min_score=0.0` 兼容全量行为；严格校验 `min_score` 类型为浮点数并限定在 `[0.0, 1.0]` 区间；
+   - 新增 `warmup_embedding_probe()` 异步后台预热，服务拉起时自动触发首笔轻量探测，消除客户端首笔调用的冷启动鉴权/握手延迟。
+6. **网络端口安全收敛 (F-NET-8000, F-CRED-01)**:
+   - `LOGBOOK_ENABLE_SSE` 默认置为 `False`，`LOGBOOK_SSE_HOST` 默认收敛为 `127.0.0.1`，消除内网 8000 端口裸露；
+   - `Dockerfile` 移除 `EXPOSE 8000`，仅保留 SSH `22`；确认凭据环境脱敏。
+7. **自动化测试与回归**:
+   - `tests/test_records.py` 增设 `test_validation_layer_rejections_and_envelope_unit` 专项测试，全库 59 项单元测试 100% 通过。
 
 ---
 

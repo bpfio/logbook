@@ -153,34 +153,79 @@ def clean_text(val: Any) -> str:
     return text.lower()
 
 
-def normalize_status(val: Any, default: str = "planned") -> str:
-    """将输入状态归一化为正典合法的 Literal 状态。"""
+def normalize_status(val: Any, default: str | None = None) -> str:
+    """将输入状态归一化为正典合法的 Literal 状态。非法输入且未指定 default 时抛出 ValueError。"""
+    if val is None or str(val).strip() == "":
+        if default is not None:
+            return default
+        raise ValueError("status 不能为空！")
     c = clean_text(val)
-    return STATUS_MAP.get(c, default)
+    if c in STATUS_MAP:
+        return STATUS_MAP[c]
+    if default is not None:
+        return default
+    valid_opts = sorted(set(STATUS_MAP.values()))
+    raise ValueError(f"无效的 status: '{val}'。合法选项为: {', '.join(valid_opts)}")
 
 
-def normalize_task_type(val: Any, default: str = "fix") -> str:
-    """将输入类型归一化为正典合法的 Literal 任务类型。"""
+def normalize_task_type(val: Any, default: str | None = None) -> str:
+    """将输入类型归一化为正典合法的 Literal 任务类型。非法输入且未指定 default 时抛出 ValueError。"""
+    if val is None or str(val).strip() == "":
+        if default is not None:
+            return default
+        raise ValueError("task_type 不能为空！")
     c = clean_text(val)
-    return TYPE_MAP.get(c, default)
+    if c in TYPE_MAP:
+        return TYPE_MAP[c]
+    if default is not None:
+        return default
+    valid_opts = sorted(set(TYPE_MAP.values()))
+    raise ValueError(f"无效的 task_type: '{val}'。合法选项为: {', '.join(valid_opts)}")
 
 
-def normalize_priority(val: Any, default: str = "P2") -> str:
-    """将输入优先级归一化为 P0/P1/P2/P3。"""
-    c = clean_text(val).upper()
-    return PRIORITY_MAP.get(c.lower(), default)
-
-
-def normalize_severity(val: Any, default: str = "P2") -> str:
-    """将输入严重度归一化为 P1/P2/P3。"""
+def normalize_priority(val: Any, default: str | None = None) -> str:
+    """将输入优先级归一化为 P0/P1/P2/P3。非法输入且未指定 default 时抛出 ValueError。"""
+    if val is None or str(val).strip() == "":
+        if default is not None:
+            return default
+        raise ValueError("priority 不能为空！")
     c = clean_text(val).lower()
-    return SEVERITY_MAP.get(c, default)
+    if c in PRIORITY_MAP:
+        return PRIORITY_MAP[c]
+    if default is not None:
+        return default
+    valid_opts = sorted(set(PRIORITY_MAP.values()))
+    raise ValueError(f"无效的 priority: '{val}'。合法选项为: {', '.join(valid_opts)}")
 
 
-def normalize_waiting_category(val: Any, default: str = "user") -> str:
-    """将输入待办类别归一化为 user/external/closing。"""
+def normalize_severity(val: Any, default: str | None = None) -> str:
+    """将输入严重度归一化为 P1/P2/P3。非法输入且未指定 default 时抛出 ValueError。"""
+    if val is None or str(val).strip() == "":
+        if default is not None:
+            return default
+        raise ValueError("severity 不能为空！")
+    c = clean_text(val).lower()
+    if c in SEVERITY_MAP:
+        return SEVERITY_MAP[c]
+    if default is not None:
+        return default
+    valid_opts = sorted(set(SEVERITY_MAP.values()))
+    raise ValueError(f"无效的 severity: '{val}'。合法选项为: {', '.join(valid_opts)}")
+
+
+def normalize_waiting_category(val: Any, default: str | None = None) -> str:
+    """将输入待办类别归一化为 user/external/closing。非法输入且未指定 default 时抛出 ValueError。"""
+    if val is None or str(val).strip() == "":
+        if default is not None:
+            return default
+        raise ValueError("waiting category 不能为空！")
     c = clean_text(val)
-    return WAITING_CATEGORY_MAP.get(c, default)
+    if c in WAITING_CATEGORY_MAP:
+        return WAITING_CATEGORY_MAP[c]
+    if default is not None:
+        return default
+    valid_opts = sorted(set(WAITING_CATEGORY_MAP.values()))
+    raise ValueError(f"无效的 waiting category: '{val}'。合法选项为: {', '.join(valid_opts)}")
 
 
 RESEARCH_CATEGORY_MAP = {
@@ -259,16 +304,34 @@ RESEARCH_STATUS_MAP = {
 }
 
 
-def normalize_research_category(val: Any, default: str = "architecture") -> str:
-    """将输入调研分类归一化为正典合法的 ResearchCategory。"""
+def normalize_research_category(val: Any, default: str | None = None) -> str:
+    """将输入调研分类归一化为正典合法的 ResearchCategory。非法输入且未指定 default 时抛出 ValueError。"""
+    if val is None or str(val).strip() == "":
+        if default is not None:
+            return default
+        raise ValueError("research category 不能为空！")
     c = clean_text(val)
-    return RESEARCH_CATEGORY_MAP.get(c, default)
+    if c in RESEARCH_CATEGORY_MAP:
+        return RESEARCH_CATEGORY_MAP[c]
+    if default is not None:
+        return default
+    valid_opts = sorted(set(RESEARCH_CATEGORY_MAP.values()))
+    raise ValueError(f"无效的 research category: '{val}'。合法选项为: {', '.join(valid_opts)}")
 
 
-def normalize_research_status(val: Any, default: str = "completed") -> str:
-    """将输入调研状态归一化为正典合法的 ResearchStatus。"""
+def normalize_research_status(val: Any, default: str | None = None) -> str:
+    """将输入调研状态归一化为正典合法的 ResearchStatus。非法输入且未指定 default 时抛出 ValueError。"""
+    if val is None or str(val).strip() == "":
+        if default is not None:
+            return default
+        raise ValueError("research status 不能为空！")
     c = clean_text(val)
-    return RESEARCH_STATUS_MAP.get(c, default)
+    if c in RESEARCH_STATUS_MAP:
+        return RESEARCH_STATUS_MAP[c]
+    if default is not None:
+        return default
+    valid_opts = sorted(set(RESEARCH_STATUS_MAP.values()))
+    raise ValueError(f"无效的 research status: '{val}'。合法选项为: {', '.join(valid_opts)}")
 
 
 # ============================================================================
@@ -303,16 +366,34 @@ RECORD_STATUS_MAP = {
 }
 
 
-def normalize_dataset_category(val: Any, default: str = "general") -> str:
-    """将输入数据集分类归一化为正典合法的 DatasetCategory。"""
+def normalize_dataset_category(val: Any, default: str | None = None) -> str:
+    """将输入数据集分类归一化为正典合法的 DatasetCategory。非法输入且未指定 default 时抛出 ValueError。"""
+    if val is None or str(val).strip() == "":
+        if default is not None:
+            return default
+        raise ValueError("dataset category 不能为空！")
     c = clean_text(val)
-    return DATASET_CATEGORY_MAP.get(c, default)
+    if c in DATASET_CATEGORY_MAP:
+        return DATASET_CATEGORY_MAP[c]
+    if default is not None:
+        return default
+    valid_opts = sorted(set(DATASET_CATEGORY_MAP.values()))
+    raise ValueError(f"无效的 dataset category: '{val}'。合法选项为: {', '.join(valid_opts)}")
 
 
-def normalize_record_status(val: Any, default: str = "recorded") -> str:
-    """将输入记录状态归一化为正典合法的 RecordStatus。"""
+def normalize_record_status(val: Any, default: str | None = None) -> str:
+    """将输入记录状态归一化为正典合法的 RecordStatus。非法输入且未指定 default 时抛出 ValueError。"""
+    if val is None or str(val).strip() == "":
+        if default is not None:
+            return default
+        raise ValueError("record status 不能为空！")
     c = clean_text(val)
-    return RECORD_STATUS_MAP.get(c, default)
+    if c in RECORD_STATUS_MAP:
+        return RECORD_STATUS_MAP[c]
+    if default is not None:
+        return default
+    valid_opts = sorted(set(RECORD_STATUS_MAP.values()))
+    raise ValueError(f"无效的 record status: '{val}'。合法选项为: {', '.join(valid_opts)}")
 
 
 def extract_record_embed_text(record: Any) -> str:

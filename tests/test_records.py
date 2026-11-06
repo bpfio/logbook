@@ -35,6 +35,9 @@ from logbook.mcp_server import (
     record_query,
     record_stats,
     record_search,
+    records_bulk_upsert,
+    tasks_bulk_upsert,
+    mcp,
 )
 
 
@@ -55,7 +58,9 @@ def test_dataset_category_and_record_status_enums():
     assert normalize_dataset_category("oss") == "oss_metrics"
     assert normalize_dataset_category("benchmark") == "oss_metrics"
     assert normalize_dataset_category("customs") == "trade"
-    assert normalize_dataset_category("unknown_domain") == "general"
+    with pytest.raises(ValueError, match="无效的 dataset category"):
+        normalize_dataset_category("unknown_domain")
+    assert normalize_dataset_category("unknown_domain", default="general") == "general"
 
     assert RecordStatus.RECORDED == "recorded"
     assert RecordStatus.RECONCILED == "reconciled"
@@ -248,6 +253,75 @@ async def test_search_records_sql_params_unit():
         assert params[1] == "增值税"
         assert params[2] == 0.40
         assert "ts_rank_cd(tsv_content, plainto_tsquery('simple', $2)) >= $3" in sql
+
+
+@pytest.mark.asyncio
+async def test_validation_layer_rejections_and_envelope_unit():
+    """单元测试: 验证 F-API-01~06 统一结构化错误信封与参数强校验拦截。"""
+    with patch("logbook.mcp_server.validate_and_negotiate_project", AsyncMock(return_value="test_proj")), \
+         patch.object(db, "ensure_project", AsyncMock()), \
+         patch.object(db, "ensure_datasets_and_records_schema", AsyncMock()), \
+         patch("logbook.mcp_server.get_embedding", AsyncMock(return_value=MagicMock(embedding=None))):
+
+        # 1. F-SEARCH-04: min_score 非法值拦截 (1.5 / -0.1 / True)
+        res1 = await record_search(project="test_proj", query="test", min_score=1.5)
+        assert res1.get("isError") is True
+        assert res1.get("error_type") == "INVALID_ARGUMENT"
+        assert "0.0 至 1.0" in res1.get("detail", "")
+
+        res_bool = await record_search(project="test_proj", query="test", min_score=True)
+        assert res_bool.get("isError") is True
+        assert res_bool.get("error_type") == "INVALID_ARGUMENT"
+
+        # 2. F-API-03: limit <= 0 拦截
+        res_lim = await record_search(project="test_proj", query="test", limit=-1)
+        assert res_lim.get("isError") is True
+        assert res_lim.get("error_type") == "INVALID_ARGUMENT"
+        assert "limit" in res_lim.get("detail", "")
+
+        # 3. F-API-01: record_query 非法状态拦截
+        res_rq = await record_query(project="test_proj", status="typo_status")
+        assert res_rq.get("isError") is True
+        assert res_rq.get("error_type") == "INVALID_ARGUMENT"
+        assert "record status" in res_rq.get("detail", "")
+
+        # 4. F-API-01: record_stats 非法 group_by 拦截
+        res_rs = await record_stats(project="test_proj", group_by="invalid_dim")
+        assert res_rs.get("isError") is True
+        assert res_rs.get("error_type") == "INVALID_ARGUMENT"
+        assert "group_by" in res_rs.get("detail", "")
+
+        # 5. F-API-05: records_bulk_upsert 缺失 doc_no 拒绝伪造单号
+        res_bulk_nodoc = await records_bulk_upsert(
+            project="test_proj",
+            dataset_code="test_ds",
+            records=[{"event_date": "2026-11-06"}],  # 缺失 doc_no
+        )
+        assert res_bulk_nodoc.get("isError") is True
+        assert res_bulk_nodoc.get("error_type") == "INVALID_ARGUMENT"
+        assert "doc_no" in res_bulk_nodoc.get("detail", "")
+
+        # 6. F-API-06: tasks_bulk_upsert 校验枚举合法性
+        res_task_bad = await tasks_bulk_upsert(
+            project="test_proj",
+            tasks=[{"id": "t1", "title": "test", "status": "wrong_status"}],
+        )
+        assert res_task_bad.get("isError") is True
+        assert res_task_bad.get("error_type") == "INVALID_ARGUMENT"
+        assert "wrong_status" in res_task_bad.get("detail", "")
+
+        # 7. F-API-02: FastMCP 顶层包装器全局捕获并输出结构化 JSON 信封
+        class FakeParams:
+            name = "record_search"
+            arguments = {"project": 123}  # 非法参数类型触发 Pydantic ValidationError
+
+        call_res = await mcp._handle_call_tool(None, FakeParams())
+        import json
+        assert call_res.is_error is True
+        parsed = json.loads(call_res.content[0].text)
+        assert parsed.get("isError") is True
+        assert parsed.get("error_type") == "INVALID_ARGUMENT"
+        assert parsed.get("tool") == "record_search"
 
 
 # =============================================================================

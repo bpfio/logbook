@@ -10,6 +10,7 @@
 import sys
 import os
 import re
+import json
 import socket
 import asyncio
 import functools
@@ -71,6 +72,29 @@ except Exception:
         _SERVER_VERSION = "0.5.0"
 
 mcp = MCPServer("logbook-mcp-server", version=_SERVER_VERSION)
+
+# 统一拦截 FastMCP / MCPServer 入参校验异常，消除裸文本报错，强行收口为 {isError, error_type, detail} JSON 信封 (F-API-02 SSOT)
+if hasattr(mcp, "_handle_call_tool"):
+    _orig_mcp_handle_call_tool = mcp._handle_call_tool
+
+    async def _safe_mcp_handle_call_tool(ctx: Any, params: Any):
+        res = await _orig_mcp_handle_call_tool(ctx, params)
+        if hasattr(res, "is_error") and res.is_error:
+            if res.content and hasattr(res.content[0], "text"):
+                text = res.content[0].text
+                try:
+                    json.loads(text)
+                except Exception:
+                    envelope = {
+                        "isError": True,
+                        "error_type": "INVALID_ARGUMENT",
+                        "detail": text,
+                        "tool": getattr(params, "name", "unknown"),
+                    }
+                    res.content[0].text = json.dumps(envelope, ensure_ascii=False)
+        return res
+
+    mcp._handle_call_tool = _safe_mcp_handle_call_tool
 
 
 # =============================================================================
@@ -158,12 +182,14 @@ def tool_shell(fn):
 
 
 def clamp_limit(limit: int, maximum: int = QUERY_LIMIT_MAX) -> int:
-    """P1-4: LIMIT 参数化钳制 (下限 1, 上限 200)。"""
+    """LIMIT 参数校验与钳制 (1..maximum)。非法值或 <=0 严格报错阻断，拒绝静默容错。"""
     try:
         n = int(limit)
     except (TypeError, ValueError):
-        return 50
-    return max(1, min(n, maximum))
+        raise ToolError("INVALID_ARGUMENT", f"limit 必须为有效整数，收到: {limit!r}")
+    if n <= 0:
+        raise ToolError("INVALID_ARGUMENT", f"limit 必须为大于 0 的正整数，收到: {n}")
+    return min(n, maximum)
 
 
 def project_fields(items: list[dict], fields: list[str] | None) -> list[dict]:
@@ -171,7 +197,16 @@ def project_fields(items: list[dict], fields: list[str] | None) -> list[dict]:
     if not fields:
         return items
     keys = [f.strip() for f in fields if isinstance(f, str) and f.strip()]
-    return [{k: it[k] for k in keys if k in it} for it in items]
+    if not keys:
+        return items
+    results = []
+    for it in items:
+        projected = {k: it[k] for k in keys if k in it}
+        if not projected and it:
+            anchor_key = "id" if "id" in it else ("doc_no" if "doc_no" in it else next(iter(it.keys())))
+            projected[anchor_key] = it[anchor_key]
+        results.append(projected)
+    return results
 
 
 def detect_node_ip() -> str:
@@ -913,14 +948,24 @@ async def tasks_bulk_upsert(
         await db.upsert_batch(proj, Batch(id=batch_id, title=f"研发批次 {batch_id}", status=BatchStatus.RUNNING, agent_ip=caller_ip))
 
     task_objs = []
-    for t in tasks:
+    for idx, t in enumerate(tasks, start=1):
         tid = t.get("id")
         if not tid:
-            continue
+            return tool_error("INVALID_ARGUMENT", f"第 {idx} 项任务缺失必填 id！", tool="tasks_bulk_upsert")
         title = sanitize_text(t.get("title", "")).clean_text
-        norm_st = normalize_status(t.get("status", "planned"))
-        norm_tt = normalize_task_type(t.get("task_type", "fix"))
-        norm_pr = normalize_priority(t.get("priority", "P2"))
+        if not title:
+            return tool_error("INVALID_ARGUMENT", f"第 {idx} 项任务 [{tid}] 缺失必填 title！", tool="tasks_bulk_upsert")
+
+        try:
+            raw_st = t.get("status")
+            norm_st = normalize_status(raw_st, default="planned" if raw_st is None else None)
+            raw_tt = t.get("task_type")
+            norm_tt = normalize_task_type(raw_tt, default="fix" if raw_tt is None else None)
+            raw_pr = t.get("priority")
+            norm_pr = normalize_priority(raw_pr, default="P2" if raw_pr is None else None)
+        except ValueError as exc:
+            return tool_error("INVALID_ARGUMENT", f"第 {idx} 项任务 [{tid}] 枚举校验失败: {exc}", tool="tasks_bulk_upsert")
+
         notes = sanitize_text(t.get("notes", "")).clean_text if t.get("notes") else None
         b_id = t.get("batch_id") or batch_id
         c_hash = t.get("commit_hash")
@@ -981,8 +1026,25 @@ async def task_query(
         return e.to_dict()
 
     limit = clamp_limit(limit)
-    st_enums = [TaskStatus(normalize_status(s)) for s in status] if status else None
-    pr_enums = [TaskPriority(normalize_priority(p)) for p in priority] if priority else None
+    if status:
+        st_enums = []
+        for s in status:
+            try:
+                st_enums.append(TaskStatus(normalize_status(s)))
+            except ValueError as exc:
+                return tool_error("INVALID_ARGUMENT", f"查询 status 校验失败: {exc}", tool="task_query")
+    else:
+        st_enums = None
+
+    if priority:
+        pr_enums = []
+        for p in priority:
+            try:
+                pr_enums.append(TaskPriority(normalize_priority(p)))
+            except ValueError as exc:
+                return tool_error("INVALID_ARGUMENT", f"查询 priority 校验失败: {exc}", tool="task_query")
+    else:
+        pr_enums = None
     tasks = await db.query_tasks(
         proj,
         status=st_enums,
@@ -1096,8 +1158,26 @@ async def finding_query(
         return e.to_dict()
 
     limit = clamp_limit(limit)
-    st_enums = [FindingStatus(s) for s in status] if status else None
-    sev_enums = [FindingSeverity(normalize_severity(s)) for s in severity] if severity else None
+    if status:
+        st_enums = []
+        for s in status:
+            c = clean_text(s)
+            valid = ["open", "infix", "fixed", "wontfix", "blocked"]
+            if c not in valid:
+                return tool_error("INVALID_ARGUMENT", f"无效的 finding status: '{s}'。合法选项为: {', '.join(valid)}", tool="finding_query")
+            st_enums.append(FindingStatus(c))
+    else:
+        st_enums = None
+
+    if severity:
+        sev_enums = []
+        for s in severity:
+            try:
+                sev_enums.append(FindingSeverity(normalize_severity(s)))
+            except ValueError as exc:
+                return tool_error("INVALID_ARGUMENT", f"查询 severity 校验失败: {exc}", tool="finding_query")
+    else:
+        sev_enums = None
     findings = await db.query_findings(proj, status=st_enums, severity=sev_enums, limit=limit)
     items = project_fields([f.model_dump(mode="json") for f in findings], fields)
     return {
@@ -1130,10 +1210,14 @@ async def waiting_query(
     limit = clamp_limit(limit)
     if status is None:
         st_list: list[WaitingStatus] | None = None
-    elif isinstance(status, str):
-        st_list = [WaitingStatus(status)]
     else:
-        st_list = [WaitingStatus(s) for s in status]
+        raw_list = [status] if isinstance(status, str) else list(status)
+        st_list = []
+        for s in raw_list:
+            c = clean_text(s)
+            if c not in ("open", "closed"):
+                return tool_error("INVALID_ARGUMENT", f"无效的 waiting status: '{s}'。合法选项为: open, closed", tool="waiting_query")
+            st_list.append(WaitingStatus(c))
 
     if st_list is None or len(st_list) == 1:
         rows = await db.query_waitings(proj, status=st_list[0] if st_list else None)
@@ -1450,7 +1534,7 @@ async def export_markdown(project: str, output_path: str | None = None) -> str:
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
-        return e.message
+        return e.to_dict()
 
     md = await export_devlog_markdown(proj)
     if output_path:
@@ -2543,7 +2627,13 @@ async def record_query(
     except ProjectNegotiationError as e:
         return e.to_dict()
 
-    st = normalize_record_status(status) if status else None
+    st = None
+    if status:
+        try:
+            st = normalize_record_status(status)
+        except ValueError as exc:
+            return tool_error("INVALID_ARGUMENT", str(exc), tool="record_query")
+
     rows = await db.query_records(
         project_id=proj,
         dataset_code=dataset_code,
@@ -2598,6 +2688,11 @@ async def record_stats(
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    valid_groups = ("day", "month", "year", "currency", "status", "entity", "dataset", "none")
+    grp = (group_by or "none").strip().lower()
+    if grp not in valid_groups:
+        return tool_error("INVALID_ARGUMENT", f"无效 group_by: '{group_by}'。合法选项为: {', '.join(valid_groups)}", tool="record_stats")
+
     stats = await db.aggregate_record_stats(
         project_id=proj,
         dataset_code=dataset_code,
@@ -2622,7 +2717,7 @@ async def record_search(
     limit: int = 10,
     offset: int = 0,
     fields: list[str] | None = None,
-    min_score: float | None = None,
+    min_score: float = 0.40,
 ) -> dict:
     """语义向量与全文混合检索事实数据单据 (支持 768 维自然语言意图理解与知识库精准召回)。
 
@@ -2633,7 +2728,7 @@ async def record_search(
     - 返回的每个单据对象均包含 'score' 浮点数字段 (余弦相似度，范围 0.0 ~ 1.0)。
     - score >= 0.45: 强语义命中 (法规主题、核心业务匹配，置信度高)。
     - score < 0.40: 弱相关或无直接关联的几何近邻兜底 (建议结合业务场景舍弃)。
-    - 可通过传参 min_score 显式进行服务端截断过滤。
+    - 缺省启用 min_score=0.40 过滤噪音；若需保留旧版全量 Top-K 兜底行为，请显式传 min_score=0.0。
 
     参数说明:
     - project: 必填。项目代号 (如 'taxbase', 'brix')。
@@ -2643,18 +2738,28 @@ async def record_search(
     - limit: 返回条数上限 (1..100, 缺省 10)。
     - offset: 分页偏移量 (缺省 0)。
     - fields: 可选列投影，缺省返回全列。
-    - min_score: 可选相似度截断阈值 (0.0..1.0，如 0.45)。低于该得分的弱相关记录将被过滤。
+    - min_score: 可选相似度截断阈值 (0.0..1.0，缺省 0.40)。低于该得分的弱相关记录将被过滤；传 0.0 保留全量。
     """
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    if isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
+        return tool_error("INVALID_ARGUMENT", f"min_score 必须为 0.0 至 1.0 之间的数值，收到: {min_score!r}", tool="record_search")
+    if min_score < 0.0 or min_score > 1.0:
+        return tool_error("INVALID_ARGUMENT", f"min_score 必须在 0.0 至 1.0 之间，收到: {min_score}", tool="record_search")
+
     limit = clamp_limit(limit, maximum=100)
     s_query = sanitize_text(query).clean_text
     embed_res = await get_embedding(s_query)
 
-    st = normalize_record_status(status) if status else None
+    st = None
+    if status:
+        try:
+            st = normalize_record_status(status)
+        except ValueError as exc:
+            return tool_error("INVALID_ARGUMENT", str(exc), tool="record_search")
     rows = await db.search_records(
         project_id=proj,
         query_vector=embed_res.embedding,
@@ -2715,6 +2820,10 @@ async def records_bulk_upsert(
     import time
     t0 = time.time()
 
+    if batch_id:
+        caller_ip = detect_caller_ip()
+        await db.upsert_batch(proj, Batch(id=batch_id, title=f"事实单据批次 {batch_id}", status=BatchStatus.RUNNING, agent_ip=caller_ip))
+
     bid = batch_id or f"mcp_bulk_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     data_records: list[DataRecord] = []
 
@@ -2724,9 +2833,13 @@ async def records_bulk_upsert(
             return tool_error("INVALID_ARGUMENT", f"第 {idx} 条记录缺失 dataset_code 且未提供全局 dataset_code！", tool="records_bulk_upsert")
         doc = str(r.get("doc_no") or "").strip()
         if not doc:
-            doc = f"{bid}#{idx:06d}"
+            return tool_error("INVALID_ARGUMENT", f"第 {idx} 条记录缺失必填字段 doc_no，批量入库已原子终止！", tool="records_bulk_upsert")
         ev_date = str(r.get("event_date") or date.today().isoformat())
-        st = normalize_record_status(r.get("status", "recorded"))
+        st_raw = r.get("status")
+        try:
+            st = normalize_record_status(st_raw, default="recorded" if st_raw is None else None)
+        except ValueError as exc:
+            return tool_error("INVALID_ARGUMENT", f"第 {idx} 条记录状态校验失败: {exc}", tool="records_bulk_upsert")
 
         rec = DataRecord(
             project_id=proj,
@@ -2762,6 +2875,14 @@ async def records_bulk_upsert(
         "elapsed_ms": elapsed_ms,
         "message": f"成功批量落库 {len(records)} 条单据 (新增: {res.get('inserted', 0)}, 更新: {res.get('updated', 0)}, 耗时: {elapsed_ms}ms)！",
     }
+
+
+async def warmup_embedding_probe() -> None:
+    """后台预热向量嵌入模型连接 (消除客户端首笔请求的 10s TLS/鉴权冷启动尖峰)。"""
+    try:
+        await get_embedding("logbook coldstart warmup probe")
+    except Exception:
+        pass
 
 
 def run_stdio():
