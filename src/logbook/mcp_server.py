@@ -95,6 +95,11 @@ if hasattr(mcp, "_handle_call_tool"):
         return res
 
     mcp._handle_call_tool = _safe_mcp_handle_call_tool
+    if hasattr(mcp, "_lowlevel_server") and hasattr(mcp._lowlevel_server, "_request_handlers"):
+        if "tools/call" in mcp._lowlevel_server._request_handlers:
+            import dataclasses
+            _entry = mcp._lowlevel_server._request_handlers["tools/call"]
+            mcp._lowlevel_server._request_handlers["tools/call"] = dataclasses.replace(_entry, handler=_safe_mcp_handle_call_tool)
 
 
 # =============================================================================
