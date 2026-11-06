@@ -283,7 +283,7 @@ async def main() -> int:
     ap = argparse.ArgumentParser(description="brix 18 笔真实写入幂等重放 (L-A4 波1 验证门)")
     ap.add_argument("--ssh", action="store_true",
                     help="走 SSH 管道连远端生产 MCP (缺省本机 spawn stdio server, 禁 ssh 缺省)")
-    ap.add_argument("--ssh-target", default=os.getenv("LOGBOOK_MCP_SSH", "sysadmin@192.168.1.68"))
+    ap.add_argument("--ssh-target", default=os.getenv("LOGBOOK_MCP_SSH", "sysadmin@127.0.0.1"))
     args = ap.parse_args()
 
     if args.ssh:

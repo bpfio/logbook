@@ -23,7 +23,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 DEVLOG_PATH = Path("/home/yupeng/brix/docs/DEVLOG.md")
-SSH_TARGET = os.getenv("LOGBOOK_MCP_SSH", "sysadmin@192.168.1.68")
+SSH_TARGET = os.getenv("LOGBOOK_MCP_SSH", "sysadmin@127.0.0.1")
 
 # 责任人映射表
 AGENT_MAP = {

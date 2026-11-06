@@ -163,32 +163,60 @@ logbook mcp
 
 ## ⚡ 极速启动与配置
 
-### 1. 启动轻量 PostgreSQL 18 底座 (内存硬限制 80MB)
+### 1. 一键启动全栈服务 (Docker Compose)
 
-> QNAP / NAS 生产部署与升级（PG 备份、镜像重建、SQL 迁移、MCP 回归、回滚）
-> 见 [`deploy/qnap/DEPLOY.md`](./deploy/qnap/DEPLOY.md)；服务编排模板见
-> `deploy/qnap/compose.yaml.example`（密钥经 `.env` 注入，不入仓库）。
+只需一行命令即可在本地或云服务器启动轻量 PostgreSQL 18 底座与 Logbook App 服务：
+
 ```bash
 docker compose up -d
 ```
-> 实测容器物理内存常驻仅 ~42MB，针对 2C2G 边缘云及家庭 NAS 深度优化。
+> 实测全栈常驻物理内存仅 ~100MB（App ~40MB + DB ~60MB），针对 2C2G 边缘云及家庭 NAS 深度优化。
+> 
+> * 嵌入式 NAS（QNAP / 群晖）生产编排模板见 [`deploy/qnap/compose.yaml.example`](./deploy/qnap/compose.yaml.example)。
 
-### 2. 配置 MCP 客户端 (以 Antigravity / Claude Desktop 为例)
-在 `~/.gemini/antigravity-cli/mcp.json` 或 `claude_desktop_config.json` 中配置：
+### 2. 配置 MCP 客户端 (以 Claude Desktop / Cursor / Antigravity 为例)
+
+#### 方式 A：Stdio 本地直连 (开发测试首选)
+在客户端配置文件（如 `claude_desktop_config.json` 或 `mcp_config.json`）中写入：
 ```json
 {
   "mcpServers": {
     "logbook": {
-      "command": "/path/to/logbook/.venv/bin/logbook",
-      "args": ["mcp"],
+      "command": "uv",
+      "args": ["--directory", "/path/to/logbook", "run", "python", "-m", "logbook.cli", "mcp"],
       "env": {
-        "DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:5432/logbook",
+        "DATABASE_URL": "postgresql://logbook:logbook_dev_secret@127.0.0.1:5432/logbook",
         "APP_ENV": "production"
       }
     }
   }
 }
 ```
+
+#### 方式 B：SSH 安全远程管道 (多 Agent 协同 / 生产首选)
+跨主机、容器或多开发节点可通过 SSH 原生隧道安全接入，天然自带调用端 IP 溯源审计：
+```json
+{
+  "mcpServers": {
+    "logbook": {
+      "command": "ssh",
+      "args": ["-o", "BatchMode=yes", "sysadmin@<your-server-ip>", "mcp"]
+    }
+  }
+}
+```
+
+#### 方式 C：FastMCP 原生 HTTP / SSE 监听
+容器默认暴露 `8000` 端口提供标准 SSE 传输：
+* SSE 端点：`http://<your-server-ip>:8000/sse`
+* 探针端点：`http://<your-server-ip>:8000/health`
+
+### 3. 向量嵌入模型配置 (三级自适应)
+
+Logbook 原生支持 768 维语义向量，环境自适应优先级如下：
+1. **OpenAI / Ollama / 本地兼容接口**：配置 `EMBEDDING_API_URL` 与 `EMBEDDING_API_KEY`；
+2. **讯飞星火 MaaS 接口**：配置 `SPARK_API_KEY`（国内无代理极速直连）；
+3. **零外部依赖离线降级**：若未配置外部 API Key，自动启用内置确定性 768 维哈希归一化降级，测试态与纯内网开箱即用。
 
 ---
 

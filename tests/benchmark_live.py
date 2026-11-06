@@ -54,7 +54,7 @@ async def test_db_parameters(db_url: str):
 
 
 def test_qnap_container_stats():
-    qnap_host = os.getenv("QNAP_HOST", "192.168.1.33")
+    qnap_host = os.getenv("QNAP_HOST", "127.0.0.1")
     qnap_pass = os.getenv("QNAP_PASSWORD", "")
     if not qnap_pass:
         return ["(跳过宿主机 stats 探测: 未配置 QNAP_PASSWORD 环境变量)"]
@@ -91,7 +91,7 @@ async def test_iflytek_embedding():
     return {"status": r.status_code, "latency_ms": round(t_api, 2), "error": r.text}
 
 
-def test_ssh_mcp_latency(target_host: str = "192.168.1.68"):
+def test_ssh_mcp_latency(target_host: str = "127.0.0.1"):
     t0 = time.perf_counter()
     p = subprocess.Popen(
         ["ssh", "-o", "BatchMode=yes", f"sysadmin@{target_host}", "mcp"],
@@ -151,7 +151,7 @@ async def main():
     print("    Logbook 生产节点全量技术参数与组件联调联测报告")
     print("=" * 70)
 
-    target_host = os.getenv("LOGBOOK_HOST", "192.168.1.68")
+    target_host = os.getenv("LOGBOOK_HOST", "127.0.0.1")
     db_pass = os.getenv("LOGBOOK_DB_PASSWORD", "")
     db_url = os.getenv("BENCH_DATABASE_URL", f"postgresql://postgres:{db_pass}@{target_host}:5432/logbook")
 
