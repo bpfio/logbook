@@ -2622,11 +2622,18 @@ async def record_search(
     limit: int = 10,
     offset: int = 0,
     fields: list[str] | None = None,
+    min_score: float | None = None,
 ) -> dict:
     """语义向量与全文混合检索事实数据单据 (支持 768 维自然语言意图理解与知识库精准召回)。
 
     适用于财税法规库 (taxbase)、业务单据、技术评测流水的自然语言意图检索。
     优先调用 768 维 HNSW 余弦相似度召回；若未生成向量或外部 API 超时，自动平滑降级至 GIN 倒排全文检索。
+
+    相关度判读契约:
+    - 返回的每个单据对象均包含 'score' 浮点数字段 (余弦相似度，范围 0.0 ~ 1.0)。
+    - score >= 0.45: 强语义命中 (法规主题、核心业务匹配，置信度高)。
+    - score < 0.40: 弱相关或无直接关联的几何近邻兜底 (建议结合业务场景舍弃)。
+    - 可通过传参 min_score 显式进行服务端截断过滤。
 
     参数说明:
     - project: 必填。项目代号 (如 'taxbase', 'brix')。
@@ -2636,6 +2643,7 @@ async def record_search(
     - limit: 返回条数上限 (1..100, 缺省 10)。
     - offset: 分页偏移量 (缺省 0)。
     - fields: 可选列投影，缺省返回全列。
+    - min_score: 可选相似度截断阈值 (0.0..1.0，如 0.45)。低于该得分的弱相关记录将被过滤。
     """
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
@@ -2655,6 +2663,7 @@ async def record_search(
         status=st,
         limit=limit,
         offset=offset,
+        min_score=min_score,
     )
     for r in rows:
         for k in ("event_date", "created_at", "updated_at"):
@@ -2670,6 +2679,7 @@ async def record_search(
         "dataset_code": dataset_code,
         "query": s_query,
         "search_mode": "semantic_vector" if embed_res.embedding else "fulltext_fallback",
+        "min_score": min_score,
         "total": len(items),
         "items": items,
     }
@@ -2691,6 +2701,8 @@ async def records_bulk_upsert(
     - dataset_code: 可选。全局缺省数据集编码 (若记录项未显式指定 dataset_code 时采用此值)。
     - batch_id: 可选。导入批次号 (缺省自动生成 'batch_YYYYMMDD_...')。
     - with_embedding: 可选。是否同步生成 768 维语义向量 (缺省 False；5000 条大数据量建议先快速入库再离线向量化)。
+
+    最佳实践注记: 若传入自定义 batch_id 并计划与 tasks 表关联，请确保预先通过 batch_upsert 建立批次主键，避免 tasks.batch_id 产生外键约束阻断或形成孤儿批次。
     """
     try:
         proj = await validate_and_negotiate_project(project, is_write=True)

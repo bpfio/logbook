@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (35)
+## 一、任务台账 (36)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-REC-054 | closed | fix | 落实 record_search 相关度契约与 min_score 截断 (F-SEARCH-02)、HNSW ef_search 动态自适应消除 40 条截断 (F-SEARCH-03) 与 SSH 正常断连退出码 0 归一 (0.5.4) | HEAD | record_search 新增 min_score 截断与 score 判读口径契约; HNSW 检索会话动态 SET hnsw.ef_search 消除 SSH 40 条截断; 修复 client_closed 时子进程 terminate 导致的 rc=255 误报; 补齐单元测试 (DEV-2026-11-06-02) |
 | L-REC-FIX | closed | fix | 根治 record_search 42P18 参数绑定穿透、SSH 管道 4MB 扩容与超时加固 (0.5.3) | HEAD | 彻底消除 search_records 0 命中 fallthrough 导致的 params 污染与 42P18 报错; SSH 子进程 StreamReader 扩容至 4MB 杜绝大单据 JSON-RPC 假死; 命令超时提升至 20s; 补齐单元测试与迁移链测试 (DEV-2026-11-06-01) |
 | L-REC-052 | closed | feat | 通用事实表 shared.records 768维语义向量底座 (迁移14) + records_bulk_upsert 批量落库 + record_search 混合检索与探针加固 (0.5.2) | HEAD | 贯彻用户裁决: DDL 迁移 14 落地 768 维 HNSW 索引; 新增 records_bulk_upsert 单事务批量落库消灭 5000 次 RPC 往返; 新增 record_search 语义+全文混合检索; 修复 AsyncSSH echo 探针编码与 FastMCP SSE 原生监听; 46 工具真机联测全绿, 栈内存 ~100.6MB (DEV-2026-11-03-02) |
 | L-PROJ-UPD | closed | feat | project_update MCP 空间元数据修改原语落地与 taxbase 备注名纠偏 | HEAD | 新增 project_update 闭环项目元数据读写; 纠偏 taxbase 标题为「税收法规库」; 验证群组权限拦截与幂等保护 (DEV-2026-11-03-02) |
@@ -54,10 +55,12 @@
 
 ---
 
-## 二、发现台账 (8)
+## 二、发现台账 (10)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-SEARCH-03 | accept | P2 | fixed | 动态 SET hnsw.ef_search 消除 pgvector 默认 40 截断并归一 SSH 退出码为 0 | SSH 检索 limit>40 硬钳 40 破坏一致性; 客户端正常断连后子进程 terminate 报 rc=255 误报 (DEV-2026-11-06-02) |
+| F-SEARCH-02 | accept | P2 | fixed | record_search 增加 min_score 过滤并在工具描述中确立 score >= 0.45 判读契约 | 密集向量 Top-K 近邻导致无意义查询返回 ~0.35 弱近邻且下游 Agent 无法判定置信度 (DEV-2026-11-06-02) |
 | F-REL-02 | audit | P3 | fixed | deploy/qnap/compose.yaml.example 与 .env.example 补 LOGBOOK_ADMIN_AGENTS 文档行与示例 | 消除部署漏配风险，闭环 (DEV-2026-10-19-01) |
 | F-REL-01 | audit | P2 | fixed | pyproject.toml bump 0.5.0 并对齐 src/logbook/__init__.py 为 0.5.0 | serverInfo.version 对齐 0.5.0，闭环 (DEV-2026-10-19-01) |
 | F-MSG-01 | zcode | P1 | fixed | 消除重复 DDL、写事务 shield 保护、管道流缓冲，彻底根治 -32000 Connection closed | message_* 每次调用执行 10 条 DDL 导致高时延，非交互式管道 EOF 触发 MCP AnyIO cancel_scope 取消在途任务 |
@@ -73,6 +76,24 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-06-02] Logbook 0.5.4: record_search 相关度契约、动态 ef_search 截断消除与退出码平滑收口 — ✅ 闭环
+
+响应用户 0.5.3 验收反馈的两项残留（F-SEARCH-02 与 F-SEARCH-03），彻底收口跨传输层一致性与判读契约：
+
+1. **确立 `record_search` 相关度契约与 `min_score` 截断 (`src/logbook/mcp_server.py`, `src/logbook/db.py`)**:
+   - **参数扩展与双层过滤**: 增加 `min_score: float | None = None`，在 SQL `WHERE (1 - (embedding <=> $vec::vector)) >= $min_score` 与 Python 结果层进行严格双层校验，低于阈值的弱相关单据直接过滤；全未命中时返回 `total: 0, items: []`；
+   - **契约显性化**: 在工具描述与 Schema 中详细声明返回项包含 `score`（0.0 ~ 1.0），明确分水岭：`score >= 0.45` 视为强语义命中，`score < 0.40` 为几何空间最弱近邻兜底，彻底消灭下游 Agent 的“隐藏约定”盲猜。
+2. **动态 `hnsw.ef_search` 消除 40 条截断 (`src/logbook/db.py`)**:
+   - **机理与自适应配置**: 穿透 pgvector 默认 `hnsw.ef_search = 40` 在索引扫描时无法召回大于 40 条记录的底层约束，在 `search_records`、`search_researches` 与 `search_devlogs` 向量检索前动态执行 `SET hnsw.ef_search = max(40, min(400, (limit + offset) * 2));`，抹平 HTTP 与 SSH 在大 `limit` 场景下的条数差异，支持 100 条及以上大单据无损召回。
+3. **消除 SSH 正常通信收口 rc=255 误报 (`src/logbook/ssh_server.py`)**:
+   - **退出码平滑归一**: 识别客户端接收完整数据后主动挂断 SSH 连接（`client_closed_task in done`）的自然退出语义，将子进程被 `terminate()` 导致的负数返回码平滑归一为 0；其余信号状态按 POSIX 标准映射，彻底根除客户端假异常报错。
+4. **批次方法论与外键防呆**:
+   - 在 `records_bulk_upsert` 工具文档中增加规范注记：指明单据 `batch_id` 若需与 `tasks` 关联，应先调用 `batch_upsert` 建立主键记录，规避外键约束或孤儿批次。
+5. **单元测试验证**:
+   - `tests/test_records.py` 增补 `min_score` 过滤与 `SET hnsw.ef_search` 单元测试，全库 58 项单元测试 100% 绿灯。
 
 ---
 

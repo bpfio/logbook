@@ -202,6 +202,53 @@ async def test_search_records_sql_params_unit():
         assert params[0] == "taxbase"
         assert "$1" in sql and "LIMIT $2 OFFSET $3" in sql
 
+        # 5. 向量检索 + min_score 截断与 ef_search 放大 (F-SEARCH-02 / F-SEARCH-03)
+        mock_conn.fetch.reset_mock()
+        mock_conn.execute.reset_mock()
+        mock_conn.fetch.return_value = [
+            {"id": "rec_1", "doc_no": "D1", "score": 0.58, "payload": "{}"},
+            {"id": "rec_2", "doc_no": "D2", "score": 0.35, "payload": "{}"},
+        ]
+        res = await db.search_records(
+            project_id="taxbase",
+            query_vector=[0.1] * 768,
+            min_score=0.45,
+            limit=50,
+        )
+        # 必须过滤掉 score 0.35 的低相关记录，仅保留 0.58
+        assert len(res) == 1
+        assert res[0]["doc_no"] == "D1"
+        assert res[0]["score"] == 0.58
+
+        # 验证 ef_search 设置: limit=50 -> ef_search = max(40, min(400, 50*2)) = 100
+        mock_conn.execute.assert_called_with("SET hnsw.ef_search = 100;")
+        sql, *params = mock_conn.fetch.call_args[0]
+        # 参数结构: $1 (project_id), $2 (vec), $3 (min_score), $4 (limit), $5 (offset)
+        assert len(params) == 5
+        assert params[2] == 0.45
+        assert "(1 - (embedding <=> $2::vector)) >= $3" in sql
+        assert "LIMIT $4 OFFSET $5" in sql
+
+        # 6. 全文检索 + min_score 截断
+        mock_conn.fetch.reset_mock()
+        mock_conn.fetch.return_value = [
+            {"id": "rec_1", "doc_no": "D1", "score": 0.52, "payload": "{}"},
+            {"id": "rec_2", "doc_no": "D2", "score": 0.20, "payload": "{}"},
+        ]
+        res = await db.search_records(
+            project_id="taxbase",
+            query_text="增值税",
+            min_score=0.40,
+        )
+        assert len(res) == 1
+        assert res[0]["doc_no"] == "D1"
+        sql, *params = mock_conn.fetch.call_args[0]
+        # 参数结构: $1 (project_id), $2 (query_text), $3 (min_score), $4 (limit), $5 (offset)
+        assert len(params) == 5
+        assert params[1] == "增值税"
+        assert params[2] == 0.40
+        assert "ts_rank_cd(tsv_content, plainto_tsquery('simple', $2)) >= $3" in sql
+
 
 # =============================================================================
 # 二、 数据库与 MCP 交互集成测试 (Integration Tests)

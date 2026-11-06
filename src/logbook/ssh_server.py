@@ -417,6 +417,7 @@ async def handle_ssh_process(process: asyncssh.SSHServerProcess) -> None:
     client_closed_task = None
     if hasattr(process, "wait_closed"):
         client_closed_task = asyncio.create_task(process.wait_closed())
+    done = set()
     try:
         waiters = {wait_task}
         if client_closed_task is not None:
@@ -427,7 +428,8 @@ async def handle_ssh_process(process: asyncssh.SSHServerProcess) -> None:
                 task.cancel()
             await asyncio.gather(*pipe_tasks, return_exceptions=True)
             subproc.terminate()
-        if wait_task in done:
+            rc = 0
+        elif wait_task in done:
             rc = wait_task.result()
         else:
             rc = await wait_task
@@ -451,6 +453,10 @@ async def handle_ssh_process(process: asyncssh.SSHServerProcess) -> None:
                 pass
         if not wait_task.done():
             await asyncio.gather(wait_task, return_exceptions=True)
+        if client_closed_task is not None and client_closed_task in done:
+            rc = 0
+        elif isinstance(rc, int) and rc < 0:
+            rc = 128 + abs(rc)
         process.exit(rc if rc is not None else 0)
 
 

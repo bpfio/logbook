@@ -983,6 +983,7 @@ class Database:
             vis_cond = "(project_id = $1 OR visibility = 'public_safe')"
             
             if query_vector:
+                ef_val = max(40, min(400, fetch_limit * 2))
                 vec_literal = f"[{','.join(str(x) for x in query_vector)}]"
                 sql = f"""
                     SELECT id, project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
@@ -993,6 +994,10 @@ class Database:
                     ORDER BY embedding <=> $2::vector
                     LIMIT $3;
                 """
+                try:
+                    await conn.execute(f"SET hnsw.ef_search = {ef_val};")
+                except Exception:
+                    pass
                 rows = await conn.fetch(sql, project, vec_literal, fetch_limit)
             elif query_text:
                 sql = f"""
@@ -2100,6 +2105,7 @@ class Database:
             where_clause = " AND ".join(conditions)
 
             if query_vector:
+                ef_val = max(40, min(400, fetch_limit * 2))
                 vec_literal = f"[{','.join(str(x) for x in query_vector)}]"
                 params.append(vec_literal)
                 vec_idx = len(params)
@@ -2116,6 +2122,10 @@ class Database:
                     ORDER BY embedding <=> ${vec_idx}::vector
                     LIMIT ${lim_idx};
                 """
+                try:
+                    await conn.execute(f"SET hnsw.ef_search = {ef_val};")
+                except Exception:
+                    pass
                 rows = await conn.fetch(sql, *params)
             elif query_text:
                 params.append(query_text)
@@ -2741,6 +2751,7 @@ class Database:
         status: str | None = None,
         limit: int = 10,
         offset: int = 0,
+        min_score: float | None = None,
     ) -> list[dict]:
         """语义向量与全文混合检索事实数据记录 (支持 768 维 HNSW 余弦与 tsvector 降级)。"""
         await self.ensure_datasets_and_records_schema()
@@ -2749,6 +2760,13 @@ class Database:
             offset = max(0, int(offset or 0))
         except (TypeError, ValueError):
             offset = 0
+
+        parsed_min_score: float | None = None
+        if min_score is not None:
+            try:
+                parsed_min_score = max(0.0, min(1.0, float(min_score)))
+            except (TypeError, ValueError):
+                parsed_min_score = None
 
         base_conditions = ["project_id = $1"]
         base_params: list[Any] = [project_id]
@@ -2766,11 +2784,18 @@ class Database:
                 params = list(base_params)
                 conditions = list(base_conditions)
                 conditions.append("embedding IS NOT NULL")
-                where_clause = " AND ".join(conditions)
 
                 vec_literal = f"[{','.join(str(x) for x in query_vector)}]"
                 params.append(vec_literal)
                 vec_idx = len(params)
+
+                if parsed_min_score is not None:
+                    params.append(parsed_min_score)
+                    ms_idx = len(params)
+                    conditions.append(f"(1 - (embedding <=> ${vec_idx}::vector)) >= ${ms_idx}")
+
+                where_clause = " AND ".join(conditions)
+
                 params.append(limit)
                 lim_idx = len(params)
                 params.append(offset)
@@ -2786,6 +2811,11 @@ class Database:
                     ORDER BY embedding <=> ${vec_idx}::vector ASC
                     LIMIT ${lim_idx} OFFSET ${off_idx};
                 """
+                ef_val = max(40, min(400, (limit + offset) * 2))
+                try:
+                    await conn.execute(f"SET hnsw.ef_search = {ef_val};")
+                except Exception:
+                    pass
                 rows = await conn.fetch(sql, *params)
                 if rows:
                     results = []
@@ -2795,6 +2825,9 @@ class Database:
                             d["payload"] = json.loads(d["payload"])
                         if "score" in d:
                             d["score"] = round(float(d["score"]), 4)
+                        if parsed_min_score is not None and d.get("score") is not None:
+                            if d["score"] < parsed_min_score:
+                                continue
                         results.append(d)
                     return results
 
@@ -2807,6 +2840,12 @@ class Database:
                 params.append(q_text)
                 q_idx = len(params)
                 conditions.append(f"tsv_content @@ plainto_tsquery('simple', ${q_idx})")
+
+                if parsed_min_score is not None:
+                    params.append(parsed_min_score)
+                    ms_idx = len(params)
+                    conditions.append(f"ts_rank_cd(tsv_content, plainto_tsquery('simple', ${q_idx})) >= ${ms_idx}")
+
                 where_clause = " AND ".join(conditions)
 
                 params.append(limit)
@@ -2833,6 +2872,9 @@ class Database:
                             d["payload"] = json.loads(d["payload"])
                         if "score" in d:
                             d["score"] = round(float(d["score"]), 4)
+                        if parsed_min_score is not None and d.get("score") is not None:
+                            if d["score"] < parsed_min_score:
+                                continue
                         results.append(d)
                     return results
 
