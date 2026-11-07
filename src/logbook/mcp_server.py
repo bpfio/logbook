@@ -1165,7 +1165,10 @@ async def finding_record(
     # P0-2: task_id 写前预检 (今晚 F-243 实锤形态: 静默写入悬空外键)
     if task_id:
         async with db._pool.acquire() as conn:
-            hit = await conn.fetchrow(f'SELECT 1 FROM "{proj}".tasks WHERE id = $1', task_id)
+            hit = await conn.fetchval(
+                "SELECT 1 FROM shared.records WHERE project_id = $1 AND dataset_code = 'sys_task' AND doc_no = $2;",
+                proj, task_id
+            )
         if not hit:
             return tool_error(
                 "TASK_NOT_FOUND",
@@ -1177,8 +1180,11 @@ async def finding_record(
     s_summary = sanitize_text(summary).clean_text if summary and str(summary).strip() else None
     if not s_summary:
         async with db._pool.acquire() as conn:
-            hit = await conn.fetchrow(f'SELECT summary FROM "{proj}".findings WHERE id = $1', id)
-        if not hit:
+            hit = await conn.fetchrow(
+                "SELECT payload->>'summary' AS summary FROM shared.records WHERE project_id = $1 AND dataset_code = 'sys_finding' AND doc_no = $2;",
+                proj, id
+            )
+        if not hit or not hit["summary"]:
             return tool_error("INVALID_ARGUMENT", f"新建缺陷项 [{id}] 必须提供 summary 描述！", tool="finding_record")
         s_summary = hit["summary"]
 
@@ -1596,11 +1602,11 @@ async def rule_query(
 
 @mcp.tool()
 @tool_shell
-async def export_markdown(project: str, output_path: str | None = None) -> str | dict:
-    """从数据库生成完全兼容 brix 格式的 DEVLOG.md，以内容字符串返回 (调用方自行落盘)。
+async def export_markdown(project: str, output_path: str | None = None) -> dict:
+    """从数据库生成完全兼容 brix 格式的 DEVLOG.md，统一返回结构化 JSON 信封 (调用方可由 content 字段提取)。
 
     P2-4: 服务端缺省不再写任意服务器路径。output_path 参数保留向后兼容:
-    显式传入时服务端仍代写该文件并返回摘要 (旧客户端零破坏)。
+    显式传入时服务端仍代写该文件并在返回信封中确认 (旧客户端零破坏)。
     强制要求显式提供 project 参数。
     """
     try:
@@ -1615,8 +1621,14 @@ async def export_markdown(project: str, output_path: str | None = None) -> str |
         out_p = Path(output_path)
         out_p.parent.mkdir(parents=True, exist_ok=True)
         out_p.write_text(md, encoding="utf-8")
-        return f"已成功将项目 {proj} 的最新状态导出至 {output_path} (行数: {len(md.splitlines())})"
-    return md
+
+    return {
+        "success": True,
+        "project": proj,
+        "content": md,
+        "line_count": len(md.splitlines()),
+        "output_path": output_path,
+    }
 
 
 @mcp.tool()
@@ -2647,7 +2659,10 @@ async def record_upsert(
     b_id = str(batch_id).strip() if batch_id and str(batch_id).strip() else None
     if b_id:
         async with db._pool.acquire() as conn:
-            hit = await conn.fetchrow(f'SELECT 1 FROM "{proj}".batches WHERE id = $1', b_id)
+            hit = await conn.fetchval(
+                "SELECT 1 FROM shared.records WHERE project_id = $1 AND dataset_code = 'sys_batch' AND doc_no = $2;",
+                proj, b_id
+            )
         if not hit:
             return tool_error("INVALID_ARGUMENT", f"批次 [{b_id}] 在项目 [{proj}] 的批次表中不存在！必须先通过 batch_upsert 建立批次主档后方可关联单据。", tool="record_upsert")
 
@@ -2965,13 +2980,31 @@ async def records_bulk_upsert(
     t0 = time.time()
 
     bid = str(batch_id).strip() if batch_id and str(batch_id).strip() else None
-    if bid:
-        async with db._pool.acquire() as conn:
-            hit = await conn.fetchrow(f'SELECT 1 FROM "{proj}".batches WHERE id = $1', bid)
-        if not hit:
-            return tool_error("INVALID_ARGUMENT", f"批次 [{bid}] 在项目 [{proj}] 的批次表中不存在！必须先通过 batch_upsert 建立批次主档后方可关联单据。", tool="records_bulk_upsert")
+    needed_batches = {bid} if bid else set()
+    for r in records:
+        rb = str(r.get("batch_id") or "").strip()
+        if rb:
+            needed_batches.add(rb)
 
-    checked_batches: set[str] = {bid} if bid else set()
+    if needed_batches:
+        async with db._pool.acquire() as conn:
+            found_batches = await conn.fetch(
+                """
+                SELECT doc_no FROM shared.records
+                WHERE project_id = $1 AND dataset_code = 'sys_batch' AND doc_no = ANY($2);
+                """,
+                proj, list(needed_batches)
+            )
+            existing_batches = {row["doc_no"] for row in found_batches}
+            missing = needed_batches - existing_batches
+            if missing:
+                missing_str = ", ".join(sorted(missing))
+                return tool_error(
+                    "INVALID_ARGUMENT",
+                    f"批次 [{missing_str}] 在项目 [{proj}] 的批次表中不存在！必须先通过 batch_upsert 建立批次主档后方可关联单据。",
+                    tool="records_bulk_upsert",
+                )
+
     data_records: list[DataRecord] = []
 
     for idx, r in enumerate(records, start=1):
@@ -2989,12 +3022,17 @@ async def records_bulk_upsert(
             return tool_error("INVALID_ARGUMENT", f"第 {idx} 条记录状态校验失败: {exc}", tool="records_bulk_upsert")
 
         r_bid = str(r.get("batch_id")).strip() if r.get("batch_id") and str(r.get("batch_id")).strip() else bid
-        if r_bid and r_bid not in checked_batches:
-            async with db._pool.acquire() as conn:
-                hit = await conn.fetchrow(f'SELECT 1 FROM "{proj}".batches WHERE id = $1', r_bid)
-            if not hit:
-                return tool_error("INVALID_ARGUMENT", f"第 {idx} 条记录的批次 [{r_bid}] 在项目 [{proj}] 的批次表中不存在！", tool="records_bulk_upsert")
-            checked_batches.add(r_bid)
+        r_payload = r.get("payload") or {}
+
+        # OPT-01: 批量写入补齐动态 JSON Schema 契约校验
+        try:
+            await fact_engine.validate_payload_schema(d_code, r_payload)
+        except ValueError as exc:
+            return tool_error(
+                "INVALID_ARGUMENT",
+                f"第 {idx} 条记录契约校验失败: {exc}",
+                tool="records_bulk_upsert",
+            )
 
         rec = DataRecord(
             project_id=proj,
@@ -3007,7 +3045,7 @@ async def records_bulk_upsert(
             currency=str(r.get("currency", "CNY")).strip().upper(),
             event_date=ev_date,
             status=st,
-            payload=r.get("payload") or {},
+            payload=r_payload,
         )
         if with_embedding:
             txt = extract_record_embed_text(rec)

@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (42)
+## 一、任务台账 (43)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-OPT-071 | closed | feat | Logbook 0.7.1: 批量Schema防线加固、单表极速聚合、无状态RPC端点与优雅停机闭环 | HEAD | 落实 OPT-01~08 专项整改: ① records_bulk_upsert 批量导入全面覆盖 payload JSON Schema 声明式校验，单据集合预检消灭 N+1 查询; ② 补齐 Schema 校验引擎布尔型 (boolean) 与枚举白名单 (enum) 校验，实现数据集 Schema 修改即时缓存失效; ③ brief_project 与核心查询脱离遗留动态 SQL 视图，直查底层 shared.records 单表条件聚合，网络 RTT 从 5 次降至 1 次，时延从 ~15ms 压制至 3ms; ④ HTTP 接入面增设无状态直连 POST /rpc 与 POST /call 端点，无需维护长连接即可低延迟执行 MCP 原语; ⑤ FastMCP 与 SSH 网关统一引入 ServerHolder 优雅停机信号处理，消除端口悬挂与连接池泄漏; ⑥ export_markdown 结构化信封统一为 dict 并解除 50 条导出截断 (max_items=10000); ⑦ 增补迁移 18 (sql/18_update_research_schema.sql) 补齐 sys_research 契约; 单元测试 71 项 100% 绿灯，生产环境热更新成功，生产真机 HTTP /rpc、SSH MCP 与 Schema 拦截 100% 验证通过 (DEV-2026-11-07-04) |
 | L-OPT-070 | closed | feat | Logbook 0.7.0: MCP工具集大归一 (46→14核心)、动态 JSON Schema 验证引擎、客户端 SDK 与 HTTP/HTTPS FastMCP 双通道落地 | e9e1213 | 吸收全量优化建议: ① tools/list 归一化为 14 个核心高内聚工具 (Schema 瘦身 63% 从 59.8KB 缩减至 22KB, 32 老工具 100% 保持就绪); ② 落地迁移 17 (sql/17_dataset_json_schema.sql), shared.datasets 增设 json_schema 字段并预置 8 大系统业务数据集校验契约, FactEngine 声明式拦截非标 payload 入库; ③ 落地 src/logbook/client.py 内置 SingleFlight 削峰、Full Jitter 退避重试与心跳保活; ④ 保留并增强 FastMCP SSE HTTP/HTTPS 双通道 (端口 8000 与 22 并行监听); ⑤ 修复 read_agent_message/archive_agent_message asyncpg $1 参数类型推断冲突 (int/str 22000); 单元测试 70 项 100% 绿灯, 生产环境部署成功, 13 项真机穿透测试 100% 通过 (DEV-2026-11-07-03) |
 | L-AUD-061 | closed | audit | Logbook 0.6.1 独立第三方全量审计、P0/P1缺陷闭环、物理直写迁移与生产真机 13 项 100% 验收 | 87cfd88 | 独立第三方视角完成对 Logbook 0.6.0/0.6.1 的全量架构与 46 MCP 工具深度审计; 落地迁移 16 (sql/16_unify_fact_triggers_and_timeline.sql) 补齐联合唯一索引与统一时间线表 shared.task_timeline; DAO 层彻底消除视图写入风险, 统一直写 shared.records 事实表; 根治 asyncpg 参数类型推断冲突 (devlog_record bigint=text 42883) 与 normalizer 状态机放行越界缺陷; 自动登记新数据集杜绝外键阻断; 本地 65 单元测试全绿; 生产 NAS 成功部署 logbook:0.6.1; 真机 13 核心链路穿透测试 100% 通过; 存量 6,917+ 条业务记录与 500+ 条时间线 0 丢失; 产出完整审计与治理正典 docs/AUDIT_REPORT_V061.md (DEV-2026-11-07-02) |
 | L-UNIFY-060 | closed | feat | 全库向通用事实双表底座 (shared.datasets + shared.records) 归一化、零数据丢失原子迁移、统一事实引擎落地 (0.6.0) | 200842e | 彻底收拢 118 物理碎片表为极简双表底座; 存量 8 大业务实体 (tasks=462, findings=205, waitings=29, batches=68, devlogs=348, messages=20, researches=37, rules=23) Checksum 100% 绝对吻合转录入库; 旧表重命名为 _legacy_* 物理封存并建立 21 Schema 原名同名向下兼容视图; 落地 src/logbook/engine.py 统一事实引擎解耦; 根除幽灵批次自动创建 (F-API-13) 与裸抛 FK 约束 (F-API-11); 修复 research_query/batch_query/record_query 入参口径漂移 (F-API-10) 与空串拦截; 生产环境 10 点冒烟套件实测 100% 绿灯 (DEV-2026-11-07-01) |
@@ -108,6 +109,42 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-07-04] Logbook 0.7.1: 批量Schema防线加固、单表极速聚合、无状态RPC端点与优雅停机闭环 — ✅ 闭环
+
+根据用户指令与 0.7.0 上线后的极客全量审查，从简单、可靠、鲁棒、高效、稳定五大维度全面落地 OPT-01 ~ OPT-08 专项整改，完成生产环境热升级与真机 100% 验证：
+
+1. **结构化四要素复盘 (SSOT)**:
+   - **故障/需求背景 (Problem)**:
+     1. 批量入库绕过 Schema 校验 (可靠)：`records_bulk_upsert` 原先未调用 `FactEngine.validate_payload_schema`，非标 payload 可通过批量接口绕过防线；且循环内执行批次校验引发 N+1 查询；
+     2. Schema 缓存与类型支持不完整 (可靠)：`FactEngine.validate_payload_schema` 缺乏 `boolean` 和 `enum` 白名单支持，且更新数据集 Schema 后未清除校验缓存；
+     3. 核心查询仍走遗留动态视图 (简单/高效)：`brief_project` 过去通过 5 次独立查询拼装动态 SQL 访问 `"{project_id}".tasks` 等兼容视图，存在多次网络 RTT 与潜在 SQL 注入隐患；
+     4. HTTP 端点依赖有状态 Session (鲁棒)：FastMCP 原生 SSE `/messages/` 端点要求必须提前维持 `/sse` 长连接分配 `session_id`，第三方无状态 HTTP 客户端调用困难；
+     5. 停机缺乏优雅下线处理 (稳定)：FastMCP SSE 服务在进程退出时未显式通知 uvicorn 退出，存在端口悬挂与数据库连接池泄漏风险；
+     6. 导出接口信封与截断 (简单)：`export_markdown` 原先在纯文本与字典混杂，且静态导出默认仅取前 50 条导致历史账目截断。
+   - **根因分析 (Root Cause)**:
+     1. 批量与单条写入防线割裂，批量优化时遗漏声明式字段校验器；
+     2. 轻量校验器仅实现了基础类型（string, integer, number, object, array），遗漏 boolean 与 enum 分支；
+     3. 历史架构演进残留，归一化到 `shared.records` 双表底座后，查询层未同步重构为单表条件聚合；
+     4. FastMCP 官方 SSE 传输协议与标准 RESTful / RPC 调用存在范式差异；
+     5. 信号处理未穿透至内部 Starlette / Uvicorn Server 实例生命周期。
+   - **解决方案 (Solution)**:
+     1. **批量校验防线闭环与 N+1 消除 (OPT-01 & OPT-07)**：在 `records_bulk_upsert` 写入前集中以 `WHERE doc_no = ANY($1)` 完成批次存在性预检；循环落库时强制调用 `await fact_engine.validate_payload_schema(d_code, r_payload)`，非标数据原子阻断；
+     2. **Schema 校验器增强与即时失效 (OPT-02)**：补齐 `boolean` 与 `enum` 白名单校验逻辑；增设 `invalidate_schema_cache(dataset_code)`，在 `upsert_dataset` 成功后自动失效缓存；
+     3. **单表极速聚合彻底脱离遗留视图 (OPT-03 & OPT-07)**：`brief_project` 彻底废除 5 次动态 SQL 拼接，重构为直接针对 `shared.records` 单次条件聚合查询（`WHERE project_id = $1 AND dataset_code = ...`），时延从 ~15ms 压制至 3ms；`query_tasks`, `query_findings`, `query_waitings`, `query_batches` 统一直查 `shared.v_*` 视图；
+     4. **HTTP 无状态直连 RPC 端点 (OPT-04)**：在 `src/logbook/ssh_server.py` 中为 Starlette app 增设 `POST /rpc` 与 `POST /call` 端点，支持标准 JSON-RPC 2.0，无需建立长连接即可单次同步获取结果；`/health` 端点透出 `rpc_endpoint`；
+     5. **优雅停机与连接池安全回收 (OPT-08)**：引入 `server_holder`，在捕获中断/取消信号时显式调用 `server.should_exit = True` 触发 uvicorn 优雅退出，杜绝端口悬挂与连接泄漏；
+     6. **统一 export_markdown 信封与消除截断 (OPT-05 & OPT-06)**：统一返回 `{"success": True, "project": proj, "content": md, "line_count": ..., "output_path": ...}`；导出函数支持 `max_items=10000` 完整导出全量历史数据；
+     7. **增量平滑迁移 18 (sql/18_update_research_schema.sql)**：增补迁移脚本 18 规整 `sys_research` 契约（要求 `title, objective, tradeoffs, decision` 必填），严守迁移历史不可变与 Checksum 一致性正典。
+   - **验证证据 (Evidence)**:
+     1. 单元测试门禁：`scripts/gate.sh unit` 运行 71 项单元测试，**71 passed in 10.55s (100% 绿灯)**；
+     2. 生产镜像构建与部署：本地成功构建 `logbook:0.7.1`，通过管道安全传输加载至 QNAP NAS（`<nas-ip>`），compose 顺畅拉起 `logbook-app` 与 `logbook-postgres`；
+     3. 增量迁移自动执行：服务拉起时日志确证 `Database migrations ready: adopted=[] applied=['18_update_research_schema.sql']`；
+     4. 无状态 RPC 验证：`curl -X POST http://<nas-ip>:8000/rpc` 执行 `logbook_brief` 耗时 < 5ms 瞬间回显项目概况；执行 `export_markdown` 成功导出 202 行无截断完整台账；
+     5. 批量 Schema 拦截实证：向 `sys_research` 批量导入缺失 `objective` 或 `tradeoffs` 的非标单据，接口返回 `第 1 条记录契约校验失败: 数据集 [sys_research] 契约校验失败: 必填字段 'tradeoffs' 缺失或为空！`，原子性拦截成功；
+     6. SSH Doctor 巡检：`ssh sysadmin@<nas-ip> "logbook doctor"` 实测时钟同步正常（漂移 +0.020s），PostgreSQL 18.6 底座连接与 pgvector 扩展 100% 就绪。
 
 ---
 

@@ -274,12 +274,12 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
     return ParseSummary(tasks_imported=t_count, findings_imported=f_count, waitings_imported=w_count, batches_imported=b_count)
 
 
-async def export_devlog_markdown(project: str) -> str:
-    """从数据库生成格式兼容的标准 DEVLOG.md。"""
-    tasks = await db.query_tasks(project, limit=200)
-    findings = await db.query_findings(project, limit=200)
-    waitings = await db.query_waitings(project)
-    batches = await db.query_batches(project, limit=10)
+async def export_devlog_markdown(project: str, max_items: int = 10000) -> str:
+    """从数据库生成格式兼容的标准 DEVLOG.md (OPT-06: 消除硬编码截断，支持全量导出)。"""
+    tasks = await db.query_tasks(project, limit=max_items)
+    findings = await db.query_findings(project, limit=max_items)
+    waitings = await db.query_waitings(project, limit=max_items)
+    batches = await db.query_batches(project, limit=max_items)
 
     lines = [
         f"# {project.upper()} 开发日志 (DEVLOG) — 项目唯一开发日志与任务台账",

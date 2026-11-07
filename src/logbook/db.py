@@ -483,9 +483,10 @@ class Database:
         limit: int = 50
     ) -> list[Task]:
         await self.ensure_project(project)
-        conditions = ["1=1"]
-        params = []
-        idx = 1
+        # P1-4: LIMIT 参数化 + 钳制上限，杜绝 f-string 注入面
+        conditions = ["project_id = $1"]
+        params: list[Any] = [project]
+        idx = 2
 
         if status:
             conditions.append(f"status = ANY(${idx})")
@@ -508,14 +509,13 @@ class Database:
             params.append(parent_id)
             idx += 1
 
-        # P1-4: LIMIT 参数化 + 钳制上限，杜绝 f-string 注入面
         limit = self._clamp_limit(limit)
         params.append(limit)
         query = f"""
             SELECT id, batch_id, parent_id, title, task_type, priority, status,
                    assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags, created_at, updated_at,
                    started_at, closed_at, duration_seconds
-            FROM "{project}".tasks
+            FROM shared.v_tasks
             WHERE {" AND ".join(conditions)}
             ORDER BY created_at DESC
             LIMIT ${idx};
@@ -525,14 +525,17 @@ class Database:
             return [Task(**dict(r)) for r in rows]
 
     async def get_task(self, project: str, task_id: str) -> Task | None:
-        await self.ensure_project(project)
-        query = f"""
+        await self.connect()
+        query = """
             SELECT id, batch_id, parent_id, title, task_type, priority, status,
                    assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags, created_at, updated_at,
                    started_at, closed_at, duration_seconds
-            FROM "{project}".tasks
-            WHERE id = $1;
+            FROM shared.v_tasks
+            WHERE project_id = $1 AND id = $2;
         """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(query, project, task_id)
+            return Task(**dict(row)) if row else None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(query, task_id)
             return Task(**dict(row)) if row else None
@@ -637,10 +640,10 @@ class Database:
         severity: list[FindingSeverity] | None = None,
         limit: int = 50
     ) -> list[Finding]:
-        await self.ensure_project(project)
-        conditions = ["1=1"]
-        params = []
-        idx = 1
+        await self.connect()
+        conditions = ["project_id = $1"]
+        params: list[Any] = [project]
+        idx = 2
 
         if status:
             conditions.append(f"status = ANY(${idx})")
@@ -655,7 +658,7 @@ class Database:
         params.append(limit)
         query = f"""
             SELECT id, source, severity, status, task_id, reporter, agent_ip, summary, resolution, discovered_at, resolved_at
-            FROM "{project}".findings
+            FROM shared.v_findings
             WHERE {" AND ".join(conditions)}
             ORDER BY discovered_at DESC
             LIMIT ${idx};
@@ -746,10 +749,10 @@ class Database:
         status: WaitingStatus | None = None,
         limit: int = 50
     ) -> list[Waiting]:
-        await self.ensure_project(project)
-        conditions = ["1=1"]
-        params = []
-        idx = 1
+        await self.connect()
+        conditions = ["project_id = $1"]
+        params: list[Any] = [project]
+        idx = 2
         if status:
             conditions.append(f"status = ${idx}")
             params.append(status.value)
@@ -759,7 +762,7 @@ class Database:
         params.append(limit)
         query = f"""
             SELECT id, category, status, owner, agent_ip, description, resolution, blocked_at, resolved_at
-            FROM "{project}".waitings
+            FROM shared.v_waitings
             WHERE {" AND ".join(conditions)}
             ORDER BY blocked_at DESC
             LIMIT ${idx};
@@ -843,16 +846,17 @@ class Database:
         return batch
 
     async def query_batches(self, project: str, limit: int = 20) -> list[Batch]:
-        await self.ensure_project(project)
+        await self.connect()
         limit = self._clamp_limit(limit, default=20)
-        query = f"""
+        query = """
             SELECT id, title, status, branch_name, summary, methodology_notes, agent_ip, created_at, closed_at
-            FROM "{project}".batches
+            FROM shared.v_batches
+            WHERE project_id = $1
             ORDER BY created_at DESC
-            LIMIT {limit};
+            LIMIT $2;
         """
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(query)
+            rows = await conn.fetch(query, project, limit)
             return [Batch(**dict(r)) for r in rows]
 
     # =========================================================================
@@ -1157,7 +1161,7 @@ class Database:
     # =========================================================================
 
     async def brief_project(self, project_id: str, devlog_limit: int = 5) -> dict:
-        """一次查询拼装项目全貌简报。
+        """一次查询拼装项目全貌简报 (OPT-03 & OPT-07: 单次单表聚合，消灭 5 次网络 RTT)。
 
         返回 dict，键固定 (跨线接口契约，不得更改):
           - tasks_open:     未结任务 (planned/running/blocked) 精简列 list[dict]
@@ -1166,45 +1170,75 @@ class Database:
           - batch_running:  running 批次 list[dict]
           - recent_devlogs: 最近 N 条手记 (id/task_id/title/updated_at) list[dict]
         """
-        await self.ensure_project(project_id)
+        await self.connect()
         n = self._clamp_limit(devlog_limit, default=5)
         async with self._pool.acquire() as conn:
-            tasks_open = await conn.fetch(f"""
-                SELECT id, title, status, priority, assignee, updated_at
-                FROM "{project_id}".tasks
-                WHERE status IN ('planned', 'running', 'blocked')
+            rows = await conn.fetch("""
+                SELECT dataset_code, doc_no AS id, entity_name, status, payload, updated_at
+                FROM shared.records
+                WHERE project_id = $1
+                  AND (
+                      (dataset_code = 'sys_task' AND status IN ('planned', 'running', 'blocked'))
+                   OR (dataset_code = 'sys_finding' AND status IN ('open', 'infix', 'blocked'))
+                   OR (dataset_code = 'sys_waiting' AND status = 'open')
+                   OR (dataset_code = 'sys_batch' AND status = 'running')
+                   OR (dataset_code = 'sys_devlog')
+                  )
                 ORDER BY updated_at DESC;
-            """)
-            findings_open = await conn.fetch(f"""
-                SELECT id, severity, status, task_id, summary
-                FROM "{project_id}".findings
-                WHERE status IN ('open', 'infix', 'blocked')
-                ORDER BY discovered_at DESC;
-            """)
-            waitings_open = await conn.fetch(f"""
-                SELECT id, category, owner, description
-                FROM "{project_id}".waitings
-                WHERE status = 'open'
-                ORDER BY blocked_at DESC;
-            """)
-            batch_running = await conn.fetch(f"""
-                SELECT id, title FROM "{project_id}".batches WHERE status = 'running'
-                ORDER BY created_at DESC;
-            """)
-            recent_devlogs = await conn.fetch(
-                """SELECT id, task_id, title, updated_at
-                   FROM shared.devlogs
-                   WHERE project_id = $1
-                   ORDER BY updated_at DESC
-                   LIMIT $2;""",
-                project_id, n
-            )
+            """, project_id)
+
+        tasks_open = []
+        findings_open = []
+        waitings_open = []
+        batch_running = []
+        recent_devlogs = []
+
+        for r in rows:
+            d_code = r["dataset_code"]
+            p = r["payload"] if isinstance(r["payload"], dict) else json.loads(r["payload"] or "{}")
+            if d_code == "sys_task":
+                tasks_open.append({
+                    "id": r["id"],
+                    "title": r["entity_name"],
+                    "status": r["status"],
+                    "priority": p.get("priority", "P2"),
+                    "assignee": p.get("assignee"),
+                    "updated_at": r["updated_at"],
+                })
+            elif d_code == "sys_finding":
+                findings_open.append({
+                    "id": r["id"],
+                    "severity": p.get("severity", "P2"),
+                    "status": r["status"],
+                    "task_id": p.get("task_id"),
+                    "summary": p.get("summary") or r["entity_name"],
+                })
+            elif d_code == "sys_waiting":
+                waitings_open.append({
+                    "id": r["id"],
+                    "category": p.get("category", "user"),
+                    "owner": p.get("owner", "user"),
+                    "description": p.get("description") or r["entity_name"],
+                })
+            elif d_code == "sys_batch":
+                batch_running.append({
+                    "id": r["id"],
+                    "title": r["entity_name"],
+                })
+            elif d_code == "sys_devlog" and len(recent_devlogs) < n:
+                recent_devlogs.append({
+                    "id": p.get("devlog_id") or r["id"],
+                    "task_id": p.get("task_id"),
+                    "title": r["entity_name"],
+                    "updated_at": r["updated_at"],
+                })
+
         return {
-            "tasks_open": [dict(r) for r in tasks_open],
-            "findings_open": [dict(r) for r in findings_open],
-            "waitings_open": [dict(r) for r in waitings_open],
-            "batch_running": [dict(r) for r in batch_running],
-            "recent_devlogs": [dict(r) for r in recent_devlogs],
+            "tasks_open": tasks_open,
+            "findings_open": findings_open,
+            "waitings_open": waitings_open,
+            "batch_running": batch_running,
+            "recent_devlogs": recent_devlogs,
         }
 
     # =========================================================================
@@ -2591,6 +2625,11 @@ class Database:
                 d["alias_map"] = json.loads(d["alias_map"])
             if isinstance(d.get("json_schema"), str):
                 d["json_schema"] = json.loads(d["json_schema"])
+            try:
+                from .engine import fact_engine
+                fact_engine.invalidate_schema_cache(dataset.code)
+            except Exception:
+                pass
             return d
 
     async def get_dataset(self, code: str) -> dict | None:

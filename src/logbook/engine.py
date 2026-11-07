@@ -44,6 +44,15 @@ class FactEngine:
         self.db = database
         self._schema_cache: dict[str, dict[str, Any] | None] = {}
 
+    def invalidate_schema_cache(self, dataset_code: str | None = None) -> None:
+        """清空指定数据集或全量 Schema 内存缓存 (OPT-02)。"""
+        if not hasattr(self, "_schema_cache"):
+            self._schema_cache = {}
+        if dataset_code:
+            self._schema_cache.pop(dataset_code, None)
+        else:
+            self._schema_cache.clear()
+
     async def validate_payload_schema(self, dataset_code: str, payload: dict[str, Any]) -> None:
         """声明式校验 payload 是否符合该数据集在 shared.datasets 中的 json_schema 契约规范。"""
         if not dataset_code or not isinstance(payload, dict):
@@ -78,7 +87,7 @@ class FactEngine:
             if val is None or (isinstance(val, str) and not val.strip()):
                 raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 必填字段 '{field}' 缺失或为空！")
         
-        # 校验属性类型与最小长度
+        # 校验属性类型与最小长度及枚举约束 (OPT-02)
         props = schema.get("properties", {})
         for field, spec in props.items():
             if field in payload and payload[field] is not None:
@@ -92,10 +101,16 @@ class FactEngine:
                         raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 长度不能小于 {min_len}！")
                 elif p_type in ("number", "integer") and not isinstance(val, (int, float, Decimal)):
                     raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为数值类型！")
+                elif p_type == "boolean" and not isinstance(val, bool):
+                    raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为布尔类型 (true/false)！")
                 elif p_type == "array" and not isinstance(val, (list, tuple)):
                     raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为数组类型！")
                 elif p_type == "object" and not isinstance(val, dict):
                     raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为字典对象！")
+
+                enum_vals = spec.get("enum")
+                if enum_vals is not None and val not in enum_vals:
+                    raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 的值 '{val}' 不在合法枚举范围 {enum_vals} 内！")
 
     # -------------------------------------------------------------------------
     # 参数归一化与校验原语 (消除 F-API-10, F-SEARCH-07 等入参口径漂移)

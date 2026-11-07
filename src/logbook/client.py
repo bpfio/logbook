@@ -144,26 +144,34 @@ class LogbookClient:
         async def _do_call() -> dict[str, Any]:
             if self.base_url:
                 client = await self._get_http_client()
-                # FastMCP SSE messages 端点
                 payload = {
                     "jsonrpc": "2.0",
                     "id": f"req-{int(time.time() * 1000)}",
                     "method": "tools/call",
                     "params": {"name": tool_name, "arguments": arguments},
                 }
-                resp = await client.post("/messages/", json=payload)
-                resp.raise_for_status()
+                # OPT-04: 优先走无状态高性能 /rpc 路由，若无则尝试 /messages/
+                try:
+                    resp = await client.post("/rpc", json=payload)
+                    resp.raise_for_status()
+                except Exception:
+                    resp = await client.post("/messages/", json=payload)
+                    resp.raise_for_status()
+
                 data = resp.json()
                 if "error" in data:
                     return {"isError": True, "error": data["error"]}
                 result = data.get("result", {})
                 if isinstance(result, dict) and "content" in result:
                     content = result["content"]
-                    if content and isinstance(content, list) and hasattr(content[0], "text"):
-                        try:
-                            return json.loads(content[0].text)
-                        except Exception:
-                            return {"text": content[0].text}
+                    if content and isinstance(content, list):
+                        first = content[0]
+                        txt = first.get("text") if isinstance(first, dict) else getattr(first, "text", str(first))
+                        if txt:
+                            try:
+                                return json.loads(txt)
+                            except Exception:
+                                return {"text": txt}
                 return result
             else:
                 raise NotImplementedError("直接 SSH 命令调用可通过 CLI 或底层 AsyncSSH 发起")

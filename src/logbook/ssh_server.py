@@ -491,8 +491,8 @@ async def start_ssh_server(host: str = "127.0.0.1", port: int = 22):
     return server
 
 
-async def start_sse_server(host: str = "0.0.0.0", port: int = 8000):
-    """启动 FastMCP SSE HTTP 服务端 (0.5.1+: 支持 /sse 端点与 /health 探针)"""
+async def start_sse_server(host: str = "0.0.0.0", port: int = 8000, server_holder: dict | None = None):
+    """启动 FastMCP SSE HTTP 服务端 (支持 /sse、/rpc 与 /health 探针，OPT-04 & OPT-08)"""
     import uvicorn
     from starlette.responses import JSONResponse
     from starlette.routing import Route
@@ -524,11 +524,69 @@ async def start_sse_server(host: str = "0.0.0.0", port: int = 8000):
             "transport": "sse",
             "scheme": scheme,
             "sse_endpoint": "/sse",
+            "rpc_endpoint": "/rpc",
             "messages_endpoint": "/messages/",
         })
 
+    async def rpc_endpoint(request):
+        """无状态单次 JSON-RPC 2.0 / 直接调用端点 (OPT-04)"""
+        try:
+            body = await request.json()
+        except Exception as e:
+            return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32700, "message": f"Parse error: {e}"}}, status_code=400)
+
+        req_id = body.get("id", 1)
+        if body.get("method") == "tools/call":
+            params = body.get("params") or {}
+            tool_name = params.get("name")
+            arguments = params.get("arguments") or {}
+        elif "name" in body:
+            tool_name = body.get("name")
+            arguments = body.get("arguments") or {}
+        elif body.get("method") == "tools/list":
+            tools = await mcp.list_tools()
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"tools": [t.model_dump(mode="json") if hasattr(t, "model_dump") else t for t in tools]}
+            })
+        else:
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32601, "message": f"Method not supported: {body.get('method')}"}
+            }, status_code=400)
+
+        if not tool_name:
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": "Missing tool name"}
+            }, status_code=400)
+
+        try:
+            res = await mcp.call_tool(tool_name, arguments)
+            content_list = []
+            if hasattr(res, "content") and res.content:
+                for c in res.content:
+                    txt = getattr(c, "text", str(c))
+                    content_list.append({"type": "text", "text": txt})
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"content": content_list, "isError": getattr(res, "is_error", False)}
+            })
+        except Exception as e:
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32000, "message": str(e)}
+            }, status_code=500)
+
     app.routes.append(Route("/health", health_endpoint))
     app.routes.append(Route("/ping", health_endpoint))
+    app.routes.append(Route("/rpc", rpc_endpoint, methods=["POST"]))
+    app.routes.append(Route("/call", rpc_endpoint, methods=["POST"]))
 
     config_kwargs = {
         "host": host,
@@ -542,7 +600,10 @@ async def start_sse_server(host: str = "0.0.0.0", port: int = 8000):
 
     config = uvicorn.Config(app, **config_kwargs)
     server = uvicorn.Server(config)
-    logger.info(f"Logbook FastMCP SSE Server listening on {scheme}://{host}:{port}/sse (health: /health)")
+    if server_holder is not None:
+        server_holder["server"] = server
+
+    logger.info(f"Logbook FastMCP SSE Server listening on {scheme}://{host}:{port}/sse (health: /health, rpc: /rpc)")
     await server.serve()
 
 
@@ -573,16 +634,24 @@ async def run_server():
     from logbook.mcp_server import warmup_embedding_probe
     asyncio.create_task(warmup_embedding_probe())
 
+    sse_holder: dict[str, Any] = {}
     tasks = [asyncio.create_task(server.wait_closed())]
     if sse_enabled:
-        tasks.append(asyncio.create_task(start_sse_server(sse_host, sse_port)))
+        tasks.append(asyncio.create_task(start_sse_server(sse_host, sse_port, server_holder=sse_holder)))
+
+    def _trigger_graceful_shutdown():
+        u_server = sse_holder.get("server")
+        if u_server is not None:
+            u_server.should_exit = True
 
     try:
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        _trigger_graceful_shutdown()
         for t in pending:
             t.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
     except (asyncio.CancelledError, KeyboardInterrupt):
+        _trigger_graceful_shutdown()
         for t in tasks:
             if not t.done():
                 t.cancel()
