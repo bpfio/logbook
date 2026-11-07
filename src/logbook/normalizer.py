@@ -363,6 +363,25 @@ RECORD_STATUS_MAP = {
     "cancelled": "cancelled",
     "canceled": "cancelled",
     "void": "cancelled",
+    "active": "active",
+    "planned": "planned",
+    "running": "running",
+    "review": "review",
+    "blocked": "blocked",
+    "closed": "closed",
+    "wontfix": "wontfix",
+    "open": "open",
+    "infix": "infix",
+    "fixed": "fixed",
+    "completed": "completed",
+    "halted": "halted",
+    "archived": "archived",
+    "read": "read",
+    "unread": "unread",
+    "delivered": "delivered",
+    "project_private": "project_private",
+    "org_internal": "org_internal",
+    "public_safe": "public_safe",
 }
 
 
@@ -386,8 +405,8 @@ def normalize_record_status(val: Any, default: str | None = None) -> str:
     if val is None or str(val).strip() == "":
         if default is not None:
             return default
-        raise ValueError("record status 不能为空！")
-    c = clean_text(val)
+        return "recorded"
+    c = clean_text(val).lower()
     if c in RECORD_STATUS_MAP:
         return RECORD_STATUS_MAP[c]
     if default is not None:

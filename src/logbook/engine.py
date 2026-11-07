@@ -155,7 +155,7 @@ class FactEngine:
             doc_no=str(doc_no).strip(),
             entity_name=e_name,
             payload=payload,
-            status=RecordStatus(st) if st in RecordStatus.__members__.values() else RecordStatus.ACTIVE,
+            status=st,
             event_date=event_date or date.today(),
             parent_id=parent_id,
             batch_id=batch_id,

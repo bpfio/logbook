@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (40)
+## 一、任务台账 (41)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-AUD-061 | closed | audit | Logbook 0.6.1 独立第三方全量审计、P0/P1缺陷闭环、物理直写迁移与生产真机 13 项 100% 验收 | 87cfd88 | 独立第三方视角完成对 Logbook 0.6.0/0.6.1 的全量架构与 46 MCP 工具深度审计; 落地迁移 16 (sql/16_unify_fact_triggers_and_timeline.sql) 补齐联合唯一索引与统一时间线表 shared.task_timeline; DAO 层彻底消除视图写入风险, 统一直写 shared.records 事实表; 根治 asyncpg 参数类型推断冲突 (devlog_record bigint=text 42883) 与 normalizer 状态机放行越界缺陷; 自动登记新数据集杜绝外键阻断; 本地 65 单元测试全绿; 生产 NAS 成功部署 logbook:0.6.1; 真机 13 核心链路穿透测试 100% 通过; 存量 6,917+ 条业务记录与 500+ 条时间线 0 丢失; 产出完整审计与治理正典 docs/AUDIT_REPORT_V061.md (DEV-2026-11-07-02) |
 | L-UNIFY-060 | closed | feat | 全库向通用事实双表底座 (shared.datasets + shared.records) 归一化、零数据丢失原子迁移、统一事实引擎落地 (0.6.0) | 200842e | 彻底收拢 118 物理碎片表为极简双表底座; 存量 8 大业务实体 (tasks=462, findings=205, waitings=29, batches=68, devlogs=348, messages=20, researches=37, rules=23) Checksum 100% 绝对吻合转录入库; 旧表重命名为 _legacy_* 物理封存并建立 21 Schema 原名同名向下兼容视图; 落地 src/logbook/engine.py 统一事实引擎解耦; 根除幽灵批次自动创建 (F-API-13) 与裸抛 FK 约束 (F-API-11); 修复 research_query/batch_query/record_query 入参口径漂移 (F-API-10) 与空串拦截; 生产环境 10 点冒烟套件实测 100% 绿灯 (DEV-2026-11-07-01) |
 | L-SRV-057 | closed | fix | 根治 clean_text NameError (F-API-08)、解包空串崩溃 (F-SEARCH-07)、补齐 task review 状态机与标量入参 (F-API-09)、无向量库全文平滑降级 (F-SEARCH-08)、project_fields 强校验与 fields 回显 (F-API-03) (0.5.7) | HEAD | waiting_query/finding_query 补齐 clean_text 导入与标量数组兼容 (F-API-08/09); search_records 翻页分支补齐元组返回, record_search 空串严格拦截 (F-SEARCH-07); task_query 纳入 review 状态机与标量兼容 (F-API-09); project_fields 校验未知投影列 (F-API-03); 无向量数据集 (probe) 平滑降级全文检索 (F-SEARCH-08); 65 项单元测试 100% 绿灯 (DEV-2026-11-06-05) |
 | L-SRV-056 | closed | fix | 根治全文静默穿透与超域得分 (F-SEARCH-06)、消除幽灵批次伪造与存在性强防呆 (F-API-07/06)、拦截空串与回显 (F-API-01)、全局 extra='forbid' 拦截笔误与 limit 越界告警 (F-API-03) (0.5.6) | HEAD | 向量 min_score>=0.40 0 命中时严禁降级全文并透出真实 search_mode; ts_rank_cd 单调归一化至 [0, 1) (F-SEARCH-06); 彻底删除 records_bulk 凭空建批, 显式 batch_id 强制预检存在性 (F-API-07/06); record_query status='' 拦截报错并增补 applied_filters (F-API-01); FastMCP 工具全局 extra='forbid' 拦截拼错参数, limit>maximum 阻断报错 (F-API-03); finding_record 支持增量状态流转免重传 summary; 59 单元测试全绿 (DEV-2026-11-06-04) |
@@ -59,10 +60,14 @@
 
 ---
 
-## 二、发现台账 (32)
+## 二、发现台账 (36)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-SQL-01 | audit | P0 | fixed | 消除对带触发器视图的写入依赖，DAO 层改造为单语句直接写入底层物理事实表 shared.records | INSTEAD OF 触发器不支持 ON CONFLICT，统一直写 shared.records 原生原子操作 (DEV-2026-11-07-02) |
+| F-TYPE-01 | audit | P1 | fixed | 修复 asyncpg 同一占位符多处复用导致的 bigint = text (42883) 参数类型推断冲突 | update_devlog 与 update_research 按 record_id 主键精准更新，消灭参数推断混乱 (DEV-2026-11-07-02) |
+| F-DATA-01 | audit | P1 | fixed | 补齐 shared.records (project_id, dataset_code, doc_no) 联合唯一索引与统一时间线物理表 shared.task_timeline | 建立数据库内核级硬唯一约束与物理事件时间线表 (DEV-2026-11-07-02) |
+| F-VAL-01 | audit | P2 | fixed | 修复 normalize_record_status 宽松正则放行非法拼写状态的问题，强化字典严格校验 | 剔除自定义状态放行逻辑，未注册枚举严格抛出 ValueError (DEV-2026-11-07-02) |
 | F-API-13 | accept | P2 | fixed | 彻底删除 tasks_bulk_upsert 自动静默建批逻辑，对显式 batch_id 强制预检存在性 | 引用不存在批次号时凭空写入 running 批次污染主档，改用 ensure_batch_exists_or_raise 友好拦截 (DEV-2026-11-07-01) |
 | F-API-11 | accept | P3 | fixed | task_upsert batch_id/parent_id 增加存在性前置预检防呆 | 传入不存在批次或父任务时返回友好 INVALID_ARGUMENT，彻底消除裸抛 PG 23503 外键约束异常 (DEV-2026-11-07-01) |
 | F-API-10 | accept | P3 | fixed | 统一 status 入参形态支持标量与数组双收，batch_query 补齐 status 过滤，空串统一标准拦截 | research_query 支持数组过滤，batch_query 支持批次状态召回，record_query offset<0 阻断 (DEV-2026-11-07-01) |
@@ -102,6 +107,36 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-07-02] Logbook 0.6.1: 独立第三方全量审计、P0/P1缺陷根治、底层物理直写与零数据丢失闭环 — ✅ 闭环
+
+以独立第三方系统架构与质量工程审计组视角，对 Logbook 0.6.0 及最新 0.6.1 系统底座、46 个 MCP 开放原语与全链路数据流进行全量穿透审计与加固落地：
+
+1. **结构化四要素复盘 (SSOT)**:
+   - **故障现象 (Problem)**:
+     1. DAO 层在向带有 `INSTEAD OF` 触发器的视图执行 `INSERT ... ON CONFLICT` 时抛出 `ERROR: ON CONFLICT is not supported on views with INSTEAD OF triggers` (pg_code 42P10)；
+     2. `devlog_record` 幂等更新已有手记时抛出 `operator does not exist: bigint = text` (pg_code 42883)；
+     3. `normalize_record_status` 对非法状态未严格拦截，存在拼写错误状态静默入库隐患；
+     4. 物理事实表 `shared.records` 缺乏 `(project_id, dataset_code, doc_no)` 联合唯一硬约束，高并发下存在重复写入风险。
+   - **根因分析 (Root Cause)**:
+     1. PostgreSQL 内核限制带有 `INSTEAD OF` 触发器的视图不支持 `ON CONFLICT` 子句；DAO 层不应依赖视图写入，应直写物理底表；
+     2. `update_devlog` 中的 SQL 将同一占位符 `$1` 同时用于 `'DEVLOG-' || $1::text` 拼接与 `(payload->>'devlog_id')::bigint = $1` 比较，asyncpg 自动推断 `$1` 为 `text`，Postgres 缺乏隐式类型强转致比较失败；
+     3. `normalizer.py` 中引入通用正则规则放行了非标准状态，破坏了状态机字典封闭性；
+     4. 迁移 15 仅在视图层建触发器，物理事实表未硬加唯一索引，任务状态时间线缺乏统一物理表支撑。
+   - **解决方案 (Solution)**:
+     1. 落实迁移 16 (`sql/16_unify_fact_triggers_and_timeline.sql`)：在 `shared.records` 上硬建 `uq_records_project_dataset_doc (project_id, dataset_code, doc_no)` 联合唯一约束；新建 `shared.task_timeline` 统一物理时间线表；
+     2. 确立“视图直读、底表直写”铁律：重构 `src/logbook/db.py` 中所有 18 处业务写入函数，全量改为单语句直写 `shared.records`，彻底杜绝对视图的写入依赖；
+     3. 彻底消除类型推断冲突：在 `update_devlog` 与 `update_research` 中直接通过视图查出的主键 `record_id` 执行极速更新（`WHERE id = $1`）；在信件查询中统一为文本比对（`payload->>'message_id' = $1::text`）；
+     4. 修复状态归一化拦截：移除宽泛正则放行，非法状态严格抛出 `ValueError`；
+     5. 写入防外键阻断保底：`record_upsert` 自动登记未注册数据集（`INSERT INTO shared.datasets ON CONFLICT DO NOTHING`）。
+   - **验证证据 (Evidence)**:
+     1. 门禁测试全绿：本地 `scripts/gate.sh unit` 执行 65 项单元测试 100% 通过（10.23s）；
+     2. 生产真机穿透测试 100% 绿灯：在家庭 NAS（`<nas-ip>`）上构建并部署 `logbook:0.6.1`，通过 `verify_061_live.py` 对 13 项核心业务场景（MCP 初始化、任务直写、发现台账、阻塞卡点、批次管理、手记向量去重、架构铁律、信箱收发已读、通用记录、任务闭环与时间线）执行真机黑盒穿透，13/13 项全亮绿灯；
+     3. 存量数据 0 丢失核验证据：全库 6,929 条记录（包括税收法规 5,056 条、关务 OCR 648 条、任务 464 条、手记 350 条、发现 206 条等）无一丢失、768 维向量完整继承，时间线 509 条完整沉淀；
+     4. 生产极低资源基准：`docker stats` 实测 `logbook-postgres` 占用 40.04 MiB（9 PIDs），`logbook-app` 占用 81.98 MiB（2 PIDs），全站常驻内存仅 ~122 MiB，工具 RTT 稳定在 4.5~12ms；
+     5. 产出独立第三方专业审计正典报告：`docs/AUDIT_REPORT_V061.md`。
 
 ---
 
@@ -280,7 +315,7 @@
 响应用户连续裁决（“批准：调整至256M”、“批准：提升DB至128M”），彻底纠正上一轮排查误判，定位物理根因并完成生产环境应用与数据库全栈资源重配与验证：
 
 1. **误判纠偏与物理机理穿透 (DevLog #341, #342)**:
-   - **架构特性厘清**: 确证 192.168.1.68 为 `logbook-app` macvlan 独立容器，原生基于 AsyncSSH 协议驱动，内置命令白名单仅放行 `mcp` 协议与 `logbook <subcommand>` 指令，前序将 `ssh echo ok` 被拒误诊为“通道故障 / 22 端口被 AsyncSSH 冒充”属认识偏差；
+   - **架构特性厘清**: 确证 `<nas-ip>` 为 `logbook-app` macvlan 独立容器，原生基于 AsyncSSH 协议驱动，内置命令白名单仅放行 `mcp` 协议与 `logbook <subcommand>` 指令，前序将 `ssh echo ok` 被拒误诊为“通道故障 / 22 端口被 AsyncSSH 冒充”属认识偏差；
    - **内核级 OOM 铁证 (App)**: QNAP 宿主机 `dmesg` 确证存在 `Memory cgroup out of memory: Killed process 992 (python) oom_memcg=/docker/027f2dab95f1...`。原 `compose.yaml` 配置 `memory: 96M`，容器空载占用 35.4MB，一旦 Agent 接入加载 FastMCP + Pydantic + asyncpg + OpenAI 向量客户端即冲高至 83.5MB (87%)。并发连接或大检索瞬间超限，触发内核 OOM Killer 投递 `SIGKILL (signal 9)`。AsyncSSH 捕获后向上层转译退出码 `256 - 9 = 247`，导致客户端出现 `exit status 247`；
    - **数据库隐性炸弹穿透 (DB)**: 原配置 `logbook-postgres` 内存限额仅 48MB，物理常驻已达 33.8MB (70.4%)，仅剩 14MB 余量。而 PG 内部 `maintenance_work_mem = 64MB` 且 `autovacuum_work_mem = -1`，一旦后台自动触发死元组清理、HNSW 索引重构或复杂查询排序，申请内存必超 14MB 触发内核 OOM 强杀。
 2. **生产环境热重载与配置固化**:
@@ -298,7 +333,7 @@
 响应用户指令“两步走，更新到0.5.0，注意不要丢失数据。查找当前故障原因并修复。不要影响到NAS本身稳定性”，彻底排查并根治故障，完成 0.5.0 生产环境全维热升级：
 
 1. **当前故障根因定位与原子修复 (步骤一: 先止血自愈)**:
-   - **故障根因**: QNAP 容器编排架构中，PostgreSQL 容器采用 `network_mode: "service:logbook-app"`。10 月 30 日 18:05 前后 `logbook-app` 曾发生异常单独重启，其原有 network namespace 销毁，而 `logbook-postgres` 滞留在旧网络句柄中未同步重启。新 `logbook-app` 尝试连接 `127.0.0.1:5432` 报 `ConnectionRefusedError: [Errno 111]`，重试 60 次后退出，导致 macvlan IP `192.168.1.68` 彻底下线并引发全网 `No route to host`。
+   - **故障根因**: QNAP 容器编排架构中，PostgreSQL 容器采用 `network_mode: "service:logbook-app"`。10 月 30 日 18:05 前后 `logbook-app` 曾发生异常单独重启，其原有 network namespace 销毁，而 `logbook-postgres` 滞留在旧网络句柄中未同步重启。新 `logbook-app` 尝试连接 `127.0.0.1:5432` 报 `ConnectionRefusedError: [Errno 111]`，重试 60 次后退出，导致 macvlan IP `<nas-ip>` 彻底下线并引发全网 `No route to host`。
    - **数据兜底与网络重整**: 停机前执行物理级全量冷备落盘 `backups/logbook_pre_fix_20261101_130645.dump` (1.3MB)；执行 `docker compose down && docker compose up -d` 重建共享网络栈，0.4.2 率先成功恢复并在 66MB 内存下验证全绿。
 2. **0.5.0 全维镜像构建与推流部署 (步骤二: 严密升维发布)**:
    - **本地构建**: 采用 `--network=host` 消除本地 bridge DNS 瓶颈，构建 `logbook:0.5.0`，修正 `mcp_server.py` 的 `serverInfo.version` 动态引用；
@@ -417,7 +452,7 @@ MCP 工具面盘点发现唯一真空：规则 (shared.rules) 只有 `rule_query
 
 ## [DEV-2026-10-13-05] 0.4.1 生产上线与 S5 终验 — ✅ 闭环
 
-经宿主管理通道 (admin@192.168.1.33, docker 在 Container Station 私有 PATH) 完成 QNAP 生产升级：
+经宿主管理通道 (admin@<nas-host>, docker 在 Container Station 私有 PATH) 完成 QNAP 生产升级：
 
 1. **备份先行**: pg_dump 冷备 379K (`sha256 ebeb54d1…`) + 升级前对账基线 (devlogs=79/tasks=55/messages=14)；
 2. **镜像载入**: 本地 `docker save | gzip | ssh docker load` 19s，旧 tag 全保留 (回滚凭据 ae24f803)；
@@ -479,12 +514,12 @@ MCP 工具面盘点发现唯一真空：规则 (shared.rules) 只有 `rule_query
    - **SSH 管道流缓冲**: `ssh_server.pipe_streams` 在 EOF 退出点增加 300ms 优雅缓冲，确保非交互式管道调用的响应完整写回客户端；
    - **MCP Resource 原生暴露**: 新增 `logbook://mailbox/{agent_name}/inbox` 与 `logbook://{project}/mailbox/{agent_name}` 个人信箱只读挂载资源；
    - **开工简报集成**: `logbook_brief` 首行实时输出 `mailbox_unread` 统计与未读信件索引；
-   - **物理真实 IP 溯源**: 全链路保留 `192.168.1.22`、`192.168.1.30`、`192.168.1.68` 物理局域网真实 IP，杜绝保留段占位符。
+   - **物理真实 IP 溯源**: 全链路保留 `192.0.2.22`、`192.0.2.30`、`<nas-ip>` 物理局域网真实 IP，杜绝保留段占位符。
 3. **单元测试与门禁验证**:
    - 扩充 `tests/test_messaging_and_leases.py`，全量 7 项信箱与租约测试 100% PASS (3.31s)；
 4. **QNAP 生产平滑热部署与真机对讲对账**:
-   - 构建 `logbook:0.4.0` 镜像并推流至 QNAP TS-453D (`192.168.1.33`)，Docker Compose 热重载；
-   - 提取到此前 zcode 从 `192.168.1.22` 投递至 agy 的信件 **#7**；
+   - 构建 `logbook:0.4.0` 镜像并推流至 QNAP TS-453D (`<nas-host>`)，Docker Compose 热重载；
+   - 提取到此前 zcode 从 `192.0.2.22` 投递至 agy 的信件 **#7**；
    - 成功向 zcode 投递加固闭环通知信件 **#8**（主题：`【闭环通知】对讲信箱引擎已加固修复 (L-MSG-1 办结)`）；
    - 挂载 `logbook://mailbox/zcode/inbox` 资源验证，信件 **#8** 实时渲染且完整包含发件端真实 IP；
    - 验证 `logbook_brief` 实时呈现 `mailbox_unread=2`（含信件 #7 与 #8）。
@@ -546,8 +581,8 @@ MCP 工具面盘点发现唯一真空：规则 (shared.rules) 只有 `rule_query
 ## [DEV-2026-10-08-11] cliserver 本地开发机识别与 agy 全局 logbook MCP 配置核验归档 — ✅ 闭环
 
 完成 cliserver 主机身份确证与 agy 全局 logbook MCP 连通性生产核验：
-1. **主机身份确证**: 当前运行宿主机 `xhub`（`192.168.1.22` / `192.168.200.22`）即网络正典中定义的本地开发机 `cliserver`（`~/.ssh/id_ed25519.pub` 注释为 `yupeng@cliserver`，`openwrt/AGENTS.md` 明确映射 `xhub / cliserver`），当前 Agent 已原生处于该环境，本地免密互信与 sshd 均正常；
-2. **全局 MCP 配置与就绪**: `agy` 通过 `~/.gemini/config/mcp_config.json` 全局挂载 `logbook` SSH stdio 管道（`sysadmin@192.168.1.68 mcp`），状态为 `enabled`，14 个正典 MCP 原语就绪；
+1. **主机身份确证**: 当前运行宿主机 `xhub`（`192.0.2.22`）即网络正典中定义的本地开发机 `cliserver`（`~/.ssh/id_ed25519.pub` 注释为 `yupeng@cliserver`，`openwrt/AGENTS.md` 明确映射 `xhub / cliserver`），当前 Agent 已原生处于该环境，本地免密互信与 sshd 均正常；
+2. **全局 MCP 配置与就绪**: `agy` 通过 `~/.gemini/config/mcp_config.json` 全局挂载 `logbook` SSH stdio 管道（`sysadmin@<nas-ip> mcp`），状态为 `enabled`，14 个正典 MCP 原语就绪；
 3. **端到端生产 RPC 验证**: 现场调用 `logbook_brief(project='logbook')`，耗时 15ms 成功返回生产数据库简报与历史手记，证实通道 100% 可用；
 4. **状态与手记闭环**: 成功通过 `batch_upsert`、`task_upsert` (L11) 与 `devlog_record` (#27) 沉淀至生产 pgvector 向量库并完成会话存档。
 

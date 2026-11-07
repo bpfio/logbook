@@ -415,51 +415,62 @@ class Database:
         existing = await self.get_task(project, task.id)
         from_status = existing.status.value if existing else None
 
-        query = f"""
-            INSERT INTO "{project}".tasks (
-                id, batch_id, parent_id, title, task_type, priority, status,
-                assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags, created_at, updated_at, started_at, closed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                $15, $16, COALESCE($17, CASE WHEN $19 = 'closed' THEN NOW() END), $18)
-            ON CONFLICT (id) DO UPDATE SET
-                batch_id = EXCLUDED.batch_id,
-                parent_id = EXCLUDED.parent_id,
-                title = EXCLUDED.title,
-                task_type = EXCLUDED.task_type,
-                priority = EXCLUDED.priority,
-                status = EXCLUDED.status,
-                assignee = EXCLUDED.assignee,
-                reviewer = EXCLUDED.reviewer,
-                agent_ip = EXCLUDED.agent_ip,
-                commit_hash = EXCLUDED.commit_hash,
-                proof_link = EXCLUDED.proof_link,
-                notes = EXCLUDED.notes,
-                tags = EXCLUDED.tags,
-                updated_at = EXCLUDED.updated_at,
-                started_at = COALESCE(
-                    "{project}".tasks.started_at,
-                    EXCLUDED.started_at,
-                    CASE WHEN EXCLUDED.status = 'closed' THEN NOW() END
-                ),
-                closed_at = COALESCE("{project}".tasks.closed_at, EXCLUDED.closed_at)
-            RETURNING id, batch_id, parent_id, title, task_type, priority, status,
-                      assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags, created_at, updated_at,
-                      started_at, closed_at, duration_seconds;
-        """
+        now = get_beijing_now()
+        started_at = task.started_at or (existing.started_at if existing else None)
+        closed_at = task.closed_at or (existing.closed_at if existing else None)
+
+        if task.status == TaskStatus.CLOSED and not closed_at:
+            closed_at = now
+        if task.status == TaskStatus.RUNNING and not started_at:
+            started_at = now
+        duration_seconds = task.duration_seconds or (existing.duration_seconds if existing else None)
+        if closed_at and started_at and not duration_seconds:
+            duration_seconds = max(0, int((closed_at - started_at).total_seconds()))
+
+        payload = {
+            "title": task.title,
+            "batch_id": task.batch_id,
+            "parent_id": task.parent_id,
+            "task_type": task.task_type.value,
+            "priority": task.priority.value,
+            "assignee": task.assignee,
+            "reviewer": task.reviewer,
+            "agent_ip": task.agent_ip,
+            "commit_hash": task.commit_hash,
+            "proof_link": task.proof_link,
+            "notes": task.notes,
+            "tags": task.tags or [],
+            "started_at": started_at.isoformat() if started_at else None,
+            "closed_at": closed_at.isoformat() if closed_at else None,
+            "duration_seconds": duration_seconds,
+        }
+        ev_date = (task.created_at or now).date()
+
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query,
-                task.id, task.batch_id, task.parent_id, task.title, task.task_type.value, task.priority.value, task.status.value,
-                task.assignee, task.reviewer, task.agent_ip, task.commit_hash, task.proof_link, task.notes, task.tags,
-                task.created_at, task.updated_at, task.started_at, task.closed_at,
-                task.status.value
-            )
-            # 记录时间线流 (精确记录 from_status -> to_status 及 operator / agent_ip)
-            await conn.execute(
-                f'INSERT INTO "{project}".task_timeline (task_id, from_status, to_status, operator, agent_ip, occurred_at) VALUES ($1, $2, $3, $4, $5, $6)',
-                task.id, from_status, task.status.value, operator, task.agent_ip, get_beijing_now()
-            )
-            return Task(**dict(row))
+            async with conn.transaction():
+                await conn.execute("""
+                    INSERT INTO shared.records (
+                        project_id, dataset_code, doc_no, entity_name, status, event_date, payload, created_at, updated_at
+                    ) VALUES (
+                        $1, 'sys_task', $2, $3, $4, $5, $6::jsonb, $7, $8
+                    )
+                    ON CONFLICT (project_id, dataset_code, doc_no) DO UPDATE SET
+                        entity_name = EXCLUDED.entity_name,
+                        status = EXCLUDED.status,
+                        payload = EXCLUDED.payload,
+                        updated_at = EXCLUDED.updated_at;
+                """, project, task.id, task.title[:255], task.status.value, ev_date, json.dumps(payload),
+                    task.created_at or now, task.updated_at or now)
+
+                # 记录时间线流 (精确记录 from_status -> to_status 及 operator / agent_ip)
+                await conn.execute("""
+                    INSERT INTO shared.task_timeline (
+                        project_id, task_id, from_status, to_status, operator, agent_ip, occurred_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7);
+                """, project, task.id, from_status, task.status.value, operator, task.agent_ip, now)
+
+        updated = await self.get_task(project, task.id)
+        return updated or task
 
     async def query_tasks(
         self,
@@ -531,52 +542,54 @@ class Database:
         await self.ensure_project(project)
         if not tasks:
             return []
-        query = f"""
-            INSERT INTO "{project}".tasks (
-                id, batch_id, parent_id, title, task_type, priority, status,
-                assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags,
-                created_at, updated_at, started_at, closed_at
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                $15, $16, COALESCE($17, CASE WHEN $19 = 'closed' THEN NOW() END), $18
-            )
-            ON CONFLICT (id) DO UPDATE SET
-                batch_id = COALESCE(EXCLUDED.batch_id, "{project}".tasks.batch_id),
-                parent_id = COALESCE(EXCLUDED.parent_id, "{project}".tasks.parent_id),
-                title = EXCLUDED.title,
-                task_type = EXCLUDED.task_type,
-                priority = EXCLUDED.priority,
-                status = EXCLUDED.status,
-                assignee = EXCLUDED.assignee,
-                reviewer = EXCLUDED.reviewer,
-                agent_ip = EXCLUDED.agent_ip,
-                commit_hash = COALESCE(EXCLUDED.commit_hash, "{project}".tasks.commit_hash),
-                proof_link = COALESCE(EXCLUDED.proof_link, "{project}".tasks.proof_link),
-                notes = COALESCE(EXCLUDED.notes, "{project}".tasks.notes),
-                tags = EXCLUDED.tags,
-                updated_at = EXCLUDED.updated_at,
-                started_at = COALESCE(
-                    "{project}".tasks.started_at,
-                    EXCLUDED.started_at,
-                    CASE WHEN EXCLUDED.status = 'closed' THEN NOW() END
-                ),
-                closed_at = COALESCE("{project}".tasks.closed_at, EXCLUDED.closed_at)
-            RETURNING id, batch_id, parent_id, title, task_type, priority, status,
-                      assignee, reviewer, agent_ip, commit_hash, proof_link, notes, tags, created_at, updated_at,
-                      started_at, closed_at, duration_seconds;
-        """
+        now = get_beijing_now()
         results = []
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 for t in tasks:
-                    row = await conn.fetchrow(
-                        query,
-                        t.id, t.batch_id, t.parent_id, t.title, t.task_type.value, t.priority.value, t.status.value,
-                        t.assignee, t.reviewer, t.agent_ip, t.commit_hash, t.proof_link, t.notes, t.tags,
-                        t.created_at, t.updated_at, t.started_at, t.closed_at,
-                        t.status.value
-                    )
-                    results.append(Task(**dict(row)))
+                    started_at = t.started_at
+                    closed_at = t.closed_at
+                    if t.status == TaskStatus.CLOSED and not closed_at:
+                        closed_at = now
+                    if t.status == TaskStatus.RUNNING and not started_at:
+                        started_at = now
+                    duration_seconds = t.duration_seconds
+                    if closed_at and started_at and not duration_seconds:
+                        duration_seconds = max(0, int((closed_at - started_at).total_seconds()))
+
+                    payload = {
+                        "title": t.title,
+                        "batch_id": t.batch_id,
+                        "parent_id": t.parent_id,
+                        "task_type": t.task_type.value,
+                        "priority": t.priority.value,
+                        "assignee": t.assignee,
+                        "reviewer": t.reviewer,
+                        "agent_ip": t.agent_ip,
+                        "commit_hash": t.commit_hash,
+                        "proof_link": t.proof_link,
+                        "notes": t.notes,
+                        "tags": t.tags or [],
+                        "started_at": started_at.isoformat() if started_at else None,
+                        "closed_at": closed_at.isoformat() if closed_at else None,
+                        "duration_seconds": duration_seconds,
+                    }
+                    ev_date = (t.created_at or now).date()
+                    await conn.execute("""
+                        INSERT INTO shared.records (
+                            project_id, dataset_code, doc_no, entity_name, status, event_date, payload, created_at, updated_at
+                        ) VALUES (
+                            $1, 'sys_task', $2, $3, $4, $5, $6::jsonb, $7, $8
+                        )
+                        ON CONFLICT (project_id, dataset_code, doc_no) DO UPDATE SET
+                            entity_name = EXCLUDED.entity_name,
+                            status = EXCLUDED.status,
+                            payload = EXCLUDED.payload,
+                            updated_at = EXCLUDED.updated_at;
+                    """, project, t.id, t.title[:255], t.status.value, ev_date, json.dumps(payload),
+                        t.created_at or now, t.updated_at or now)
+
+                    results.append(t)
         return results
 
     # =========================================================================
@@ -585,34 +598,37 @@ class Database:
 
     async def upsert_finding(self, project: str, finding: Finding) -> Finding:
         await self.ensure_project(project)
-        query = f"""
-            INSERT INTO "{project}".findings (
-                id, source, severity, status, task_id, reporter, agent_ip, summary, resolution, discovered_at, resolved_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            ON CONFLICT (id) DO UPDATE SET
-                source = EXCLUDED.source,
-                severity = EXCLUDED.severity,
-                status = EXCLUDED.status,
-                task_id = EXCLUDED.task_id,
-                reporter = EXCLUDED.reporter,
-                agent_ip = EXCLUDED.agent_ip,
-                summary = COALESCE(NULLIF(EXCLUDED.summary, ''), "{project}".findings.summary),
-                resolution = COALESCE(EXCLUDED.resolution, "{project}".findings.resolution),
-                resolved_at = CASE
-                    WHEN EXCLUDED.status = 'fixed'
-                        THEN COALESCE("{project}".findings.resolved_at, EXCLUDED.resolved_at, NOW())
-                    ELSE NULL
-                END
-            RETURNING id, source, severity, status, task_id, reporter, agent_ip, summary, resolution, discovered_at, resolved_at;
-        """
+        now = get_beijing_now()
+        resolved_at = finding.resolved_at
+        if finding.status == FindingStatus.FIXED and not resolved_at:
+            resolved_at = now
+        payload = {
+            "source": finding.source,
+            "severity": finding.severity.value,
+            "task_id": finding.task_id,
+            "reporter": finding.reporter,
+            "agent_ip": finding.agent_ip,
+            "summary": finding.summary,
+            "resolution": finding.resolution,
+            "discovered_at": (finding.discovered_at or now).isoformat(),
+            "resolved_at": resolved_at.isoformat() if resolved_at else None,
+        }
+        ev_date = (finding.discovered_at or now).date()
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query,
-                finding.id, finding.source, finding.severity.value, finding.status.value,
-                finding.task_id, finding.reporter, finding.agent_ip, finding.summary, finding.resolution,
-                finding.discovered_at, finding.resolved_at
-            )
-            return Finding(**dict(row))
+            await conn.execute("""
+                INSERT INTO shared.records (
+                    project_id, dataset_code, doc_no, entity_name, status, event_date, payload, created_at, updated_at
+                ) VALUES (
+                    $1, 'sys_finding', $2, $3, $4, $5, $6::jsonb, $7, $8
+                )
+                ON CONFLICT (project_id, dataset_code, doc_no) DO UPDATE SET
+                    entity_name = EXCLUDED.entity_name,
+                    status = EXCLUDED.status,
+                    payload = EXCLUDED.payload,
+                    updated_at = EXCLUDED.updated_at;
+            """, project, finding.id, finding.summary[:255], finding.status.value, ev_date, json.dumps(payload),
+                finding.discovered_at or now, now)
+        return finding
 
     async def query_findings(
         self,
@@ -653,38 +669,39 @@ class Database:
         await self.ensure_project(project)
         if not items:
             return []
-        query = f"""
-            INSERT INTO "{project}".findings (
-                id, source, severity, status, task_id, reporter, agent_ip, summary, resolution, discovered_at, resolved_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            ON CONFLICT (id) DO UPDATE SET
-                source = EXCLUDED.source,
-                severity = EXCLUDED.severity,
-                status = EXCLUDED.status,
-                task_id = EXCLUDED.task_id,
-                reporter = EXCLUDED.reporter,
-                agent_ip = EXCLUDED.agent_ip,
-                summary = COALESCE(NULLIF(EXCLUDED.summary, ''), "{project}".findings.summary),
-                resolution = COALESCE(EXCLUDED.resolution, "{project}".findings.resolution),
-                resolved_at = CASE
-                    WHEN EXCLUDED.status = 'fixed'
-                        THEN COALESCE("{project}".findings.resolved_at, EXCLUDED.resolved_at, NOW())
-                    ELSE NULL
-                END
-            RETURNING id, source, severity, status, task_id, reporter, agent_ip, summary, resolution, discovered_at, resolved_at;
-        """
-        results = []
+        now = get_beijing_now()
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                for f in items:
-                    row = await conn.fetchrow(
-                        query,
-                        f.id, f.source, f.severity.value, f.status.value,
-                        f.task_id, f.reporter, f.agent_ip, f.summary, f.resolution,
-                        f.discovered_at, f.resolved_at
-                    )
-                    results.append(Finding(**dict(row)))
-        return results
+                for finding in items:
+                    resolved_at = finding.resolved_at
+                    if finding.status == FindingStatus.FIXED and not resolved_at:
+                        resolved_at = now
+                    payload = {
+                        "source": finding.source,
+                        "severity": finding.severity.value,
+                        "task_id": finding.task_id,
+                        "reporter": finding.reporter,
+                        "agent_ip": finding.agent_ip,
+                        "summary": finding.summary,
+                        "resolution": finding.resolution,
+                        "discovered_at": (finding.discovered_at or now).isoformat(),
+                        "resolved_at": resolved_at.isoformat() if resolved_at else None,
+                    }
+                    ev_date = (finding.discovered_at or now).date()
+                    await conn.execute("""
+                        INSERT INTO shared.records (
+                            project_id, dataset_code, doc_no, entity_name, status, event_date, payload, created_at, updated_at
+                        ) VALUES (
+                            $1, 'sys_finding', $2, $3, $4, $5, $6::jsonb, $7, $8
+                        )
+                        ON CONFLICT (project_id, dataset_code, doc_no) DO UPDATE SET
+                            entity_name = EXCLUDED.entity_name,
+                            status = EXCLUDED.status,
+                            payload = EXCLUDED.payload,
+                            updated_at = EXCLUDED.updated_at;
+                    """, project, finding.id, finding.summary[:255], finding.status.value, ev_date, json.dumps(payload),
+                        finding.discovered_at or now, now)
+        return items
 
     # =========================================================================
     # 待办与阻塞台账 (waitings)
@@ -692,32 +709,36 @@ class Database:
 
     async def upsert_waiting(self, project: str, waiting: Waiting) -> Waiting:
         await self.ensure_project(project)
-        query = f"""
-            INSERT INTO "{project}".waitings (
-                id, category, status, owner, agent_ip, description, resolution, blocked_at, resolved_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (id) DO UPDATE SET
-                category = EXCLUDED.category,
-                status = EXCLUDED.status,
-                owner = EXCLUDED.owner,
-                agent_ip = EXCLUDED.agent_ip,
-                description = EXCLUDED.description,
-                resolution = EXCLUDED.resolution,
-                resolved_at = CASE
-                    WHEN EXCLUDED.status = 'closed'
-                        THEN COALESCE("{project}".waitings.resolved_at, EXCLUDED.resolved_at, NOW())
-                    ELSE NULL
-                END
-            RETURNING id, category, status, owner, agent_ip, description, resolution, blocked_at, resolved_at;
-        """
+        now = get_beijing_now()
+        resolved_at = waiting.resolved_at
+        if waiting.status == WaitingStatus.CLOSED and not resolved_at:
+            resolved_at = now
+        payload = {
+            "category": waiting.category.value if hasattr(waiting.category, "value") else str(waiting.category),
+            "owner": waiting.owner,
+            "agent_ip": waiting.agent_ip,
+            "description": waiting.description,
+            "resolution": waiting.resolution,
+            "blocked_at": (waiting.blocked_at or now).isoformat(),
+            "resolved_at": resolved_at.isoformat() if resolved_at else None,
+        }
+        ev_date = (waiting.blocked_at or now).date()
+        st_val = waiting.status.value if hasattr(waiting.status, "value") else str(waiting.status)
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query,
-                waiting.id, waiting.category.value, waiting.status.value, waiting.owner,
-                waiting.agent_ip, waiting.description, waiting.resolution,
-                waiting.blocked_at, waiting.resolved_at
-            )
-            return Waiting(**dict(row))
+            await conn.execute("""
+                INSERT INTO shared.records (
+                    project_id, dataset_code, doc_no, entity_name, status, event_date, payload, created_at, updated_at
+                ) VALUES (
+                    $1, 'sys_waiting', $2, $3, $4, $5, $6::jsonb, $7, $8
+                )
+                ON CONFLICT (project_id, dataset_code, doc_no) DO UPDATE SET
+                    entity_name = EXCLUDED.entity_name,
+                    status = EXCLUDED.status,
+                    payload = EXCLUDED.payload,
+                    updated_at = EXCLUDED.updated_at;
+            """, project, waiting.id, waiting.description[:255], st_val, ev_date, json.dumps(payload),
+                waiting.blocked_at or now, now)
+        return waiting
 
     async def query_waitings(
         self,
@@ -752,36 +773,38 @@ class Database:
         await self.ensure_project(project)
         if not items:
             return []
-        query = f"""
-            INSERT INTO "{project}".waitings (
-                id, category, status, owner, agent_ip, description, resolution, blocked_at, resolved_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (id) DO UPDATE SET
-                category = EXCLUDED.category,
-                status = EXCLUDED.status,
-                owner = EXCLUDED.owner,
-                agent_ip = EXCLUDED.agent_ip,
-                description = EXCLUDED.description,
-                resolution = EXCLUDED.resolution,
-                resolved_at = CASE
-                    WHEN EXCLUDED.status = 'closed'
-                        THEN COALESCE("{project}".waitings.resolved_at, EXCLUDED.resolved_at, NOW())
-                    ELSE NULL
-                END
-            RETURNING id, category, status, owner, agent_ip, description, resolution, blocked_at, resolved_at;
-        """
-        results = []
+        now = get_beijing_now()
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                for w in items:
-                    row = await conn.fetchrow(
-                        query,
-                        w.id, w.category.value, w.status.value, w.owner,
-                        w.agent_ip, w.description, w.resolution,
-                        w.blocked_at, w.resolved_at
-                    )
-                    results.append(Waiting(**dict(row)))
-        return results
+                for waiting in items:
+                    resolved_at = waiting.resolved_at
+                    if waiting.status == WaitingStatus.CLOSED and not resolved_at:
+                        resolved_at = now
+                    payload = {
+                        "category": waiting.category.value if hasattr(waiting.category, "value") else str(waiting.category),
+                        "owner": waiting.owner,
+                        "agent_ip": waiting.agent_ip,
+                        "description": waiting.description,
+                        "resolution": waiting.resolution,
+                        "blocked_at": (waiting.blocked_at or now).isoformat(),
+                        "resolved_at": resolved_at.isoformat() if resolved_at else None,
+                    }
+                    ev_date = (waiting.blocked_at or now).date()
+                    st_val = waiting.status.value if hasattr(waiting.status, "value") else str(waiting.status)
+                    await conn.execute("""
+                        INSERT INTO shared.records (
+                            project_id, dataset_code, doc_no, entity_name, status, event_date, payload, created_at, updated_at
+                        ) VALUES (
+                            $1, 'sys_waiting', $2, $3, $4, $5, $6::jsonb, $7, $8
+                        )
+                        ON CONFLICT (project_id, dataset_code, doc_no) DO UPDATE SET
+                            entity_name = EXCLUDED.entity_name,
+                            status = EXCLUDED.status,
+                            payload = EXCLUDED.payload,
+                            updated_at = EXCLUDED.updated_at;
+                    """, project, waiting.id, waiting.description[:255], st_val, ev_date, json.dumps(payload),
+                        waiting.blocked_at or now, now)
+        return items
 
     # =========================================================================
     # 研发批次 (batches)
@@ -789,27 +812,35 @@ class Database:
 
     async def upsert_batch(self, project: str, batch: Batch) -> Batch:
         await self.ensure_project(project)
-        query = f"""
-            INSERT INTO "{project}".batches (
-                id, title, status, branch_name, summary, methodology_notes, agent_ip, created_at, closed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (id) DO UPDATE SET
-                title = EXCLUDED.title,
-                status = EXCLUDED.status,
-                branch_name = EXCLUDED.branch_name,
-                summary = EXCLUDED.summary,
-                methodology_notes = EXCLUDED.methodology_notes,
-                agent_ip = EXCLUDED.agent_ip,
-                closed_at = EXCLUDED.closed_at
-            RETURNING id, title, status, branch_name, summary, methodology_notes, agent_ip, created_at, closed_at;
-        """
+        now = get_beijing_now()
+        closed_at = batch.closed_at
+        if (batch.status == BatchStatus.COMPLETED or str(batch.status) in ("completed", "closed")) and not closed_at:
+            closed_at = now
+        payload = {
+            "title": batch.title,
+            "branch_name": batch.branch_name,
+            "summary": batch.summary,
+            "methodology_notes": batch.methodology_notes,
+            "agent_ip": batch.agent_ip,
+            "closed_at": closed_at.isoformat() if closed_at else None,
+        }
+        ev_date = (batch.created_at or now).date()
+        st_val = batch.status.value if hasattr(batch.status, "value") else str(batch.status)
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query,
-                batch.id, batch.title, batch.status.value, batch.branch_name,
-                batch.summary, batch.methodology_notes, batch.agent_ip, batch.created_at, batch.closed_at
-            )
-            return Batch(**dict(row))
+            await conn.execute("""
+                INSERT INTO shared.records (
+                    project_id, dataset_code, doc_no, entity_name, status, event_date, payload, created_at, updated_at
+                ) VALUES (
+                    $1, 'sys_batch', $2, $3, $4, $5, $6::jsonb, $7, $8
+                )
+                ON CONFLICT (project_id, dataset_code, doc_no) DO UPDATE SET
+                    entity_name = EXCLUDED.entity_name,
+                    status = EXCLUDED.status,
+                    payload = EXCLUDED.payload,
+                    updated_at = EXCLUDED.updated_at;
+            """, project, batch.id, batch.title[:255], st_val, ev_date, json.dumps(payload),
+                batch.created_at or now, now)
+        return batch
 
     async def query_batches(self, project: str, limit: int = 20) -> list[Batch]:
         await self.ensure_project(project)
@@ -829,7 +860,7 @@ class Database:
     # =========================================================================
 
     async def record_devlog(self, devlog: DevLog) -> DevLogRecordResult:
-        """入库排障手记 (P0-1: ON CONFLICT upsert，幂等键 = uq_devlogs_proj_task_title)。
+        """入库排障手记 (P0-1: 底层统一落入 shared.records，保证单原子操作并复用向量缓存)。
 
         幂等键: (project_id, COALESCE(task_id,''), title)，task_id 允许 NULL。
         返回 DevLogRecordResult (DevLog + action 字段):
@@ -842,51 +873,138 @@ class Database:
         if devlog.embedding:
             vec_literal = f"[{','.join(str(x) for x in devlog.embedding)}]"
 
-        query = """
-            INSERT INTO shared.devlogs (
-                project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
-                visibility, tags, embedding, occurred_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::vector, $13, $14, $15)
-            ON CONFLICT (project_id, COALESCE(task_id, ''), title) DO UPDATE SET
-                author = EXCLUDED.author,
-                agent_ip = EXCLUDED.agent_ip,
-                problem = EXCLUDED.problem,
-                root_cause = EXCLUDED.root_cause,
-                solution = EXCLUDED.solution,
-                evidence = EXCLUDED.evidence,
-                visibility = EXCLUDED.visibility,
-                tags = EXCLUDED.tags,
-                embedding = COALESCE(EXCLUDED.embedding, shared.devlogs.embedding),
-                updated_at = NOW()
-            RETURNING id, project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
-                      visibility, tags, occurred_at, created_at, updated_at;
-        """
+        now = get_beijing_now()
+        visibility_val = devlog.visibility.value if hasattr(devlog.visibility, "value") else str(devlog.visibility)
+
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                # 先取旧四要素判定内容是否变化 (RETURNING 拿不到更新前值)
+                # 先查旧手记 (按 project_id, COALESCE(task_id,''), title)
                 old = await conn.fetchrow(
-                    """SELECT problem, root_cause, solution, evidence, author FROM shared.devlogs
-                       WHERE project_id = $1 AND COALESCE(task_id, '') = COALESCE($2, '') AND title = $3
-                       FOR UPDATE;""",
+                    """
+                    SELECT id, doc_no, status, payload, embedding, created_at,
+                           (payload->>'devlog_id')::bigint AS devlog_id
+                    FROM shared.records
+                    WHERE dataset_code = 'sys_devlog' 
+                      AND project_id = $1 
+                      AND COALESCE(payload->>'task_id', '') = COALESCE($2, '') 
+                      AND (COALESCE(payload->>'title', entity_name) = $3 OR doc_no = $3)
+                    FOR UPDATE;
+                    """,
                     devlog.project_id, devlog.task_id, devlog.title
                 )
-                row = await conn.fetchrow(
-                    query,
-                    devlog.project_id, devlog.task_id, devlog.title, devlog.author, devlog.agent_ip,
-                    devlog.problem, devlog.root_cause, devlog.solution, devlog.evidence,
-                    devlog.visibility.value, devlog.tags, vec_literal,
-                    devlog.occurred_at, devlog.created_at, devlog.updated_at
-                )
-            res = dict(row)
-            res["embedding"] = devlog.embedding
-            if old is None:
-                action = "created"
-            elif (old["problem"], old["root_cause"], old["solution"], old["evidence"]) == \
-                 (devlog.problem, devlog.root_cause, devlog.solution, devlog.evidence):
-                action = "cached"
-            else:
-                action = "updated"
-            return DevLogRecordResult(**res, action=action)
+
+                if old:
+                    old_payload = old["payload"] if isinstance(old["payload"], dict) else json.loads(old["payload"] or "{}")
+                    old_problem = old_payload.get("problem")
+                    old_cause = old_payload.get("root_cause")
+                    old_solution = old_payload.get("solution")
+                    old_evidence = old_payload.get("evidence")
+
+                    if (old_problem, old_cause, old_solution, old_evidence) == (devlog.problem, devlog.root_cause, devlog.solution, devlog.evidence):
+                        action = "cached"
+                    else:
+                        action = "updated"
+
+                    devlog_id = old["devlog_id"] or old["id"]
+                    updated_payload = dict(old_payload)
+                    updated_payload.update({
+                        "devlog_id": devlog_id,
+                        "title": devlog.title,
+                        "task_id": devlog.task_id,
+                        "author": devlog.author,
+                        "agent_ip": devlog.agent_ip,
+                        "problem": devlog.problem,
+                        "root_cause": devlog.root_cause,
+                        "solution": devlog.solution,
+                        "evidence": devlog.evidence,
+                        "visibility": visibility_val,
+                        "tags": devlog.tags or [],
+                        "occurred_at": (devlog.occurred_at or now).isoformat(),
+                    })
+                    await conn.execute("""
+                        UPDATE shared.records
+                        SET entity_name = $2,
+                            status = $3,
+                            payload = $4::jsonb,
+                            embedding = COALESCE($5::vector, shared.records.embedding),
+                            updated_at = $6
+                        WHERE id = $1;
+                    """, old["id"], devlog.title[:255], visibility_val,
+                        json.dumps(updated_payload, ensure_ascii=False),
+                        vec_literal, now)
+
+                    return DevLogRecordResult(
+                        id=devlog_id,
+                        project_id=devlog.project_id,
+                        task_id=devlog.task_id,
+                        title=devlog.title,
+                        author=devlog.author,
+                        agent_ip=devlog.agent_ip,
+                        problem=devlog.problem,
+                        root_cause=devlog.root_cause,
+                        solution=devlog.solution,
+                        evidence=devlog.evidence,
+                        visibility=devlog.visibility,
+                        tags=devlog.tags or [],
+                        occurred_at=devlog.occurred_at or now,
+                        created_at=old["created_at"],
+                        updated_at=now,
+                        embedding=devlog.embedding,
+                        action=action,
+                    )
+                else:
+                    action = "created"
+                    # 生成新 devlog_id
+                    next_id = await conn.fetchval("""
+                        SELECT COALESCE(MAX((payload->>'devlog_id')::bigint), 0) + 1 
+                        FROM shared.records WHERE dataset_code = 'sys_devlog';
+                    """)
+                    doc_no = f"DEVLOG-{next_id}"
+                    payload = {
+                        "devlog_id": next_id,
+                        "title": devlog.title,
+                        "task_id": devlog.task_id,
+                        "author": devlog.author,
+                        "agent_ip": devlog.agent_ip,
+                        "problem": devlog.problem,
+                        "root_cause": devlog.root_cause,
+                        "solution": devlog.solution,
+                        "evidence": devlog.evidence,
+                        "visibility": visibility_val,
+                        "tags": devlog.tags or [],
+                        "occurred_at": (devlog.occurred_at or now).isoformat(),
+                    }
+                    ev_date = (devlog.occurred_at or now).date()
+                    created_at = devlog.created_at or now
+                    await conn.execute("""
+                        INSERT INTO shared.records (
+                            project_id, dataset_code, doc_no, entity_name, status, event_date,
+                            payload, embedding, created_at, updated_at
+                        ) VALUES (
+                            $1, 'sys_devlog', $2, $3, $4, $5, $6::jsonb, $7::vector, $8, $9
+                        );
+                    """, devlog.project_id, doc_no, devlog.title[:255], visibility_val, ev_date,
+                        json.dumps(payload, ensure_ascii=False), vec_literal, created_at, now)
+
+                    return DevLogRecordResult(
+                        id=next_id,
+                        project_id=devlog.project_id,
+                        task_id=devlog.task_id,
+                        title=devlog.title,
+                        author=devlog.author,
+                        agent_ip=devlog.agent_ip,
+                        problem=devlog.problem,
+                        root_cause=devlog.root_cause,
+                        solution=devlog.solution,
+                        evidence=devlog.evidence,
+                        visibility=devlog.visibility,
+                        tags=devlog.tags or [],
+                        occurred_at=devlog.occurred_at or now,
+                        created_at=created_at,
+                        updated_at=now,
+                        embedding=devlog.embedding,
+                        action=action,
+                    )
 
     async def find_existing_devlog(
         self,
@@ -899,19 +1017,19 @@ class Database:
         await self.connect()
         async with self._pool.acquire() as conn:
             if devlog_id:
-                row = await conn.fetchrow("SELECT * FROM shared.devlogs WHERE id = $1;", devlog_id)
+                row = await conn.fetchrow("SELECT * FROM shared.v_devlogs WHERE id = $1;", devlog_id)
                 if row:
                     return dict(row)
             if task_id:
                 row = await conn.fetchrow(
-                    "SELECT * FROM shared.devlogs WHERE project_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1;",
+                    "SELECT * FROM shared.v_devlogs WHERE project_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1;",
                     project_id, task_id
                 )
                 if row:
                     return dict(row)
             if title:
                 row = await conn.fetchrow(
-                    "SELECT * FROM shared.devlogs WHERE project_id = $1 AND title = $2 ORDER BY id DESC LIMIT 1;",
+                    "SELECT * FROM shared.v_devlogs WHERE project_id = $1 AND title = $2 ORDER BY id DESC LIMIT 1;",
                     project_id, title
                 )
                 if row:
@@ -933,38 +1051,42 @@ class Database:
         task_id: str | None = None,
         agent_ip: str = "0.0.0.0",
     ) -> dict:
-        """更新已有手记。若 embedding 为 None，则保留原有向量不覆盖。"""
+        """更新已有手记。直接更新 shared.records 底层物理存储。"""
         await self.connect()
+        now = get_beijing_now()
+        vec_literal = f"[{','.join(str(x) for x in embedding)}]" if embedding is not None else None
         async with self._pool.acquire() as conn:
-            if embedding is not None:
-                vec_literal = f"[{','.join(str(x) for x in embedding)}]"
-                sql = """
-                    UPDATE shared.devlogs
-                    SET title = $2, author = $3, problem = $4, root_cause = $5,
-                        solution = $6, evidence = $7, visibility = $8, tags = $9,
-                        task_id = $10, embedding = $11::vector, agent_ip = $12, updated_at = NOW()
-                    WHERE id = $1
-                    RETURNING id, project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
-                              visibility, tags, occurred_at, created_at, updated_at;
-                """
-                row = await conn.fetchrow(
-                    sql, devlog_id, title, author, problem, root_cause,
-                    solution, evidence, visibility, tags, task_id, vec_literal, agent_ip
-                )
-            else:
-                sql = """
-                    UPDATE shared.devlogs
-                    SET title = $2, author = $3, problem = $4, root_cause = $5,
-                        solution = $6, evidence = $7, visibility = $8, tags = $9,
-                        task_id = $10, agent_ip = $11, updated_at = NOW()
-                    WHERE id = $1
-                    RETURNING id, project_id, task_id, title, author, agent_ip, problem, root_cause, solution, evidence,
-                              visibility, tags, occurred_at, created_at, updated_at;
-                """
-                row = await conn.fetchrow(
-                    sql, devlog_id, title, author, problem, root_cause,
-                    solution, evidence, visibility, tags, task_id, agent_ip
-                )
+            rec = await conn.fetchrow("""
+                SELECT id, record_id, project_id, created_at, occurred_at FROM shared.v_devlogs WHERE id = $1;
+            """, devlog_id)
+            if not rec:
+                raise ValueError(f"DevLog with id {devlog_id} not found")
+            
+            payload = {
+                "devlog_id": devlog_id,
+                "title": title,
+                "task_id": task_id,
+                "author": author,
+                "agent_ip": agent_ip,
+                "problem": problem,
+                "root_cause": root_cause,
+                "solution": solution,
+                "evidence": evidence,
+                "visibility": visibility,
+                "tags": tags or [],
+                "occurred_at": (rec["occurred_at"] or now).isoformat() if hasattr(rec["occurred_at"], "isoformat") else str(rec["occurred_at"] or now),
+            }
+            await conn.execute("""
+                UPDATE shared.records
+                SET entity_name = $2,
+                    status = $3,
+                    payload = $4::jsonb,
+                    embedding = COALESCE($5::vector, shared.records.embedding),
+                    updated_at = $6
+                WHERE id = $1;
+            """, rec["record_id"], title[:255], visibility, json.dumps(payload, ensure_ascii=False), vec_literal, now)
+
+            row = await conn.fetchrow("SELECT * FROM shared.v_devlogs WHERE id = $1;", devlog_id)
             return dict(row)
 
     async def search_devlogs(
@@ -1091,27 +1213,29 @@ class Database:
 
     async def upsert_rule(self, rule: Rule) -> Rule:
         await self.connect()
-        query = """
-            INSERT INTO shared.rules (
-                id, category, title, summary, bad_practice, good_practice, constraints, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (id) DO UPDATE SET
-                category = EXCLUDED.category,
-                title = EXCLUDED.title,
-                summary = EXCLUDED.summary,
-                bad_practice = EXCLUDED.bad_practice,
-                good_practice = EXCLUDED.good_practice,
-                constraints = EXCLUDED.constraints,
-                updated_at = EXCLUDED.updated_at
-            RETURNING id, category, title, summary, bad_practice, good_practice, constraints, created_at, updated_at;
-        """
+        now = get_beijing_now()
+        payload = {
+            "category": rule.category,
+            "title": rule.title,
+            "summary": rule.summary,
+            "bad_practice": rule.bad_practice,
+            "good_practice": rule.good_practice,
+            "constraints": rule.constraints,
+        }
+        ev_date = (rule.created_at or now).date()
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query,
-                rule.id, rule.category, rule.title, rule.summary, rule.bad_practice,
-                rule.good_practice, rule.constraints, rule.created_at, rule.updated_at
-            )
-            return Rule(**dict(row))
+            await conn.execute("""
+                INSERT INTO shared.records (
+                    project_id, dataset_code, doc_no, entity_name, status, event_date, payload, created_at, updated_at
+                ) VALUES (
+                    'global', 'sys_rule', $1, $2, 'active', $3, $4::jsonb, $5, $6
+                )
+                ON CONFLICT (project_id, dataset_code, doc_no) DO UPDATE SET
+                    entity_name = EXCLUDED.entity_name,
+                    payload = EXCLUDED.payload,
+                    updated_at = EXCLUDED.updated_at;
+            """, rule.id, rule.title[:255], ev_date, json.dumps(payload, ensure_ascii=False), rule.created_at or now, now)
+        return rule
 
     async def query_rules(self, keyword: str | None = None, category: str | None = None) -> list[Rule]:
         await self.connect()
@@ -1130,7 +1254,7 @@ class Database:
 
             query = f"""
                 SELECT id, category, title, summary, bad_practice, good_practice, constraints, created_at, updated_at
-                FROM shared.rules
+                FROM shared.v_rules
                 WHERE {" AND ".join(conditions)}
                 ORDER BY id;
             """
@@ -1522,6 +1646,7 @@ class Database:
         to_ip: str = "0.0.0.0",
     ) -> AgentMessage:
         await self.ensure_messaging_schema()
+        now = get_beijing_now()
         async with self._pool.acquire() as conn:
             # 收件箱余量防灌爆 (SECURITY DEFINER 函数, 发件人视角也可校验收件人余量)
             has_room = await conn.fetchval(
@@ -1533,14 +1658,53 @@ class Database:
                     "RECIPIENT_MAILBOX_FULL",
                     f"收件人 [{to_agent}] 的未读信箱已达容量上限, 投递被拒收; 请其先查收清理信箱。",
                 )
-            row = await conn.fetchrow("""
-                INSERT INTO shared.agent_messages (
-                    project_id, from_agent, from_ip, to_agent, to_ip, subject, content, task_id, thread_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                RETURNING id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
-                          task_id, thread_id, is_read, read_at, created_at;
-            """, project_id, from_agent, from_ip, to_agent, to_ip, subject, content, task_id, thread_id)
-            return AgentMessage(**dict(row))
+            # 生成新 message_id 并统一落入 shared.records
+            msg_id = await conn.fetchval("""
+                SELECT COALESCE(MAX((payload->>'message_id')::bigint), 0) + 1
+                FROM shared.records WHERE dataset_code = 'sys_message';
+            """)
+            doc_no = f"MSG-{msg_id}"
+            actual_thread_id = thread_id or f"t-{msg_id}"
+            payload = {
+                "message_id": msg_id,
+                "from_agent": from_agent,
+                "from_ip": from_ip,
+                "to_agent": to_agent,
+                "to_ip": to_ip,
+                "subject": subject,
+                "content": content,
+                "task_id": task_id,
+                "thread_id": actual_thread_id,
+                "is_read": False,
+                "read_at": None,
+                "read_by_agent": None,
+                "is_archived": False,
+                "archived_at": None,
+            }
+            ev_date = now.date()
+            await conn.execute("""
+                INSERT INTO shared.records (
+                    project_id, dataset_code, doc_no, entity_name, status, event_date, payload, created_at, updated_at
+                ) VALUES (
+                    $1, 'sys_message', $2, $3, 'unread', $4, $5::jsonb, $6, $7
+                );
+            """, project_id, doc_no, subject[:255], ev_date, json.dumps(payload, ensure_ascii=False), now, now)
+
+            return AgentMessage(
+                id=msg_id,
+                project_id=project_id,
+                from_agent=from_agent,
+                from_ip=from_ip,
+                to_agent=to_agent,
+                to_ip=to_ip,
+                subject=subject,
+                content=content,
+                task_id=task_id,
+                thread_id=actual_thread_id,
+                is_read=False,
+                read_at=None,
+                created_at=now,
+            )
 
     async def get_agent_inbox(
         self,
@@ -1614,10 +1778,13 @@ class Database:
         # 父信无线索时物化 thread_id, 保证会话视图能拉到根信 (仅收发双方可执行)
         if not parent.thread_id:
             async with self._pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE shared.agent_messages SET thread_id = $2 WHERE id = $1 AND thread_id IS NULL",
-                    parent.id, thread_id,
-                )
+                await conn.execute("""
+                    UPDATE shared.records
+                    SET payload = jsonb_set(payload, '{thread_id}', to_jsonb($2::text))
+                    WHERE dataset_code = 'sys_message'
+                      AND (doc_no = 'MSG-' || $1::text OR payload->>'message_id' = $1::text)
+                      AND (payload->>'thread_id' IS NULL OR payload->>'thread_id' = '');
+                """, parent.id, thread_id)
         final_subject = subject or (parent.subject if parent.subject.startswith("Re:") else f"Re: {parent.subject}")
         return await self.send_agent_message(
             project_id=parent.project_id,
@@ -1727,16 +1894,30 @@ class Database:
     ) -> AgentMessage | None:
         """归档/恢复信件 (仅收件人可操作自己的信箱视图)。"""
         await self.ensure_messaging_schema()
+        now = get_beijing_now()
+        archived_at_str = now.isoformat() if archived else None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("""
-                UPDATE shared.agent_messages
-                SET is_archived = $2,
-                    archived_at = CASE WHEN $2 THEN CURRENT_TIMESTAMP ELSE NULL END
-                WHERE id = $1 AND to_agent = $3
-                RETURNING id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
-                          task_id, thread_id, is_read, read_at, is_archived, archived_at, created_at;
-            """, message_id, archived, agent_name)
-            return AgentMessage(**dict(row)) if row else None
+                SELECT id, payload, status FROM shared.records
+                WHERE dataset_code = 'sys_message'
+                  AND (doc_no = 'MSG-' || $1::text OR payload->>'message_id' = $1::text)
+                  AND payload->>'to_agent' = $2;
+            """, message_id, agent_name)
+            if not row:
+                return None
+            
+            p = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"] or "{}")
+            p["is_archived"] = archived
+            p["archived_at"] = archived_at_str
+            new_status = "archived" if archived else ("read" if p.get("is_read") else "unread")
+            await conn.execute("""
+                UPDATE shared.records
+                SET status = $2, payload = $3::jsonb, updated_at = $4
+                WHERE id = $1;
+            """, row["id"], new_status, json.dumps(p, ensure_ascii=False), now)
+
+            v_row = await conn.fetchrow("SELECT * FROM shared.v_agent_messages WHERE id = $1;", message_id)
+            return AgentMessage(**dict(v_row)) if v_row else None
 
     async def count_agent_unread(
         self,
@@ -1752,7 +1933,7 @@ class Database:
             conditions.append(f"project_id = ${len(params)}")
         async with self._pool.acquire() as conn:
             return int(await conn.fetchval(
-                f"SELECT COUNT(*) FROM shared.agent_messages WHERE {' AND '.join(conditions)}",
+                f"SELECT COUNT(*) FROM shared.v_agent_messages WHERE {' AND '.join(conditions)}",
                 *params,
             ))
 
@@ -1765,19 +1946,17 @@ class Database:
         if not recipient:
             raise ValueError("recipient agent identity is required")
         await self.ensure_messaging_schema()
+        now = get_beijing_now()
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("""
-                UPDATE shared.agent_messages
-                SET is_read = TRUE,
-                    read_at = COALESCE(read_at, CURRENT_TIMESTAMP),
-                    read_by_agent = COALESCE(read_by_agent, $2)
-                WHERE id = $1 AND to_agent = $2
-                RETURNING id, project_id, from_agent, from_ip, to_agent, to_ip, subject, content,
-                          task_id, thread_id, is_read, read_at, read_by_agent, created_at;
+                SELECT id, payload, status FROM shared.records
+                WHERE dataset_code = 'sys_message'
+                  AND (doc_no = 'MSG-' || $1::text OR payload->>'message_id' = $1::text)
+                  AND payload->>'to_agent' = $2;
             """, message_id, recipient)
             if not row:
                 exists = await conn.fetchval(
-                    "SELECT EXISTS (SELECT 1 FROM shared.agent_messages WHERE id = $1)",
+                    "SELECT EXISTS (SELECT 1 FROM shared.records WHERE dataset_code = 'sys_message' AND (doc_no = 'MSG-' || $1::text OR payload->>'message_id' = $1::text))",
                     message_id,
                 )
                 if exists:
@@ -1787,7 +1966,22 @@ class Database:
                         recipient,
                     )
                 return None
-            return AgentMessage(**dict(row))
+            
+            p = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"] or "{}")
+            p["is_read"] = True
+            if not p.get("read_at"):
+                p["read_at"] = now.isoformat()
+            if not p.get("read_by_agent"):
+                p["read_by_agent"] = recipient
+            new_status = "archived" if p.get("is_archived") else "read"
+            await conn.execute("""
+                UPDATE shared.records
+                SET status = $2, payload = $3::jsonb, updated_at = $4
+                WHERE id = $1;
+            """, row["id"], new_status, json.dumps(p, ensure_ascii=False), now)
+
+            v_row = await conn.fetchrow("SELECT * FROM shared.v_agent_messages WHERE id = $1;", message_id)
+            return AgentMessage(**dict(v_row)) if v_row else None
 
     async def get_mailbox_summary(
         self,
@@ -1972,19 +2166,19 @@ class Database:
         await self.ensure_researches_schema()
         async with self._pool.acquire() as conn:
             if research_id:
-                row = await conn.fetchrow("SELECT * FROM shared.researches WHERE id = $1;", research_id)
+                row = await conn.fetchrow("SELECT * FROM shared.v_researches WHERE id = $1;", research_id)
                 if row:
                     return dict(row)
             if task_id:
                 row = await conn.fetchrow(
-                    "SELECT * FROM shared.researches WHERE project_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1;",
+                    "SELECT * FROM shared.v_researches WHERE project_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1;",
                     project_id, task_id
                 )
                 if row:
                     return dict(row)
             if title:
                 row = await conn.fetchrow(
-                    "SELECT * FROM shared.researches WHERE project_id = $1 AND title = $2 ORDER BY id DESC LIMIT 1;",
+                    "SELECT * FROM shared.v_researches WHERE project_id = $1 AND title = $2 ORDER BY id DESC LIMIT 1;",
                     project_id, title
                 )
                 if row:
@@ -1992,35 +2186,65 @@ class Database:
             return None
 
     async def record_research(self, research: Research) -> Research:
-        """持久化全新调研知识 (支持 768 维向量索引)。"""
+        """持久化全新调研知识 (支持 768 维向量索引，统一落入 shared.records)。"""
         await self.ensure_researches_schema()
+        now = get_beijing_now()
         vec_literal = None
         if research.embedding:
             vec_literal = f"[{','.join(str(x) for x in research.embedding)}]"
-        query = """
-            INSERT INTO shared.researches (
-                project_id, task_id, batch_id, title, category, author, agent_ip, status,
-                objective, market_landscape, tradeoffs, decision, "references",
-                doc_no, authority, legal_level, effective_date,
-                visibility, tags, embedding, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::vector, $21, $22)
-            RETURNING id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
-                      objective, market_landscape, tradeoffs, decision, "references",
-                      doc_no, authority, legal_level, effective_date,
-                      visibility, tags, created_at, updated_at;
-        """
+
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query,
-                research.project_id, research.task_id, research.batch_id, research.title,
-                research.category.value if isinstance(research.category, ResearchCategory) else str(research.category),
-                research.author, research.agent_ip,
-                research.status.value if isinstance(research.status, ResearchStatus) else str(research.status),
-                research.objective, research.market_landscape, research.tradeoffs, research.decision, research.references,
-                research.doc_no, research.authority, research.legal_level, research.effective_date,
-                research.visibility.value if isinstance(research.visibility, DevLogVisibility) else str(research.visibility),
-                research.tags, vec_literal, research.created_at, research.updated_at
-            )
+            res_id = await conn.fetchval("""
+                SELECT COALESCE(MAX((payload->>'research_id')::bigint), 0) + 1
+                FROM shared.records WHERE dataset_code = 'sys_research';
+            """)
+            doc_no = research.doc_no or f"RES-{res_id}"
+            cat_val = research.category.value if isinstance(research.category, ResearchCategory) else str(research.category)
+            status_val = research.status.value if isinstance(research.status, ResearchStatus) else str(research.status)
+            vis_val = research.visibility.value if isinstance(research.visibility, DevLogVisibility) else str(research.visibility)
+            eff_date_str = research.effective_date.isoformat() if hasattr(research.effective_date, "isoformat") else str(research.effective_date or "")
+
+            payload = {
+                "research_id": res_id,
+                "task_id": research.task_id,
+                "batch_id": research.batch_id,
+                "title": research.title,
+                "category": cat_val,
+                "author": research.author,
+                "agent_ip": research.agent_ip,
+                "status": status_val,
+                "objective": research.objective,
+                "market_landscape": research.market_landscape,
+                "tradeoffs": research.tradeoffs,
+                "decision": research.decision,
+                "references": research.references,
+                "doc_no": doc_no,
+                "authority": research.authority,
+                "legal_level": research.legal_level,
+                "effective_date": eff_date_str,
+                "visibility": vis_val,
+                "tags": research.tags or [],
+            }
+            ev_date = (research.created_at or now).date()
+            created_at = research.created_at or now
+
+            await conn.execute("""
+                INSERT INTO shared.records (
+                    project_id, dataset_code, doc_no, entity_name, status, event_date,
+                    payload, embedding, created_at, updated_at
+                ) VALUES (
+                    $1, 'sys_research', $2, $3, $4, $5, $6::jsonb, $7::vector, $8, $9
+                )
+                ON CONFLICT (project_id, dataset_code, doc_no) DO UPDATE SET
+                    entity_name = EXCLUDED.entity_name,
+                    status = EXCLUDED.status,
+                    payload = EXCLUDED.payload,
+                    embedding = COALESCE(EXCLUDED.embedding, shared.records.embedding),
+                    updated_at = EXCLUDED.updated_at;
+            """, research.project_id, doc_no, research.title[:255], status_val, ev_date,
+                json.dumps(payload, ensure_ascii=False), vec_literal, created_at, now)
+
+            row = await conn.fetchrow("SELECT * FROM shared.v_researches WHERE id = $1;", res_id)
             res = dict(row)
             res["embedding"] = research.embedding
             return Research(**res)
@@ -2048,48 +2272,52 @@ class Database:
         legal_level: str | None = None,
         effective_date: str | None = None,
     ) -> dict:
-        """更新已有调研手记。若 embedding 为 None，保留原有向量。"""
+        """更新已有调研手记。直接更新 shared.records 底层物理存储。"""
         await self.ensure_researches_schema()
+        now = get_beijing_now()
+        vec_literal = f"[{','.join(str(x) for x in embedding)}]" if embedding is not None else None
         async with self._pool.acquire() as conn:
-            if embedding is not None:
-                vec_literal = f"[{','.join(str(x) for x in embedding)}]"
-                sql = """
-                    UPDATE shared.researches
-                    SET title = $2, category = $3, author = $4, status = $5, objective = $6,
-                        market_landscape = $7, tradeoffs = $8, decision = $9, "references" = $10,
-                        visibility = $11, tags = $12, task_id = $13, batch_id = $14,
-                        embedding = $15::vector, agent_ip = $16, doc_no = $17, authority = $18,
-                        legal_level = $19, effective_date = $20, updated_at = NOW()
-                    WHERE id = $1
-                    RETURNING id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
-                              objective, market_landscape, tradeoffs, decision, "references",
-                              doc_no, authority, legal_level, effective_date,
-                              visibility, tags, created_at, updated_at;
-                """
-                row = await conn.fetchrow(
-                    sql, research_id, title, category, author, status, objective,
-                    market_landscape, tradeoffs, decision, references, visibility, tags,
-                    task_id, batch_id, vec_literal, agent_ip, doc_no, authority, legal_level, effective_date
-                )
-            else:
-                sql = """
-                    UPDATE shared.researches
-                    SET title = $2, category = $3, author = $4, status = $5, objective = $6,
-                        market_landscape = $7, tradeoffs = $8, decision = $9, "references" = $10,
-                        visibility = $11, tags = $12, task_id = $13, batch_id = $14,
-                        agent_ip = $15, doc_no = $16, authority = $17,
-                        legal_level = $18, effective_date = $19, updated_at = NOW()
-                    WHERE id = $1
-                    RETURNING id, project_id, task_id, batch_id, title, category, author, agent_ip, status,
-                              objective, market_landscape, tradeoffs, decision, "references",
-                              doc_no, authority, legal_level, effective_date,
-                              visibility, tags, created_at, updated_at;
-                """
-                row = await conn.fetchrow(
-                    sql, research_id, title, category, author, status, objective,
-                    market_landscape, tradeoffs, decision, references, visibility, tags,
-                    task_id, batch_id, agent_ip, doc_no, authority, legal_level, effective_date
-                )
+            rec = await conn.fetchrow("""
+                SELECT id, record_id, project_id, doc_no, effective_date, created_at FROM shared.v_researches WHERE id = $1;
+            """, research_id)
+            if not rec:
+                raise ValueError(f"Research with id {research_id} not found")
+            
+            eff_date = effective_date or rec.get("effective_date")
+            eff_date_str = eff_date.isoformat() if hasattr(eff_date, "isoformat") else str(eff_date or "")
+
+            updated_payload = {
+                "research_id": research_id,
+                "task_id": task_id,
+                "batch_id": batch_id,
+                "title": title,
+                "category": category,
+                "author": author,
+                "agent_ip": agent_ip,
+                "status": status,
+                "objective": objective,
+                "market_landscape": market_landscape,
+                "tradeoffs": tradeoffs,
+                "decision": decision,
+                "references": references,
+                "doc_no": doc_no or rec.get("doc_no") or f"RES-{research_id}",
+                "authority": authority,
+                "legal_level": legal_level,
+                "effective_date": eff_date_str,
+                "visibility": visibility,
+                "tags": tags or [],
+            }
+            await conn.execute("""
+                UPDATE shared.records
+                SET entity_name = $2,
+                    status = $3,
+                    payload = $4::jsonb,
+                    embedding = COALESCE($5::vector, shared.records.embedding),
+                    updated_at = $6
+                WHERE id = $1;
+            """, rec["record_id"], title[:255], status, json.dumps(updated_payload, ensure_ascii=False), vec_literal, now)
+
+            row = await conn.fetchrow("SELECT * FROM shared.v_researches WHERE id = $1;", research_id)
             return dict(row)
 
     async def search_researches(
@@ -2127,7 +2355,7 @@ class Database:
                            doc_no, authority, legal_level, effective_date,
                            visibility, tags, created_at, updated_at,
                            (1 - (embedding <=> ${vec_idx}::vector)) AS score
-                    FROM shared.researches
+                    FROM shared.v_researches
                     WHERE {where_clause} AND embedding IS NOT NULL
                     ORDER BY embedding <=> ${vec_idx}::vector
                     LIMIT ${lim_idx};
@@ -2148,7 +2376,7 @@ class Database:
                            doc_no, authority, legal_level, effective_date,
                            visibility, tags, created_at, updated_at,
                            ts_rank_cd(tsv_content, plainto_tsquery('simple', ${txt_idx})) AS score
-                    FROM shared.researches
+                    FROM shared.v_researches
                     WHERE {where_clause} AND tsv_content @@ plainto_tsquery('simple', ${txt_idx})
                     ORDER BY score DESC
                     LIMIT ${lim_idx};
@@ -2162,7 +2390,7 @@ class Database:
                            objective, market_landscape, tradeoffs, decision, "references",
                            doc_no, authority, legal_level, effective_date,
                            visibility, tags, created_at, updated_at, 1.0 AS score
-                    FROM shared.researches
+                    FROM shared.v_researches
                     WHERE {where_clause}
                     ORDER BY updated_at DESC
                     LIMIT ${lim_idx};
@@ -2216,7 +2444,7 @@ class Database:
                    objective, market_landscape, tradeoffs, decision, "references",
                    doc_no, authority, legal_level, effective_date,
                    visibility, tags, created_at, updated_at
-            FROM shared.researches
+            FROM shared.v_researches
             WHERE {" AND ".join(conditions)}
             ORDER BY created_at DESC
             LIMIT ${len(params)};
@@ -2403,7 +2631,7 @@ class Database:
             return res
 
     async def upsert_record(self, record: DataRecord) -> dict:
-        """插入或更新单个事实记录 (如果指定 id 或匹配到同单号同主键则更新)。"""
+        """插入或更新单个事实记录 (如果指定 id 或匹配到同单号同主键则更新，支持自动注册未定义数据集)。"""
         await self.ensure_datasets_and_records_schema()
         ev_date = record.event_date
         if isinstance(ev_date, str):
@@ -2416,6 +2644,13 @@ class Database:
         vec_literal = f"[{','.join(str(x) for x in record.embedding)}]" if record.embedding else None
 
         async with self._pool.acquire() as conn:
+            # 自动登记未注册数据集 (防止外键约束报错)
+            await conn.execute("""
+                INSERT INTO shared.datasets (code, name, category, field_schema)
+                VALUES ($1, $1, 'custom', '[]'::jsonb)
+                ON CONFLICT (code) DO NOTHING;
+            """, record.dataset_code)
+
             existing_id = record.id
             if existing_id is None:
                 row = await conn.fetchrow(
@@ -2527,6 +2762,12 @@ class Database:
         count = 0
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                for code in list({r.dataset_code for r in records}):
+                    await conn.execute("""
+                        INSERT INTO shared.datasets (code, name, category, field_schema)
+                        VALUES ($1, $1, 'custom', '[]'::jsonb)
+                        ON CONFLICT (code) DO NOTHING;
+                    """, code)
                 for r in records:
                     ev_date = r.event_date
                     if isinstance(ev_date, str):
@@ -2567,6 +2808,13 @@ class Database:
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                for code in list({r.dataset_code for r in records}):
+                    await conn.execute("""
+                        INSERT INTO shared.datasets (code, name, category, field_schema)
+                        VALUES ($1, $1, 'custom', '[]'::jsonb)
+                        ON CONFLICT (code) DO NOTHING;
+                    """, code)
+
                 proj = records[0].project_id
                 dataset = records[0].dataset_code
                 doc_nos = [r.doc_no for r in records]

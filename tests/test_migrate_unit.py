@@ -7,7 +7,8 @@ from logbook.migrate import discover_migrations
 
 def test_discover_current_migration_chain():
     migrations = discover_migrations()
-    assert [migration.version for migration in migrations] == [f"{index:02d}" for index in range(1, 15)]
+    assert len(migrations) >= 16
+    assert [migration.version for migration in migrations] == [f"{index:02d}" for index in range(1, len(migrations) + 1)]
     assert len({migration.checksum for migration in migrations}) == len(migrations)
 
 
