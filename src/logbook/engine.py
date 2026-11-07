@@ -42,6 +42,60 @@ SYSTEM_DATASETS = {
 class FactEngine:
     def __init__(self, database: Database):
         self.db = database
+        self._schema_cache: dict[str, dict[str, Any] | None] = {}
+
+    async def validate_payload_schema(self, dataset_code: str, payload: dict[str, Any]) -> None:
+        """声明式校验 payload 是否符合该数据集在 shared.datasets 中的 json_schema 契约规范。"""
+        if not dataset_code or not isinstance(payload, dict):
+            return
+        
+        if not hasattr(self, "_schema_cache"):
+            self._schema_cache: dict[str, dict[str, Any] | None] = {}
+        
+        schema = self._schema_cache.get(dataset_code)
+        if schema is None and dataset_code not in self._schema_cache:
+            try:
+                await self.db.connect()
+                async with self.db._pool.acquire() as conn:
+                    val = await conn.fetchval(
+                        "SELECT json_schema FROM shared.datasets WHERE code = $1 LIMIT 1;",
+                        dataset_code
+                    )
+                    if val:
+                        schema = val if isinstance(val, dict) else json.loads(val)
+            except Exception as e:
+                logger.warning("Failed to query json_schema for dataset %s: %s", dataset_code, e)
+                schema = None
+            self._schema_cache[dataset_code] = schema
+        
+        if not schema:
+            return
+
+        # 校验必填字段
+        required = schema.get("required", [])
+        for field in required:
+            val = payload.get(field)
+            if val is None or (isinstance(val, str) and not val.strip()):
+                raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 必填字段 '{field}' 缺失或为空！")
+        
+        # 校验属性类型与最小长度
+        props = schema.get("properties", {})
+        for field, spec in props.items():
+            if field in payload and payload[field] is not None:
+                val = payload[field]
+                p_type = spec.get("type")
+                if p_type == "string":
+                    if not isinstance(val, str):
+                        raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为字符串类型！")
+                    min_len = spec.get("minLength")
+                    if min_len and len(val.strip()) < min_len:
+                        raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 长度不能小于 {min_len}！")
+                elif p_type in ("number", "integer") and not isinstance(val, (int, float, Decimal)):
+                    raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为数值类型！")
+                elif p_type == "array" and not isinstance(val, (list, tuple)):
+                    raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为数组类型！")
+                elif p_type == "object" and not isinstance(val, dict):
+                    raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为字典对象！")
 
     # -------------------------------------------------------------------------
     # 参数归一化与校验原语 (消除 F-API-10, F-SEARCH-07 等入参口径漂移)
@@ -148,6 +202,9 @@ class FactEngine:
         e_name = str(entity_name).strip()[:255] if entity_name else doc_no
         st = str(status).strip().lower() if status else "active"
         
+        # 契约强校验 (声明式校验 payload 结构)
+        await self.validate_payload_schema(dataset_code, payload)
+
         # 组织 DataRecord 模型
         record = DataRecord(
             project_id=project_id,

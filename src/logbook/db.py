@@ -1777,14 +1777,15 @@ class Database:
         thread_id = parent.thread_id or f"t-{parent.id}"
         # 父信无线索时物化 thread_id, 保证会话视图能拉到根信 (仅收发双方可执行)
         if not parent.thread_id:
+            msg_key = str(parent.id)
             async with self._pool.acquire() as conn:
                 await conn.execute("""
                     UPDATE shared.records
                     SET payload = jsonb_set(payload, '{thread_id}', to_jsonb($2::text))
                     WHERE dataset_code = 'sys_message'
-                      AND (doc_no = 'MSG-' || $1::text OR payload->>'message_id' = $1::text)
+                      AND (doc_no = 'MSG-' || $1 OR payload->>'message_id' = $1)
                       AND (payload->>'thread_id' IS NULL OR payload->>'thread_id' = '');
-                """, parent.id, thread_id)
+                """, msg_key, thread_id)
         final_subject = subject or (parent.subject if parent.subject.startswith("Re:") else f"Re: {parent.subject}")
         return await self.send_agent_message(
             project_id=parent.project_id,
@@ -1896,13 +1897,14 @@ class Database:
         await self.ensure_messaging_schema()
         now = get_beijing_now()
         archived_at_str = now.isoformat() if archived else None
+        msg_key = str(message_id)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("""
                 SELECT id, payload, status FROM shared.records
                 WHERE dataset_code = 'sys_message'
-                  AND (doc_no = 'MSG-' || $1::text OR payload->>'message_id' = $1::text)
+                  AND (doc_no = 'MSG-' || $1 OR payload->>'message_id' = $1)
                   AND payload->>'to_agent' = $2;
-            """, message_id, agent_name)
+            """, msg_key, agent_name)
             if not row:
                 return None
             
@@ -1947,17 +1949,18 @@ class Database:
             raise ValueError("recipient agent identity is required")
         await self.ensure_messaging_schema()
         now = get_beijing_now()
+        msg_key = str(message_id)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("""
                 SELECT id, payload, status FROM shared.records
                 WHERE dataset_code = 'sys_message'
-                  AND (doc_no = 'MSG-' || $1::text OR payload->>'message_id' = $1::text)
+                  AND (doc_no = 'MSG-' || $1 OR payload->>'message_id' = $1)
                   AND payload->>'to_agent' = $2;
-            """, message_id, recipient)
+            """, msg_key, recipient)
             if not row:
                 exists = await conn.fetchval(
-                    "SELECT EXISTS (SELECT 1 FROM shared.records WHERE dataset_code = 'sys_message' AND (doc_no = 'MSG-' || $1::text OR payload->>'message_id' = $1::text))",
-                    message_id,
+                    "SELECT EXISTS (SELECT 1 FROM shared.records WHERE dataset_code = 'sys_message' AND (doc_no = 'MSG-' || $1 OR payload->>'message_id' = $1))",
+                    msg_key,
                 )
                 if exists:
                     logger.warning(
@@ -2557,16 +2560,17 @@ class Database:
         async with self._pool.acquire() as conn:
             sql = """
                 INSERT INTO shared.datasets (
-                    code, name, category, field_schema, alias_map, description, created_at, updated_at
-                ) VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)
+                    code, name, category, field_schema, alias_map, json_schema, description, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9)
                 ON CONFLICT (code) DO UPDATE SET
                     name = EXCLUDED.name,
                     category = EXCLUDED.category,
                     field_schema = EXCLUDED.field_schema,
                     alias_map = EXCLUDED.alias_map,
+                    json_schema = COALESCE(EXCLUDED.json_schema, shared.datasets.json_schema),
                     description = COALESCE(EXCLUDED.description, shared.datasets.description),
                     updated_at = EXCLUDED.updated_at
-                RETURNING code, name, category, field_schema, alias_map, description, created_at, updated_at;
+                RETURNING code, name, category, field_schema, alias_map, json_schema, description, created_at, updated_at;
             """
             row = await conn.fetchrow(
                 sql,
@@ -2575,6 +2579,7 @@ class Database:
                 dataset.category,
                 json.dumps(dataset.field_schema, ensure_ascii=False),
                 json.dumps(dataset.alias_map, ensure_ascii=False),
+                json.dumps(dataset.json_schema, ensure_ascii=False) if dataset.json_schema is not None else None,
                 dataset.description,
                 dataset.created_at,
                 dataset.updated_at,
@@ -2584,6 +2589,8 @@ class Database:
                 d["field_schema"] = json.loads(d["field_schema"])
             if isinstance(d.get("alias_map"), str):
                 d["alias_map"] = json.loads(d["alias_map"])
+            if isinstance(d.get("json_schema"), str):
+                d["json_schema"] = json.loads(d["json_schema"])
             return d
 
     async def get_dataset(self, code: str) -> dict | None:
@@ -2598,6 +2605,8 @@ class Database:
                 d["field_schema"] = json.loads(d["field_schema"])
             if isinstance(d.get("alias_map"), str):
                 d["alias_map"] = json.loads(d["alias_map"])
+            if isinstance(d.get("json_schema"), str):
+                d["json_schema"] = json.loads(d["json_schema"])
             return d
 
     async def list_datasets(self, category: str | None = None, limit: int = 50) -> list[dict]:
@@ -2612,7 +2621,7 @@ class Database:
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
         sql = f"""
-            SELECT code, name, category, field_schema, alias_map, description, created_at, updated_at
+            SELECT code, name, category, field_schema, alias_map, json_schema, description, created_at, updated_at
             FROM shared.datasets
             {where_clause}
             ORDER BY code ASC

@@ -512,12 +512,17 @@ async def start_sse_server(host: str = "0.0.0.0", port: int = 8000):
         host=host,
     )
 
+    ssl_cert = os.getenv("LOGBOOK_SSL_CERTFILE")
+    ssl_key = os.getenv("LOGBOOK_SSL_KEYFILE")
+    scheme = "https" if (ssl_cert and ssl_key and os.path.exists(ssl_cert) and os.path.exists(ssl_key)) else "http"
+
     async def health_endpoint(request):
         return JSONResponse({
             "status": "ok",
             "service": "logbook",
             "version": _SERVER_VERSION,
             "transport": "sse",
+            "scheme": scheme,
             "sse_endpoint": "/sse",
             "messages_endpoint": "/messages/",
         })
@@ -525,15 +530,19 @@ async def start_sse_server(host: str = "0.0.0.0", port: int = 8000):
     app.routes.append(Route("/health", health_endpoint))
     app.routes.append(Route("/ping", health_endpoint))
 
-    config = uvicorn.Config(
-        app,
-        host=host,
-        port=port,
-        log_level="info",
-        access_log=False,
-    )
+    config_kwargs = {
+        "host": host,
+        "port": port,
+        "log_level": "info",
+        "access_log": False,
+    }
+    if scheme == "https":
+        config_kwargs["ssl_certfile"] = ssl_cert
+        config_kwargs["ssl_keyfile"] = ssl_key
+
+    config = uvicorn.Config(app, **config_kwargs)
     server = uvicorn.Server(config)
-    logger.info(f"Logbook FastMCP SSE Server listening on http://{host}:{port}/sse (health: /health)")
+    logger.info(f"Logbook FastMCP SSE Server listening on {scheme}://{host}:{port}/sse (health: /health)")
     await server.serve()
 
 

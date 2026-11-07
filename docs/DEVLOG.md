@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (41)
+## 一、任务台账 (42)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-OPT-070 | closed | feat | Logbook 0.7.0: MCP工具集大归一 (46→14核心)、动态 JSON Schema 验证引擎、客户端 SDK 与 HTTP/HTTPS FastMCP 双通道落地 | e9e1213 | 吸收全量优化建议: ① tools/list 归一化为 14 个核心高内聚工具 (Schema 瘦身 63% 从 59.8KB 缩减至 22KB, 32 老工具 100% 保持就绪); ② 落地迁移 17 (sql/17_dataset_json_schema.sql), shared.datasets 增设 json_schema 字段并预置 8 大系统业务数据集校验契约, FactEngine 声明式拦截非标 payload 入库; ③ 落地 src/logbook/client.py 内置 SingleFlight 削峰、Full Jitter 退避重试与心跳保活; ④ 保留并增强 FastMCP SSE HTTP/HTTPS 双通道 (端口 8000 与 22 并行监听); ⑤ 修复 read_agent_message/archive_agent_message asyncpg $1 参数类型推断冲突 (int/str 22000); 单元测试 70 项 100% 绿灯, 生产环境部署成功, 13 项真机穿透测试 100% 通过 (DEV-2026-11-07-03) |
 | L-AUD-061 | closed | audit | Logbook 0.6.1 独立第三方全量审计、P0/P1缺陷闭环、物理直写迁移与生产真机 13 项 100% 验收 | 87cfd88 | 独立第三方视角完成对 Logbook 0.6.0/0.6.1 的全量架构与 46 MCP 工具深度审计; 落地迁移 16 (sql/16_unify_fact_triggers_and_timeline.sql) 补齐联合唯一索引与统一时间线表 shared.task_timeline; DAO 层彻底消除视图写入风险, 统一直写 shared.records 事实表; 根治 asyncpg 参数类型推断冲突 (devlog_record bigint=text 42883) 与 normalizer 状态机放行越界缺陷; 自动登记新数据集杜绝外键阻断; 本地 65 单元测试全绿; 生产 NAS 成功部署 logbook:0.6.1; 真机 13 核心链路穿透测试 100% 通过; 存量 6,917+ 条业务记录与 500+ 条时间线 0 丢失; 产出完整审计与治理正典 docs/AUDIT_REPORT_V061.md (DEV-2026-11-07-02) |
 | L-UNIFY-060 | closed | feat | 全库向通用事实双表底座 (shared.datasets + shared.records) 归一化、零数据丢失原子迁移、统一事实引擎落地 (0.6.0) | 200842e | 彻底收拢 118 物理碎片表为极简双表底座; 存量 8 大业务实体 (tasks=462, findings=205, waitings=29, batches=68, devlogs=348, messages=20, researches=37, rules=23) Checksum 100% 绝对吻合转录入库; 旧表重命名为 _legacy_* 物理封存并建立 21 Schema 原名同名向下兼容视图; 落地 src/logbook/engine.py 统一事实引擎解耦; 根除幽灵批次自动创建 (F-API-13) 与裸抛 FK 约束 (F-API-11); 修复 research_query/batch_query/record_query 入参口径漂移 (F-API-10) 与空串拦截; 生产环境 10 点冒烟套件实测 100% 绿灯 (DEV-2026-11-07-01) |
 | L-SRV-057 | closed | fix | 根治 clean_text NameError (F-API-08)、解包空串崩溃 (F-SEARCH-07)、补齐 task review 状态机与标量入参 (F-API-09)、无向量库全文平滑降级 (F-SEARCH-08)、project_fields 强校验与 fields 回显 (F-API-03) (0.5.7) | HEAD | waiting_query/finding_query 补齐 clean_text 导入与标量数组兼容 (F-API-08/09); search_records 翻页分支补齐元组返回, record_search 空串严格拦截 (F-SEARCH-07); task_query 纳入 review 状态机与标量兼容 (F-API-09); project_fields 校验未知投影列 (F-API-03); 无向量数据集 (probe) 平滑降级全文检索 (F-SEARCH-08); 65 项单元测试 100% 绿灯 (DEV-2026-11-06-05) |
@@ -107,6 +108,38 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-07-03] Logbook 0.7.0: MCP工具集大归一、动态JSON Schema验证引擎、客户端SDK与HTTP/HTTPS双通道落地 — ✅ 闭环
+
+根据用户指令与第三方审计优化升级决议，全面落地三大核心优化架构与 FastMCP SSE HTTP/HTTPS 双通道支持：
+
+1. **结构化四要素复盘 (SSOT)**:
+   - **故障/需求背景 (Problem)**:
+     1. MCP 工具集过于臃肿：46 个工具（包含 8 大业务实体的重复 CRUD）在客户端启动时产生高达 16,653 tokens 的 Schema 上下文开销，导致小窗口模型或移动端 Agent 上下文挤占严重；
+     2. 动态字段防御薄弱：`shared.records` 事实表的 `payload` 强脊梁软肋骨架构缺乏入库时的声明式结构防御，若调用方缺失核心要素易发生业务断言穿透；
+     3. 客户端弱网缺乏防护：外部或跨网络节点调用缺少 Single-Flight 请求合并拦截与 Full Jitter 指数退避重试；
+     4. 访问通道单一性担忧：用户明确要求保留并增强 HTTP/HTTPS FastMCP SSE 访问接口，支持不同网络层级的 Agent 灵活接入；
+     5. 异步消息读取类型冲突：`read_agent_message` 中 `$1::text` 与 asyncpg Python `int` 发生 22000 参数类型推断冲突。
+   - **根因分析 (Root Cause)**:
+     1. MCP 工具注册未分层：所有内部/历史工具无差别暴露至 `tools/list`；
+     2. 缺乏数据集级数据契约：`shared.datasets` 仅有前端展示用的 `field_schema`，未有工业级 JSON Schema 验证契约；
+     3. 客户端直连缺乏熔断防护：原生缺乏防并发重入与退避自愈封装；
+     4. asyncpg 严格校验 SQL 参数类型：当查询字符串使用 `'MSG-' || $1::text` 时 Postgres 推断 `$1` 为 text，传递 int 会触发 `invalid input for query argument $1 (expected str, got int)`。
+   - **解决方案 (Solution)**:
+     1. **MCP 工具集大归一 (46 → 14 核心)**：确立 `CORE_TOOL_NAMES` 14 个核心高内聚工具（`record_upsert`, `records_bulk_upsert`, `record_query`, `record_search`, `record_stats`, `dataset_manage`, `message_send`, `message_inbox`, `message_action`, `lease_manage`, `group_manage`, `project_manage`, `logbook_brief`, `export_markdown`），`tools/list` 仅暴露该 14 个工具，Schema 瘦身 63%（从 59.8KB 缩减至 22KB，Prompt 从 16,653 tokens 降至 ~6,038 tokens）；32 个老工具 100% 保持就绪并在内部路由，完美向下兼容；
+     2. **动态 JSON Schema 验证引擎**：落地迁移 17 (`sql/17_dataset_json_schema.sql`)，在 `shared.datasets` 表增设 `json_schema` 字段，预置 `sys_task`, `sys_devlog`, `sys_finding`, `sys_waiting`, `sys_batch`, `sys_rule`, `sys_research`, `sys_message` 的严格契约；`FactEngine.validate_payload_schema` 增加带内存缓存的高性能校验，对缺失必填项（如 `sys_devlog` 缺失四要素）物理拦截；
+     3. **客户端 SDK 落地**：新建 `src/logbook/client.py`，内置 `SingleFlight` 并发削峰拦截器、Full Jitter 指数退避重试（`retry_with_backoff`）与 30s keepalive 心跳保活；
+     4. **HTTP / HTTPS FastMCP SSE 双通道**：在 `src/logbook/ssh_server.py` 中增强 SSL 证书挂载与 `/health` 端点，支持配置 `LOGBOOK_ENABLE_SSE=true` 在端口 8000 与 SSH 端口 22 并行监听；
+     5. **根治 asyncpg 参数类型推断冲突**：在 `read_agent_message`、`archive_agent_message`、`reply_agent_message` 中将 `message_id` 显式转换为 `str` 并规范 SQL 绑定。
+   - **验证证据 (Evidence)**:
+     1. 单元测试门禁：`scripts/gate.sh unit` 运行 70 项单元测试，包含 `tests/test_v070_unification.py` 的 5 大契约测试，**70 passed in 11.33s (100% 绿灯)**；
+     2. 生产镜像构建与部署：本地成功构建 `logbook:0.7.0`，安全流式加载至 QNAP NAS（`<nas-ip>`），compose 平滑重建双容器；
+     3. FastMCP SSE 接口实测：`curl http://<nas-ip>:8000/health` 输出 `{"status":"ok","service":"logbook","version":"0.7.0","transport":"sse"}`；`/sse` 事件流握手正常，长连接返回 `event: endpoint` 与心跳 ping；
+     4. 生产真机穿透测试：`scratch/verify_070_live.py` 13 项核心链路穿透测试 **13/13 项全量通过 (100.0%)**；
+     5. 存量数据 0 丢失：`shared.records` 存量 6,917+ 条业务记录完整无缺；
+     6. 极低资源稳态：`docker stats` 实测 `logbook-app` 占用 82.21 MiB（2 PIDs），`logbook-postgres` 占用 31.22 MiB（9 PIDs），全站常驻内存仅 ~113.4 MiB。
 
 ---
 

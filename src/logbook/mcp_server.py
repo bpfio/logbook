@@ -2533,6 +2533,7 @@ async def dataset_upsert(
     category: str = "general",
     field_schema: list[dict[str, Any]] | None = None,
     alias_map: dict[str, str] | None = None,
+    json_schema: dict[str, Any] | None = None,
     description: str | None = None,
 ) -> dict:
     """注册或更新数据集元数据规范与字段定义 (Schema & Metadata).
@@ -2542,6 +2543,7 @@ async def dataset_upsert(
     - category: 可选。业务领域分类: finance, oss_metrics, trade, tax, research, general。
     - field_schema: 可选。字段元数据定义列表 [{"key": "...", "label": "...", "type": "..."}]。
     - alias_map: 可选。历史版本与同义词映射表 {"结汇金额": "amount", "申报号": "doc_no"}。
+    - json_schema: 可选。声明式 JSON Schema 校验契约。
     - description: 可选。数据集口径与填报业务说明。
     """
     cat = normalize_dataset_category(category)
@@ -2551,6 +2553,7 @@ async def dataset_upsert(
         category=cat,
         field_schema=field_schema or [],
         alias_map=alias_map or {},
+        json_schema=json_schema,
         description=description,
     )
     result = await db.upsert_dataset(ds)
@@ -2662,6 +2665,9 @@ async def record_upsert(
         status=st,
         payload=payload or {},
     )
+    # 动态 JSON Schema 契约校验 (强化软肋骨防御)
+    await fact_engine.validate_payload_schema(record.dataset_code, record.payload)
+
     if with_embedding or os.getenv("LOGBOOK_AUTO_EMBED_RECORDS", "0") == "1":
         txt = extract_record_embed_text(record)
         if txt:
@@ -3024,6 +3030,255 @@ async def records_bulk_upsert(
         "elapsed_ms": elapsed_ms,
         "message": f"成功批量落库 {len(records)} 条单据 (新增: {res.get('inserted', 0)}, 更新: {res.get('updated', 0)}, 耗时: {elapsed_ms}ms)！",
     }
+
+
+# =============================================================================
+# 四、 0.7.0 统一聚合核心工具 (Unified Action Primitives)
+# =============================================================================
+
+@mcp.tool()
+@tool_shell
+async def project_manage(
+    action: Literal["init", "update"],
+    project: str,
+    title: str | None = None,
+    repo: str | None = None,
+    description: str | None = None,
+    schema_name: str | None = None,
+    groups: list[str] | None = None,
+) -> dict:
+    """统一项目空间元数据管理 (初始化/开立项目 或 更新项目信息)。
+
+    字段说明:
+    - action: 必填。'init'=新建/开立项目台账空间; 'update'=修改现有项目标题/描述。
+    - project: 必填。项目代号或权威 Git 仓库标识 (如 'bpfio/logbook', 'taxbase')。
+    - title: 可选。项目全称或中文名称。
+    - repo: 可选。action='init' 时的权威 Git 仓库标识 (若未提供则默认等于 project)。
+    - description: 可选。项目背景与核心职责简述。
+    - schema_name: 可选。指定物理 Schema 名称 (缺省自动派生)。
+    - groups: 可选。挂载的权限群组列表。
+    """
+    if action == "init":
+        return await project_init(
+            repo=repo or project,
+            title=title or project,
+            description=description,
+            schema_name=schema_name,
+            groups=groups,
+        )
+    elif action == "update":
+        return await project_update(
+            project=project,
+            title=title,
+            description=description,
+        )
+    else:
+        return tool_error("INVALID_ARGUMENT", f"未知 action: '{action}', 仅支持 'init' 或 'update'", tool="project_manage")
+
+
+@mcp.tool()
+@tool_shell
+async def group_manage(
+    action: Literal["upsert", "grant", "revoke", "add_member", "remove_member", "query_groups", "query_principals"],
+    group_name: str | None = None,
+    project: str | None = None,
+    agent_name: str | None = None,
+    description: str | None = None,
+) -> dict:
+    """统一多租户权限群组、成员与 RBAC 赋权管理。
+
+    字段说明:
+    - action: 必填。
+      * 'upsert': 创建/修改群组
+      * 'grant': 将项目台账空间授权给群组
+      * 'revoke': 撤销群组对项目空间的访问权
+      * 'add_member': 向群组添加成员 Agent
+      * 'remove_member': 从群组移除成员 Agent
+      * 'query_groups': 查询群组清单
+      * 'query_principals': 查询账户身份画像
+    - group_name: 群组标识名称 (如 'finance-sec', 'tax-audit')。
+    - project: 关联项目代号。
+    - agent_name: 关联 Agent 账户名称 (如 'agy', 'zcode')。
+    - description: 群组职能简述。
+    """
+    if action == "upsert":
+        if not group_name:
+            return tool_error("INVALID_ARGUMENT", "action='upsert' 时 group_name 为必填项！", tool="group_manage")
+        return await group_record(group_name=group_name, description=description)
+    elif action == "grant":
+        if not group_name or not project:
+            return tool_error("INVALID_ARGUMENT", "action='grant' 时 group_name 与 project 为必填项！", tool="group_manage")
+        return await group_grant(group_name=group_name, project=project)
+    elif action == "revoke":
+        if not group_name or not project:
+            return tool_error("INVALID_ARGUMENT", "action='revoke' 时 group_name 与 project 为必填项！", tool="group_manage")
+        return await group_revoke(group_name=group_name, project=project)
+    elif action == "add_member":
+        if not group_name or not agent_name:
+            return tool_error("INVALID_ARGUMENT", "action='add_member' 时 group_name 与 agent_name 为必填项！", tool="group_manage")
+        return await group_member_add(group_name=group_name, agent_name=agent_name)
+    elif action == "remove_member":
+        if not group_name or not agent_name:
+            return tool_error("INVALID_ARGUMENT", "action='remove_member' 时 group_name 与 agent_name 为必填项！", tool="group_manage")
+        return await group_member_remove(group_name=group_name, agent_name=agent_name)
+    elif action == "query_groups":
+        return await group_query()
+    elif action == "query_principals":
+        return await principal_query()
+    else:
+        return tool_error("INVALID_ARGUMENT", f"未知 action: '{action}'", tool="group_manage")
+
+
+@mcp.tool()
+@tool_shell
+async def message_action(
+    action: Literal["read", "archive", "unarchive"],
+    message_id: int,
+    agent_name: str | None = None,
+) -> dict:
+    """统一对讲信箱信件状态流转 (标记已读、归档、取消归档)。
+
+    字段说明:
+    - action: 必填。'read'=标记为已读; 'archive'=移入归档箱; 'unarchive'=移出归档箱。
+    - message_id: 必填。目标信件编号 (整数)。
+    - agent_name: 可选。当前操作 Agent 身份 (缺省自动探测并与当前 SSH 凭据对齐)。
+    """
+    if action == "read":
+        return await message_read(message_id=message_id, agent_name=agent_name)
+    elif action == "archive":
+        return await message_archive(message_id=message_id, archived=True)
+    elif action == "unarchive":
+        return await message_archive(message_id=message_id, archived=False)
+    else:
+        return tool_error("INVALID_ARGUMENT", f"未知 action: '{action}'", tool="message_action")
+
+
+@mcp.tool()
+@tool_shell
+async def lease_manage(
+    action: Literal["acquire", "release", "query"],
+    project: str,
+    file_path: str | None = None,
+    agent_name: str | None = None,
+    duration_seconds: int = 300,
+    allow_cross_project: bool = False,
+) -> dict:
+    """统一代码/文件协同软锁防冲突管理 (获取、释放、查询活动租约)。
+
+    字段说明:
+    - action: 必填。'acquire'=抢占/续期租约; 'release'=主动释放租约; 'query'=查询当前活动租约。
+    - project: 必填。归属项目代号。
+    - file_path: 代码文件相对路径 (action 为 acquire/release 时必填)。
+    - agent_name: 可选。持有人标识 (缺省自动绑定当前 Agent)。
+    - duration_seconds: 租约有效时长 (缺省 300 秒 / 5 分钟)。
+    """
+    if action == "acquire":
+        if not file_path:
+            return tool_error("INVALID_ARGUMENT", "action='acquire' 时 file_path 为必填项！", tool="lease_manage")
+        return await lease_acquire(
+            project=project,
+            file_path=file_path,
+            agent_name=agent_name or "",
+            duration_seconds=duration_seconds,
+            allow_cross_project=allow_cross_project,
+        )
+    elif action == "release":
+        if not file_path:
+            return tool_error("INVALID_ARGUMENT", "action='release' 时 file_path 为必填项！", tool="lease_manage")
+        return await lease_release(
+            project=project,
+            file_path=file_path,
+            agent_name=agent_name or "",
+            allow_cross_project=allow_cross_project,
+        )
+    elif action == "query":
+        return await lease_query(
+            project=project,
+            allow_cross_project=allow_cross_project,
+        )
+    else:
+        return tool_error("INVALID_ARGUMENT", f"未知 action: '{action}'", tool="lease_manage")
+
+
+@mcp.tool()
+@tool_shell
+async def dataset_manage(
+    action: Literal["upsert", "query"],
+    code: str | None = None,
+    name: str | None = None,
+    category: str = "general",
+    json_schema: dict[str, Any] | None = None,
+    field_schema: list[dict[str, Any]] | None = None,
+    alias_map: dict[str, str] | None = None,
+    description: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """统一数据集元数据规范与声明式 JSON Schema 管理。
+
+    字段说明:
+    - action: 必填。'upsert'=注册或修改数据集元数据与 Schema; 'query'=查询数据集列表或详情。
+    - code: 数据集唯一编码 (如 'tax_regulation', 'sys_task')。
+    - name: 数据集全称或中文名称。
+    - category: 业务领域分类 (general, finance, legal, custom 等)。
+    - json_schema: 声明式 JSON Schema 校验契约 (用于强化软肋骨 payload 物理防御)。
+    - field_schema: 字段规范说明列表。
+    - alias_map: 历史同义词与版本映射表。
+    - description: 数据集填报与口径说明。
+    - limit: 查询限制条数 (默认 50)。
+    """
+    if action == "upsert":
+        if not code or not name:
+            return tool_error("INVALID_ARGUMENT", "action='upsert' 时 code 与 name 为必填项！", tool="dataset_manage")
+        return await dataset_upsert(
+            code=code,
+            name=name,
+            category=category,
+            field_schema=field_schema,
+            alias_map=alias_map,
+            json_schema=json_schema,
+            description=description,
+        )
+    elif action == "query":
+        if code:
+            ds = await db.get_dataset(code)
+            if not ds:
+                return tool_error("NOT_FOUND", f"未找到数据集 [{code}]", tool="dataset_manage")
+            return {"success": True, "dataset": ds}
+        else:
+            return await dataset_query(category=category if category != "general" else None, limit=limit)
+    else:
+        return tool_error("INVALID_ARGUMENT", f"未知 action: '{action}'", tool="dataset_manage")
+
+
+# -----------------------------------------------------------------------------
+# 0.7.0 核心高内聚工具集 SSOT (对外 tools/list 仅呈现 14 个核心工具)
+# -----------------------------------------------------------------------------
+CORE_TOOL_NAMES = {
+    "record_upsert",
+    "records_bulk_upsert",
+    "record_query",
+    "record_search",
+    "record_stats",
+    "dataset_manage",
+    "message_send",
+    "message_inbox",
+    "message_action",
+    "lease_manage",
+    "group_manage",
+    "project_manage",
+    "logbook_brief",
+    "export_markdown",
+}
+
+_orig_list_tools = mcp.list_tools
+
+async def _unified_list_tools() -> list[Any]:
+    all_tools = await _orig_list_tools()
+    if os.getenv("LOGBOOK_EXPOSE_ALL_46_TOOLS", "0") == "1":
+        return all_tools
+    return [t for t in all_tools if t.name in CORE_TOOL_NAMES]
+
+mcp.list_tools = _unified_list_tools
 
 
 # -----------------------------------------------------------------------------

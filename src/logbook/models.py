@@ -392,6 +392,7 @@ class Dataset(BaseModel):
     category: str = Field(default="general", max_length=32, description="业务领域分类")
     field_schema: list[dict[str, Any]] = Field(default_factory=list, description="字段元数据规范列表")
     alias_map: dict[str, str] = Field(default_factory=dict, description="历史版本与同义词映射表")
+    json_schema: dict[str, Any] | None = Field(default=None, description="声明式 JSON Schema 校验契约")
     description: str | None = Field(default=None, description="数据集口径与业务填报规范说明")
     created_at: datetime = Field(default_factory=get_beijing_now)
     updated_at: datetime = Field(default_factory=get_beijing_now)
