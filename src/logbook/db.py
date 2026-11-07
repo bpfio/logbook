@@ -1901,6 +1901,16 @@ class Database:
                 return
             spool = await self._acquire_system()
             async with spool.acquire() as conn:
+                is_view = await conn.fetchval("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.views 
+                        WHERE table_schema = 'shared' AND table_name = 'researches'
+                    );
+                """)
+                if is_view:
+                    self._researches_schema_ensured = True
+                    return
+
                 await conn.execute("""
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -2183,8 +2193,13 @@ class Database:
         params: list[Any] = [project]
 
         if status:
-            params.append(status.value if isinstance(status, ResearchStatus) else str(status))
-            conditions.append(f"status = ${len(params)}")
+            if isinstance(status, (list, tuple, set)):
+                st_vals = [s.value if isinstance(s, ResearchStatus) else str(s) for s in status]
+                params.append(st_vals)
+                conditions.append(f"status = ANY(${len(params)})")
+            else:
+                params.append(status.value if isinstance(status, ResearchStatus) else str(status))
+                conditions.append(f"status = ${len(params)}")
         if category:
             params.append(category.value if isinstance(category, ResearchCategory) else str(category))
             conditions.append(f"category = ${len(params)}")

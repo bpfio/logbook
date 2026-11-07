@@ -48,6 +48,7 @@ from .normalizer import (
     extract_record_embed_text
 )
 from .db import db
+from .engine import fact_engine
 # P1-1: brief digest 端点 (A1 并行开发中, 接口契约已锁 db.brief_project(project_id, devlog_limit=5) -> dict,
 # 键 tasks_open/findings_open/waitings_open/batch_running/recent_devlogs; A1 未落地期间取不到属预期)
 brief_project = getattr(db, "brief_project", None)
@@ -933,6 +934,18 @@ async def task_upsert(
 
     caller_ip = detect_caller_ip(agent_ip)
 
+    if batch_id:
+        try:
+            await fact_engine.ensure_batch_exists_or_raise(proj, batch_id)
+        except ValueError as exc:
+            return tool_error("INVALID_ARGUMENT", str(exc), tool="task_upsert")
+
+    if parent_id:
+        try:
+            await fact_engine.ensure_parent_task_exists_or_raise(proj, parent_id)
+        except ValueError as exc:
+            return tool_error("INVALID_ARGUMENT", str(exc), tool="task_upsert")
+
     task = Task(
         id=id,
         title=s_title,
@@ -983,9 +996,11 @@ async def tasks_bulk_upsert(
 
     caller_ip = detect_caller_ip(agent_ip)
 
-    # 若指定了统一批次号，自动保底确保 batches 存在以满足外键约束
     if batch_id:
-        await db.upsert_batch(proj, Batch(id=batch_id, title=f"研发批次 {batch_id}", status=BatchStatus.RUNNING, agent_ip=caller_ip))
+        try:
+            await fact_engine.ensure_batch_exists_or_raise(proj, batch_id)
+        except ValueError as exc:
+            return tool_error("INVALID_ARGUMENT", str(exc), tool="tasks_bulk_upsert")
 
     task_objs = []
     for idx, t in enumerate(tasks, start=1):
@@ -1500,6 +1515,8 @@ async def devlog_search(
 
     limit = clamp_limit(limit, maximum=QUERY_LIMIT_MAX)
     s_query = sanitize_text(query).clean_text
+    if not s_query.strip():
+        return tool_error("INVALID_ARGUMENT", "query 不能为空！", tool="devlog_search")
     embed_res = await get_embedding(s_query)
 
     results = await db.search_devlogs(
@@ -1579,7 +1596,7 @@ async def rule_query(
 
 @mcp.tool()
 @tool_shell
-async def export_markdown(project: str, output_path: str | None = None) -> str:
+async def export_markdown(project: str, output_path: str | None = None) -> str | dict:
     """从数据库生成完全兼容 brix 格式的 DEVLOG.md，以内容字符串返回 (调用方自行落盘)。
 
     P2-4: 服务端缺省不再写任意服务器路径。output_path 参数保留向后兼容:
@@ -1655,9 +1672,15 @@ async def batch_upsert(
 
 @mcp.tool()
 @tool_shell
-async def batch_query(project: str, limit: int = 20, fields: list[str] | None = None) -> dict:
+async def batch_query(
+    project: str,
+    status: list[Literal["planned", "running", "completed", "halted"]] | Literal["planned", "running", "completed", "halted"] | None = None,
+    limit: int = 20,
+    fields: list[str] | None = None
+) -> dict:
     """查询项目历史研发批次演进记录与讨论复盘。强制要求显式提供 project 参数。返回标准化包装对象。
 
+    - status: 可选。研发批次状态过滤 (支持单值或数组: planned, running, completed, halted)。
     - limit: 返回条数上限 (1..200, 缺省 20, 超界自动钳制)。
     - fields: 可选列投影 (如 ['id','title','status'])，缺省回全列。
     """
@@ -1668,6 +1691,10 @@ async def batch_query(project: str, limit: int = 20, fields: list[str] | None = 
 
     limit = clamp_limit(limit)
     batches = await db.query_batches(proj, limit=limit)
+    if status is not None:
+        raw_status = [status] if isinstance(status, str) else list(status)
+        st_list = [normalize_status(s) for s in raw_status]
+        batches = [b for b in batches if b.status.value in st_list]
     items = project_fields([b.model_dump(mode="json") for b in batches], fields)
     return {
         "success": True,
@@ -2423,6 +2450,8 @@ async def research_search(
 
     limit = clamp_limit(limit, maximum=QUERY_LIMIT_MAX)
     s_query = sanitize_text(query).clean_text
+    if not s_query.strip():
+        return tool_error("INVALID_ARGUMENT", "query 不能为空！", tool="research_search")
     embed_res = await get_embedding(s_query)
 
     results = await db.search_researches(
@@ -2445,7 +2474,7 @@ async def research_search(
 @tool_shell
 async def research_query(
     project: str,
-    status: str | None = None,
+    status: list[str] | str | None = None,
     category: str | None = None,
     authority: str | None = None,
     doc_no: str | None = None,
@@ -2455,7 +2484,7 @@ async def research_query(
     """列表与看板查询调研记录 (支持发文机关、字号、分类与状态过滤)。返回标准化包装对象。
 
     - project: 必填。项目代号。
-    - status: 可选。调研/政策状态过滤。
+    - status: 可选。调研/政策状态过滤 (支持单值或数组)。
     - category: 可选。分类过滤。
     - authority: 可选。发文机关/起草部委过滤。
     - doc_no: 可选。权威字号/标准编号过滤。
@@ -2468,12 +2497,16 @@ async def research_query(
         return e.to_dict()
 
     limit = clamp_limit(limit)
-    st_enum = ResearchStatus(normalize_research_status(status)) if status else None
+    if status is not None:
+        raw_status = [status] if isinstance(status, str) else list(status)
+        st_enums = [ResearchStatus(normalize_research_status(s)) for s in raw_status]
+    else:
+        st_enums = None
     cat_enum = ResearchCategory(normalize_research_category(category)) if category else None
 
     researches = await db.query_researches(
         proj,
-        status=st_enum,
+        status=st_enums,
         category=cat_enum,
         authority=authority,
         doc_no=doc_no,
@@ -2689,6 +2722,11 @@ async def record_query(
         proj = await validate_and_negotiate_project(project, is_write=False)
     except ProjectNegotiationError as e:
         return e.to_dict()
+
+    if offset < 0:
+        return tool_error("INVALID_ARGUMENT", "offset 必须 >= 0", tool="record_query")
+    if query_text is not None and str(query_text).strip() == "":
+        return tool_error("INVALID_ARGUMENT", "query_text 不能为空！", tool="record_query")
 
     st = None
     if status is not None:
