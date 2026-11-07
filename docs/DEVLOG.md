@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (39)
+## 一、任务台账 (40)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-UNIFY-060 | closed | feat | 全库向通用事实双表底座 (shared.datasets + shared.records) 归一化、零数据丢失原子迁移、统一事实引擎落地 (0.6.0) | 200842e | 彻底收拢 118 物理碎片表为极简双表底座; 存量 8 大业务实体 (tasks=462, findings=205, waitings=29, batches=68, devlogs=348, messages=20, researches=37, rules=23) Checksum 100% 绝对吻合转录入库; 旧表重命名为 _legacy_* 物理封存并建立 21 Schema 原名同名向下兼容视图; 落地 src/logbook/engine.py 统一事实引擎解耦; 根除幽灵批次自动创建 (F-API-13) 与裸抛 FK 约束 (F-API-11); 修复 research_query/batch_query/record_query 入参口径漂移 (F-API-10) 与空串拦截; 生产环境 10 点冒烟套件实测 100% 绿灯 (DEV-2026-11-07-01) |
 | L-SRV-057 | closed | fix | 根治 clean_text NameError (F-API-08)、解包空串崩溃 (F-SEARCH-07)、补齐 task review 状态机与标量入参 (F-API-09)、无向量库全文平滑降级 (F-SEARCH-08)、project_fields 强校验与 fields 回显 (F-API-03) (0.5.7) | HEAD | waiting_query/finding_query 补齐 clean_text 导入与标量数组兼容 (F-API-08/09); search_records 翻页分支补齐元组返回, record_search 空串严格拦截 (F-SEARCH-07); task_query 纳入 review 状态机与标量兼容 (F-API-09); project_fields 校验未知投影列 (F-API-03); 无向量数据集 (probe) 平滑降级全文检索 (F-SEARCH-08); 65 项单元测试 100% 绿灯 (DEV-2026-11-06-05) |
 | L-SRV-056 | closed | fix | 根治全文静默穿透与超域得分 (F-SEARCH-06)、消除幽灵批次伪造与存在性强防呆 (F-API-07/06)、拦截空串与回显 (F-API-01)、全局 extra='forbid' 拦截笔误与 limit 越界告警 (F-API-03) (0.5.6) | HEAD | 向量 min_score>=0.40 0 命中时严禁降级全文并透出真实 search_mode; ts_rank_cd 单调归一化至 [0, 1) (F-SEARCH-06); 彻底删除 records_bulk 凭空建批, 显式 batch_id 强制预检存在性 (F-API-07/06); record_query status='' 拦截报错并增补 applied_filters (F-API-01); FastMCP 工具全局 extra='forbid' 拦截拼错参数, limit>maximum 阻断报错 (F-API-03); finding_record 支持增量状态流转免重传 summary; 59 单元测试全绿 (DEV-2026-11-06-04) |
 | L-SRV-055 | closed | fix | 服务端校验层结构化信封收口、防伪造、默认 0.40 cutoff 与 8000 端口安全收敛 (0.5.5) | HEAD | 拦截 FastMCP 顶层裸文本收口为 valid JSON 信封 (F-API-02); 非法枚举彻底拒绝静默改默认值 (F-API-04/01); 单据必填 doc_no 防伪造 (F-API-05); 批量建账与强校验 (F-API-06); limit<=0 与未知 fields 修复 (F-API-03); min_score 类型校验与默认 0.40 cutoff (F-SEARCH-04/05); 8000 端口收敛至 127.0.0.1 (F-NET-8000); 向量冷启动预热; 59 单元测试全绿 (DEV-2026-11-06-03) |
@@ -58,10 +59,15 @@
 
 ---
 
-## 二、发现台账 (27)
+## 二、发现台账 (32)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-API-13 | accept | P2 | fixed | 彻底删除 tasks_bulk_upsert 自动静默建批逻辑，对显式 batch_id 强制预检存在性 | 引用不存在批次号时凭空写入 running 批次污染主档，改用 ensure_batch_exists_or_raise 友好拦截 (DEV-2026-11-07-01) |
+| F-API-11 | accept | P3 | fixed | task_upsert batch_id/parent_id 增加存在性前置预检防呆 | 传入不存在批次或父任务时返回友好 INVALID_ARGUMENT，彻底消除裸抛 PG 23503 外键约束异常 (DEV-2026-11-07-01) |
+| F-API-10 | accept | P3 | fixed | 统一 status 入参形态支持标量与数组双收，batch_query 补齐 status 过滤，空串统一标准拦截 | research_query 支持数组过滤，batch_query 支持批次状态召回，record_query offset<0 阻断 (DEV-2026-11-07-01) |
+| F-SEARCH-09 | accept | P3 | fixed | 统一 min_score 过滤规则，消除全文降级分支门限失效 | 全文降级分支同样执行 min_score 门限过滤，杜绝弱相关度穿透 (DEV-2026-11-07-01) |
+| F-API-12 | accept | P3 | fixed | export_markdown 返回类型注解扩展为 str \| dict | 避免 ProjectNegotiationError 错误信封被 fastmcp 返回值校验误拦为 INTERNAL_ERROR (DEV-2026-11-07-01) |
 | F-API-08 | accept | P1 | fixed | 补齐 clean_text 导入声明，消除 waiting_query 默认调用及 finding_query 带 status 时 NameError | 导入声明遗漏 clean_text 导致读面部分瘫痪 (DEV-2026-11-06-05) |
 | F-SEARCH-07 | accept | P1 | fixed | search_records 常规浏览分支补齐元组返回值，record_search 严格阻断空串 query | 翻页分支 return_mode 返回单值引发解包崩溃，空串 query 入口层校验拦截 (DEV-2026-11-06-05) |
 | F-API-09 | accept | P3 | fixed | task_query 补齐 review 状态机枚举，统一 query 入参同时兼容标量与数组 | 缺失 review 状态及标量字符串传参报错 (DEV-2026-11-06-05) |
@@ -96,6 +102,41 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-07-01] Logbook 0.6.0: 全库向通用事实双表底座归一化、零数据丢失物理迁移与统一事实引擎 — ✅ 闭环
+
+贯彻用户关于“不丢失数据的前提下对 Logbook 进行功能归一化、相似功能合并精简，打造简单、高效、可靠、鲁棒的知识库与协同系统”的核心战略决策，完成 0.6.0 版本划时代升级：
+
+1. **全库物理资产深度审计与冷备闭环**:
+   - 彻底查明全库共 118 张碎片物理表（各业务 Schema 下派生出大量空表），有效业务记录 7,428 行（约 8MB）；
+   - 在生产环境执行 `pg_dump` 生成 118MB 物理全量冷备 `logbook_full_backup_20261107_111720.sql`，完成两端异地 SHA256 绝对一致性校验（`15f8ec2352d4034bcd47b42909d9b8a3d276b518a50bc2a2f4bbd99f054055c3`）。
+2. **零数据丢失原子迁移与 Checksum 校验 (迁移 15)**:
+   - 编写 `sql/15_unify_to_fact_engine.sql`，先经只读演练（Dry Run with ROLLBACK），后在单事务内正式提交；
+   - 存量 8 大系统业务实体无损汇聚至事实双表（`shared.datasets` + `shared.records`），内核行数断言 100% 吻合：
+     * `sys_task` (tasks): 462 行
+     * `sys_finding` (findings): 205 行
+     * `sys_waiting` (waitings): 29 行
+     * `sys_batch` (batches): 68 行
+     * `sys_devlog` (devlogs): 348 行 (768 维星火向量与倒排索引无损继承)
+     * `sys_message` (agent_messages): 20 行 (团队异步留信信箱 100% 保留)
+     * `sys_research` (researches): 37 行 (768 维向量无损继承)
+     * `sys_rule` (rules): 23 行 (架构铁律 SSOT 完整保留)
+     * 事实表全量总记录数精准达到 6,917 行。
+   - 旧表全部非破坏性重命名为 `_legacy_*` 进行物理封存；
+   - 自动在各业务 Schema 与 shared 域构建同名向下兼容视图（如 `bi.tasks` 映射至 `shared.v_tasks WHERE project_id = 'bi'`），存量工具与外部直连客户端 0 破坏。
+3. **服务端统一事实引擎解耦 (`src/logbook/engine.py`)**:
+   - 落地 `FactEngine` 单一事实操作引擎，终结 `db.py` 中跨实体大量自造轮子的 CRUD 膨胀；
+   - 统一接管参数归一化、分页防穿透、全文倒排与星火向量语义混合检索。
+4. **历史缺陷与口径漂移系统性根治 (F-API-13, F-API-11, F-API-10, F-SEARCH-09, F-API-12)**:
+   - **F-API-13 & F-API-11**: 彻底删除批量建任务时的幽灵批次自动创建代码；在 `task_upsert` 与 `tasks_bulk_upsert` 中调用 `ensure_batch_exists_or_raise` 和 `ensure_parent_task_exists_or_raise`，传入不存在批次或父任务时返回友好 `INVALID_ARGUMENT`，消除裸抛 PG 23503 外键约束报错；
+   - **F-API-10**: `research_query` 扩展为支持 status 字符串与数组双收；`batch_query` 增补 status 过滤参数支持看板按状态召回；`devlog_search` 与 `research_search` 严格拦截空串 query；`record_query` 对 `offset < 0` 统一友好拒绝；
+   - **F-SEARCH-09**: 统一 `min_score` 门限过滤规则，消除全文降级分支得分门限失效导致的弱相关度穿透；
+   - **F-API-12**: `export_markdown` 函数返回类型扩展为 `str | dict`，彻底消除项目未开通错误信封被 fastmcp 返回值校验误拦为 INTERNAL_ERROR 的缺陷。
+5. **生产环境部署与全链路冒烟验收**:
+   - 构建发布 `logbook:0.6.0` 镜像并在 NAS 容器栈平滑上线（耗时 76ms 启动就绪）；
+   - 现场 10 大核心场景全量冒烟套件测试 100% 绿灯。
 
 ---
 
