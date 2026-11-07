@@ -49,17 +49,30 @@ class SingleFlight:
                 self._in_flight.pop(key, None)
 
 
+try:
+    import httpx
+    DEFAULT_RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
+        ConnectionError,
+        TimeoutError,
+        asyncio.TimeoutError,
+        OSError,
+        httpx.RequestError,
+    )
+except ImportError:
+    DEFAULT_RETRYABLE_EXCEPTIONS = (
+        ConnectionError,
+        TimeoutError,
+        asyncio.TimeoutError,
+        OSError,
+    )
+
+
 async def retry_with_backoff(
     coro_factory: Callable[[], Coroutine[Any, Any, Any]],
     max_retries: int = 3,
     base_delay: float = 0.1,
     max_delay: float = 2.0,
-    retryable_exceptions: tuple[type[Exception], ...] = (
-        ConnectionError,
-        TimeoutError,
-        asyncio.TimeoutError,
-        OSError,
-    ),
+    retryable_exceptions: tuple[type[Exception], ...] = DEFAULT_RETRYABLE_EXCEPTIONS,
 ) -> Any:
     """带全抖动 (Full Jitter) 的指数退避重试器。"""
     attempt = 0
@@ -104,6 +117,12 @@ class LogbookClient:
         self.keepalive_interval = keepalive_interval
         self._flight = SingleFlight()
         self._httpx_client: Any = None
+
+    async def __aenter__(self) -> "LogbookClient":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
 
     async def _get_http_client(self) -> Any:
         import httpx
@@ -150,13 +169,17 @@ class LogbookClient:
                     "method": "tools/call",
                     "params": {"name": tool_name, "arguments": arguments},
                 }
-                # OPT-04: 优先走无状态高性能 /rpc 路由，若无则尝试 /messages/
+                # OPT-04 & OPT-16: 优先走无状态高性能 /rpc 路由，仅在 404 (旧版服务) 时尝试 /messages/
                 try:
                     resp = await client.post("/rpc", json=payload)
                     resp.raise_for_status()
-                except Exception:
-                    resp = await client.post("/messages/", json=payload)
-                    resp.raise_for_status()
+                except Exception as exc:
+                    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                    if status_code == 404:
+                        resp = await client.post("/messages/", json=payload)
+                        resp.raise_for_status()
+                    else:
+                        raise
 
                 data = resp.json()
                 if "error" in data:
@@ -184,6 +207,52 @@ class LogbookClient:
             )
         else:
             return await retry_with_backoff(_do_call)
+
+    # -------------------------------------------------------------------------
+    # 高阶领域方法 (OPT-12)
+    # -------------------------------------------------------------------------
+
+    async def brief(self, project: str, devlog_limit: int = 5) -> dict[str, Any]:
+        """获取项目开工简报。"""
+        return await self.call_tool("logbook_brief", {"project": project, "devlog_limit": devlog_limit})
+
+    async def query_records(self, project: str, dataset_code: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        """多维查询事实数据单据。"""
+        args = {"project": project, **kwargs}
+        if dataset_code:
+            args["dataset_code"] = dataset_code
+        return await self.call_tool("record_query", args)
+
+    async def upsert_record(self, project: str, dataset_code: str, doc_no: str, **kwargs: Any) -> dict[str, Any]:
+        """写入或更新事实单据。"""
+        args = {"project": project, "dataset_code": dataset_code, "doc_no": doc_no, **kwargs}
+        return await self.call_tool("record_upsert", args)
+
+    async def search_records(self, project: str, query: str, **kwargs: Any) -> dict[str, Any]:
+        """混合语义与全文检索事实单据。"""
+        args = {"project": project, "query": query, **kwargs}
+        return await self.call_tool("record_search", args)
+
+    async def stats(self, project: str, **kwargs: Any) -> dict[str, Any]:
+        """统计与汇总事实单据核心指标。"""
+        args = {"project": project, **kwargs}
+        return await self.call_tool("record_stats", args)
+
+    async def send_message(self, project: str, from_agent: str, to_agent: str, subject: str, content: str, **kwargs: Any) -> dict[str, Any]:
+        """发送站内信件。"""
+        args = {"project": project, "from_agent": from_agent, "to_agent": to_agent, "subject": subject, "content": content, **kwargs}
+        return await self.call_tool("message_send", args)
+
+    async def inbox(self, agent_name: str, project: str | None = None, unread_only: bool = True) -> dict[str, Any]:
+        """查收信箱。"""
+        args = {"agent_name": agent_name, "unread_only": unread_only}
+        if project:
+            args["project"] = project
+        return await self.call_tool("message_inbox", args)
+
+    async def list_projects(self) -> dict[str, Any]:
+        """列出所有已注册项目空间。"""
+        return await self.call_tool("project_manage", {"action": "list"})
 
     async def close(self) -> None:
         if self._httpx_client and not self._httpx_client.is_closed:

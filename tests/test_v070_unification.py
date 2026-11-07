@@ -213,3 +213,96 @@ async def test_bulk_upsert_schema_validation():
         assert res.get("isError") is True
         assert "第 2 条记录契约校验失败" in res.get("detail", "")
         assert "必填字段 'buyer' 缺失" in res.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_opt22_schema_boolean_integer_rejection():
+    """验证 OPT-22: Schema 校验器阻断布尔值伪装为数值 (bool 是 int 子类)。"""
+    fact_engine._schema_cache["sys_num_test"] = {
+        "type": "object",
+        "required": ["amount", "count"],
+        "properties": {
+            "amount": {"type": "number"},
+            "count": {"type": "integer"},
+        },
+    }
+
+    # 1. 正常数值通过
+    await fact_engine.validate_payload_schema("sys_num_test", {"amount": 12.5, "count": 10})
+
+    # 2. 布尔值 True 传入 number 必须被拦截
+    with pytest.raises(ValueError, match="必须为数值类型"):
+        await fact_engine.validate_payload_schema("sys_num_test", {"amount": True, "count": 10})
+
+    # 3. 布尔值 False 传入 integer 必须被拦截
+    with pytest.raises(ValueError, match="必须为整数类型"):
+        await fact_engine.validate_payload_schema("sys_num_test", {"amount": 12.5, "count": False})
+
+
+@pytest.mark.asyncio
+async def test_opt09_record_event_date_default():
+    """验证 OPT-09: DataRecord 与 record_upsert 自动补齐 event_date。"""
+    from datetime import date
+    from logbook.models import DataRecord
+
+    # 1. 显式不传 event_date
+    rec1 = DataRecord(project_id="test_proj", doc_no="DOC-01", dataset_code="task", payload={"title": "test"})
+    assert rec1.event_date == date.today().isoformat()
+
+    # 2. 传 None 或空串自动降级为今日
+    rec2 = DataRecord(project_id="test_proj", doc_no="DOC-02", dataset_code="task", payload={"title": "test"}, event_date=None)
+    assert rec2.event_date == date.today().isoformat()
+
+    rec3 = DataRecord(project_id="test_proj", doc_no="DOC-03", dataset_code="task", payload={"title": "test"}, event_date="")
+    assert rec3.event_date == date.today().isoformat()
+
+
+@pytest.mark.asyncio
+async def test_opt18_normalize_status_list():
+    """验证 OPT-18: FactEngine.normalize_status_list 支持字符串和列表解析。"""
+    assert fact_engine.normalize_status_list(None) is None
+    assert fact_engine.normalize_status_list("") == []
+    assert fact_engine.normalize_status_list([]) == []
+    assert fact_engine.normalize_status_list("open") == ["open"]
+    assert fact_engine.normalize_status_list(["planned", "running"]) == ["planned", "running"]
+    assert fact_engine.normalize_status_list("  closed  ") == ["closed"]
+    assert fact_engine.normalize_status_list([" planned ", ""]) == ["planned"]
+
+
+@pytest.mark.asyncio
+async def test_opt21_export_markdown_path_traversal():
+    """验证 OPT-21: export_markdown 严禁越权目录遍历。"""
+    from logbook.mcp_server import export_markdown
+    from unittest.mock import patch
+
+    with patch("logbook.mcp_server.validate_and_negotiate_project", return_value="test_proj"):
+        # 试图写入敏感系统路径
+        res = await export_markdown("test_proj", output_path="/etc/passwd")
+        assert res.get("isError") is True
+        assert res.get("error_type") == "PERMISSION_DENIED"
+        assert "超出允许的安全写入目录范围" in res.get("detail", "")
+
+        # 试图通过相对路径回退上级目录
+        res2 = await export_markdown("test_proj", output_path="../../../root/.bashrc")
+        assert res2.get("isError") is True
+        assert res2.get("error_type") == "PERMISSION_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_opt10_client_sdk_enhancements():
+    """验证 OPT-10, OPT-15, OPT-16: LogbookClient 异步上下文管理器与快捷方法。"""
+    from logbook.client import LogbookClient
+
+    client = LogbookClient(base_url="http://127.0.0.1:8000")
+    # 验证上下文协议支持
+    async with client as c:
+        assert c is client
+        assert hasattr(c, "brief")
+        assert hasattr(c, "query_records")
+        assert hasattr(c, "upsert_record")
+        assert hasattr(c, "search_records")
+        assert hasattr(c, "stats")
+        assert hasattr(c, "send_message")
+        assert hasattr(c, "inbox")
+        assert hasattr(c, "list_projects")
+

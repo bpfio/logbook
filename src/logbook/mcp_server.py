@@ -271,8 +271,9 @@ def detect_caller_ip(explicit_ip: str | None = None) -> str:
     """自动探测调用端 Agent IP:
     1. 优先使用显式入参 explicit_ip；
     2. 其次从 SSH 会话环境变量 SSH_CLIENT / SSH_CONNECTION 获取远端客户端实际 IP；
-    3. 再次通过 socket/UDP 探测本地宿主 IP；
-    4. 兜底回退 127.0.0.1。
+    3. 再次从 HTTP 接入层环境变量 HTTP_CLIENT_IP (X-Forwarded-For 或 client.host) 获取客户端 IP；
+    4. 再次通过 socket/UDP 探测本地宿主 IP；
+    5. 兜底回退 127.0.0.1。
     """
     if explicit_ip and explicit_ip.strip():
         return explicit_ip.strip()
@@ -282,6 +283,10 @@ def detect_caller_ip(explicit_ip: str | None = None) -> str:
         parts = ssh_client.strip().split()
         if parts and parts[0]:
             return parts[0]
+
+    http_client = os.environ.get("HTTP_CLIENT_IP")
+    if http_client and http_client.strip():
+        return http_client.strip()
 
     return detect_node_ip()
 
@@ -1614,11 +1619,28 @@ async def export_markdown(project: str, output_path: str | None = None) -> dict:
     except ProjectNegotiationError as e:
         return e.to_dict()
 
+    if output_path:
+        # 向后兼容: 旧客户端显式指定路径时保留服务端落盘行为 (OPT-21: 目录遍历安全防御，前置拦截)
+        from pathlib import Path
+        out_p = Path(output_path).resolve()
+        cwd_p = Path.cwd().resolve()
+        data_p = Path("/app/data").resolve()
+        tmp_p = Path("/tmp").resolve()
+
+        is_safe = False
+        for safe_root in (cwd_p, data_p, tmp_p):
+            try:
+                out_p.relative_to(safe_root)
+                is_safe = True
+                break
+            except ValueError:
+                continue
+
+        if not is_safe:
+            return tool_error("PERMISSION_DENIED", f"output_path '{output_path}' 超出允许的安全写入目录范围！", tool="export_markdown")
+
     md = await export_devlog_markdown(proj)
     if output_path:
-        # 向后兼容: 旧客户端显式指定路径时保留服务端落盘行为
-        from pathlib import Path
-        out_p = Path(output_path)
         out_p.parent.mkdir(parents=True, exist_ok=True)
         out_p.write_text(md, encoding="utf-8")
 
@@ -2622,7 +2644,7 @@ async def record_upsert(
     project: str,
     dataset_code: str,
     doc_no: str,
-    event_date: str,
+    event_date: str | None = None,
     amount: float | str | int = 0,
     currency: str = "CNY",
     entity_name: str | None = None,
@@ -2638,7 +2660,7 @@ async def record_upsert(
     - project: 必填。归属项目代号 (必须显式传参)。
     - dataset_code: 必填。关联的数据集定义编码 (如 'safe_forex', 'oss_benchmark')。
     - doc_no: 必填。单据号/唯一标识 (发票号、关单号、跑分流水号)。
-    - event_date: 必填。业务发生日期或测试日期 (YYYY-MM-DD)。
+    - event_date: 可选。业务发生日期或测试日期 (YYYY-MM-DD，缺省自动填充今日)。
     - amount: 可选。核心数值/金额 (高精度 NUMERIC, 缺省 0)。
     - currency: 可选。币种或量纲单位 (USD, CNY, QPS, MS 等，缺省 CNY)。
     - entity_name: 可选。往来单位/境外付款人/组件仓库名。
@@ -2655,6 +2677,7 @@ async def record_upsert(
         return e.to_dict()
 
     st = normalize_record_status(status)
+    actual_event_date = str(event_date).strip() if event_date and str(event_date).strip() else date.today().isoformat()
 
     b_id = str(batch_id).strip() if batch_id and str(batch_id).strip() else None
     if b_id:
@@ -2676,7 +2699,7 @@ async def record_upsert(
         entity_name=entity_name.strip() if entity_name else None,
         amount=amount,
         currency=currency.strip().upper() if currency else "CNY",
-        event_date=event_date,
+        event_date=actual_event_date,
         status=st,
         payload=payload or {},
     )
@@ -2713,7 +2736,7 @@ async def record_query(
     date_to: str | None = None,
     amount_min: float | None = None,
     amount_max: float | None = None,
-    status: str | None = None,
+    status: str | list[str] | None = None,
     batch_id: str | None = None,
     parent_id: int | None = None,
     payload_filter: dict[str, Any] | None = None,
@@ -2730,7 +2753,7 @@ async def record_query(
     - entity_name: 可选。往来单位模糊匹配。
     - date_from / date_to: 可选。业务发生日期范围 (YYYY-MM-DD)。
     - amount_min / amount_max: 可选。核心数值/金额区间。
-    - status: 可选。状态过滤 (recorded, reconciled, verified, cancelled)。
+    - status: 可选。状态过滤 (支持单值或数组，如 'recorded', ['planned', 'running'])。
     - batch_id: 可选。批次号过滤。
     - parent_id: 可选。主子表分录父级 ID 过滤。
     - payload_filter: 可选。JSONB 动态属性匹配 (如 {"customs_code": "0101"})。
@@ -2751,12 +2774,16 @@ async def record_query(
 
     st = None
     if status is not None:
-        if str(status).strip() == "":
+        st_list = fact_engine.normalize_status_list(status)
+        if not st_list:
             return tool_error("INVALID_ARGUMENT", "status 不能为空！", tool="record_query")
-        try:
-            st = normalize_record_status(status)
-        except ValueError as exc:
-            return tool_error("INVALID_ARGUMENT", str(exc), tool="record_query")
+        validated = []
+        for s in st_list:
+            try:
+                validated.append(normalize_record_status(s))
+            except ValueError as exc:
+                return tool_error("INVALID_ARGUMENT", str(exc), tool="record_query")
+        st = validated if len(validated) > 1 else validated[0]
 
     rows = await db.query_records(
         project_id=proj,
@@ -2828,6 +2855,7 @@ async def record_stats(
     date_from: str | None = None,
     date_to: str | None = None,
     group_by: str = "month",
+    status: str | list[str] | None = None,
 ) -> dict:
     """统计与汇总事实单据核心指标 (纯数据库引擎级 SUM/COUNT/AVG 极速聚合)。
 
@@ -2835,6 +2863,7 @@ async def record_stats(
     - dataset_code: 可选。数据集编码过滤。
     - date_from / date_to: 可选。业务发生日期范围 (YYYY-MM-DD)。
     - group_by: 可选。聚合维度: 'month' (缺省), 'day', 'year', 'currency', 'status', 'entity', 'dataset', 'none'。
+    - status: 可选。单据状态过滤 (支持单值或数组，如 'recorded', ['planned', 'running'])。
     """
     try:
         proj = await validate_and_negotiate_project(project, is_write=False)
@@ -2846,12 +2875,26 @@ async def record_stats(
     if grp not in valid_groups:
         return tool_error("INVALID_ARGUMENT", f"无效 group_by: '{group_by}'。合法选项为: {', '.join(valid_groups)}", tool="record_stats")
 
+    st = None
+    if status is not None:
+        st_list = fact_engine.normalize_status_list(status)
+        if not st_list:
+            return tool_error("INVALID_ARGUMENT", "status 不能为空！", tool="record_stats")
+        validated = []
+        for s in st_list:
+            try:
+                validated.append(normalize_record_status(s))
+            except ValueError as exc:
+                return tool_error("INVALID_ARGUMENT", str(exc), tool="record_stats")
+        st = validated if len(validated) > 1 else validated[0]
+
     stats = await db.aggregate_record_stats(
         project_id=proj,
         dataset_code=dataset_code,
         date_from=date_from,
         date_to=date_to,
         group_by=group_by,
+        status=st,
     )
     return {
         "success": True,
@@ -3077,41 +3120,66 @@ async def records_bulk_upsert(
 @mcp.tool()
 @tool_shell
 async def project_manage(
-    action: Literal["init", "update"],
-    project: str,
+    action: Literal["init", "update", "list", "query"],
+    project: str | None = None,
     title: str | None = None,
     repo: str | None = None,
     description: str | None = None,
     schema_name: str | None = None,
     groups: list[str] | None = None,
 ) -> dict:
-    """统一项目空间元数据管理 (初始化/开立项目 或 更新项目信息)。
+    """统一项目空间元数据管理 (初始化/开立项目、更新项目信息、查询项目清单或详情)。
 
     字段说明:
-    - action: 必填。'init'=新建/开立项目台账空间; 'update'=修改现有项目标题/描述。
-    - project: 必填。项目代号或权威 Git 仓库标识 (如 'bpfio/logbook', 'taxbase')。
+    - action: 必填。'init'=新建/开立项目台账空间; 'update'=修改现有项目标题/描述; 'list'=查询所有已注册项目; 'query'=查询单个项目详情。
+    - project: 项目代号或权威 Git 仓库标识 (如 'bpfio/logbook', 'taxbase'；action 为 init/update/query 时必填)。
     - title: 可选。项目全称或中文名称。
     - repo: 可选。action='init' 时的权威 Git 仓库标识 (若未提供则默认等于 project)。
     - description: 可选。项目背景与核心职责简述。
     - schema_name: 可选。指定物理 Schema 名称 (缺省自动派生)。
     - groups: 可选。挂载的权限群组列表。
     """
-    if action == "init":
+    if action == "list":
+        projs = await db.list_projects()
+        return {
+            "success": True,
+            "total": len(projs),
+            "projects": [p.model_dump(mode="json") if hasattr(p, "model_dump") else p.dict() for p in projs],
+        }
+    elif action == "query":
+        if not project or not project.strip():
+            return tool_error("INVALID_ARGUMENT", "action='query' 时 project 为必填项！", tool="project_manage")
+        try:
+            proj_name = await validate_and_negotiate_project(project.strip(), is_write=False)
+        except ProjectNegotiationError as e:
+            return e.to_dict()
+        p = await db.get_project(proj_name)
+        if not p:
+            return tool_error("NOT_FOUND", f"未找到项目 [{project}]", tool="project_manage")
+        return {
+            "success": True,
+            "project": p.model_dump(mode="json") if hasattr(p, "model_dump") else p.dict(),
+        }
+    elif action == "init":
+        if not project or not project.strip():
+            return tool_error("INVALID_ARGUMENT", "action='init' 时 project 为必填项！", tool="project_manage")
         return await project_init(
-            repo=repo or project,
-            title=title or project,
+            repo=repo or project.strip(),
+            title=title or project.strip(),
             description=description,
             schema_name=schema_name,
             groups=groups,
         )
     elif action == "update":
+        if not project or not project.strip():
+            return tool_error("INVALID_ARGUMENT", "action='update' 时 project 为必填项！", tool="project_manage")
         return await project_update(
-            project=project,
+            project=project.strip(),
             title=title,
             description=description,
         )
     else:
-        return tool_error("INVALID_ARGUMENT", f"未知 action: '{action}', 仅支持 'init' 或 'update'", tool="project_manage")
+        return tool_error("INVALID_ARGUMENT", f"未知 action: '{action}', 仅支持 'init', 'update', 'list', 'query'", tool="project_manage")
 
 
 @mcp.tool()
@@ -3244,7 +3312,7 @@ async def dataset_manage(
     action: Literal["upsert", "query"],
     code: str | None = None,
     name: str | None = None,
-    category: str = "general",
+    category: str | None = None,
     json_schema: dict[str, Any] | None = None,
     field_schema: list[dict[str, Any]] | None = None,
     alias_map: dict[str, str] | None = None,
@@ -3257,7 +3325,7 @@ async def dataset_manage(
     - action: 必填。'upsert'=注册或修改数据集元数据与 Schema; 'query'=查询数据集列表或详情。
     - code: 数据集唯一编码 (如 'tax_regulation', 'sys_task')。
     - name: 数据集全称或中文名称。
-    - category: 业务领域分类 (general, finance, legal, custom 等)。
+    - category: 业务领域分类 (general, finance, legal, custom 等；缺省查询全量)。
     - json_schema: 声明式 JSON Schema 校验契约 (用于强化软肋骨 payload 物理防御)。
     - field_schema: 字段规范说明列表。
     - alias_map: 历史同义词与版本映射表。
@@ -3270,7 +3338,7 @@ async def dataset_manage(
         return await dataset_upsert(
             code=code,
             name=name,
-            category=category,
+            category=category or "general",
             field_schema=field_schema,
             alias_map=alias_map,
             json_schema=json_schema,
@@ -3283,7 +3351,7 @@ async def dataset_manage(
                 return tool_error("NOT_FOUND", f"未找到数据集 [{code}]", tool="dataset_manage")
             return {"success": True, "dataset": ds}
         else:
-            return await dataset_query(category=category if category != "general" else None, limit=limit)
+            return await dataset_query(category=category, limit=limit)
     else:
         return tool_error("INVALID_ARGUMENT", f"未知 action: '{action}'", tool="dataset_manage")
 

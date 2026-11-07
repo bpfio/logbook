@@ -99,8 +99,12 @@ class FactEngine:
                     min_len = spec.get("minLength")
                     if min_len and len(val.strip()) < min_len:
                         raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 长度不能小于 {min_len}！")
-                elif p_type in ("number", "integer") and not isinstance(val, (int, float, Decimal)):
-                    raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为数值类型！")
+                elif p_type == "number":
+                    if isinstance(val, bool) or not isinstance(val, (int, float, Decimal)):
+                        raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为数值类型！")
+                elif p_type == "integer":
+                    if isinstance(val, bool) or not isinstance(val, int) or isinstance(val, float):
+                        raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为整数类型！")
                 elif p_type == "boolean" and not isinstance(val, bool):
                     raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 字段 '{field}' 必须为布尔类型 (true/false)！")
                 elif p_type == "array" and not isinstance(val, (list, tuple)):
@@ -133,10 +137,9 @@ class FactEngine:
         if status is None:
             return None
         if isinstance(status, (list, tuple, set)):
-            items = [str(s).strip().lower() for s in status if s is not None and str(s).strip()]
-            return items if items else None
+            return [str(s).strip().lower() for s in status if s is not None and str(s).strip()]
         s = str(status).strip().lower()
-        return [s] if s else None
+        return [s] if s else []
 
     @staticmethod
     def sanitize_field(val: Any) -> str:

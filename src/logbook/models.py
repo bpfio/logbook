@@ -445,7 +445,7 @@ class DataRecord(BaseModel):
     entity_name: str | None = Field(default=None, max_length=256, description="往来单位/境外付款人/组件仓库名")
     amount: Decimal = Field(default=Decimal("0.0000"), description="核心金额/指标数值 (高精度, 无浮点误差)")
     currency: str = Field(default="CNY", max_length=16, description="币种或量纲单位，如 USD, CNY, QPS, MS")
-    event_date: date | str = Field(..., description="业务发生日期或测试日期 (YYYY-MM-DD)")
+    event_date: date | str = Field(default_factory=lambda: date.today().isoformat(), description="业务发生日期或测试日期 (YYYY-MM-DD)")
     status: str = Field(default="recorded", max_length=32, description="单据状态")
 
     # 软肋骨 (Flexible Ribs)
@@ -456,6 +456,13 @@ class DataRecord(BaseModel):
 
     created_at: datetime = Field(default_factory=get_beijing_now)
     updated_at: datetime = Field(default_factory=get_beijing_now)
+
+    @field_validator("event_date", mode="before")
+    @classmethod
+    def parse_event_date(cls, v: Any) -> Any:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return date.today().isoformat()
+        return v
 
     @field_validator("amount", mode="before")
     @classmethod

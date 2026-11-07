@@ -529,32 +529,113 @@ async def start_sse_server(host: str = "0.0.0.0", port: int = 8000, server_holde
         })
 
     async def rpc_endpoint(request):
-        """无状态单次 JSON-RPC 2.0 / 直接调用端点 (OPT-04)"""
+        """无状态单次 JSON-RPC 2.0 / 直接调用端点 (OPT-04 & OPT-20 标准 MCP 生命周期与资源路由)"""
         try:
             body = await request.json()
         except Exception as e:
             return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32700, "message": f"Parse error: {e}"}}, status_code=400)
 
+        # 客户端 IP 探测 (X-Forwarded-For / request.client.host)
+        client_ip = None
+        if request.headers.get("x-forwarded-for"):
+            client_ip = request.headers.get("x-forwarded-for").split(",")[0].strip()
+        elif request.client and request.client.host:
+            client_ip = request.client.host
+        if client_ip:
+            os.environ["HTTP_CLIENT_IP"] = client_ip
+
         req_id = body.get("id", 1)
-        if body.get("method") == "tools/call":
-            params = body.get("params") or {}
-            tool_name = params.get("name")
-            arguments = params.get("arguments") or {}
-        elif "name" in body:
-            tool_name = body.get("name")
-            arguments = body.get("arguments") or {}
-        elif body.get("method") == "tools/list":
+        req_method = body.get("method")
+
+        # 1. 标准 MCP 2024-11-05 协议生命周期握手 (OPT-20)
+        if req_method == "initialize":
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {},
+                        "resources": {},
+                        "prompts": {},
+                    },
+                    "serverInfo": {
+                        "name": "logbook",
+                        "version": _SERVER_VERSION,
+                    }
+                }
+            })
+        elif req_method in ("notifications/initialized", "ping"):
+            return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": {}})
+
+        # 2. Tools 路由
+        elif req_method == "tools/list":
             tools = await mcp.list_tools()
             return JSONResponse({
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {"tools": [t.model_dump(mode="json") if hasattr(t, "model_dump") else t for t in tools]}
             })
+        elif req_method == "tools/call":
+            params = body.get("params") or {}
+            tool_name = params.get("name")
+            arguments = params.get("arguments") or {}
+        elif "name" in body:
+            tool_name = body.get("name")
+            arguments = body.get("arguments") or {}
+
+        # 3. Resources 路由 (OPT-20)
+        elif req_method == "resources/list":
+            resources = await mcp.list_resources() if hasattr(mcp, "list_resources") else []
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"resources": [r.model_dump(mode="json") if hasattr(r, "model_dump") else r for r in resources]}
+            })
+        elif req_method == "resources/read":
+            params = body.get("params") or {}
+            uri = params.get("uri")
+            if not uri:
+                return JSONResponse({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "Missing uri"}}, status_code=400)
+            try:
+                res_content = await mcp.read_resource(uri) if hasattr(mcp, "read_resource") else ""
+                text_content = getattr(res_content, "text", str(res_content)) if hasattr(res_content, "text") else str(res_content)
+                return JSONResponse({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {"contents": [{"uri": uri, "mimeType": "text/markdown", "text": text_content}]}
+                })
+            except Exception as e:
+                return JSONResponse({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(e)}}, status_code=500)
+
+        # 4. Prompts 路由 (OPT-20)
+        elif req_method == "prompts/list":
+            prompts = await mcp.list_prompts() if hasattr(mcp, "list_prompts") else []
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"prompts": [p.model_dump(mode="json") if hasattr(p, "model_dump") else p for p in prompts]}
+            })
+        elif req_method == "prompts/get":
+            params = body.get("params") or {}
+            name = params.get("name")
+            args = params.get("arguments") or {}
+            if not name:
+                return JSONResponse({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "Missing prompt name"}}, status_code=400)
+            try:
+                prompt_res = await mcp.get_prompt(name, args) if hasattr(mcp, "get_prompt") else None
+                return JSONResponse({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": prompt_res.model_dump(mode="json") if hasattr(prompt_res, "model_dump") else {"messages": []}
+                })
+            except Exception as e:
+                return JSONResponse({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(e)}}, status_code=500)
         else:
             return JSONResponse({
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32601, "message": f"Method not supported: {body.get('method')}"}
+                "error": {"code": -32601, "message": f"Method not supported: {req_method}"}
             }, status_code=400)
 
         if not tool_name:
@@ -571,6 +652,11 @@ async def start_sse_server(host: str = "0.0.0.0", port: int = 8000, server_holde
                 for c in res.content:
                     txt = getattr(c, "text", str(c))
                     content_list.append({"type": "text", "text": txt})
+            elif isinstance(res, dict):
+                import json
+                content_list.append({"type": "text", "text": json.dumps(res, ensure_ascii=False)})
+            elif isinstance(res, str):
+                content_list.append({"type": "text", "text": res})
             return JSONResponse({
                 "jsonrpc": "2.0",
                 "id": req_id,

@@ -184,11 +184,15 @@ class Database:
 
         默认 reset 会执行 RESET ALL, 把 init 钩子设置的 logbook.agent 会话
         变量清空 (角色保留但身份 GUC 丢失, RLS 语义被破坏); 此处改为归还时
-        重新断言会话身份, 同时不再遗留其它会话级状态。
+        重新断言会话身份, 同时重置会话级 GUC 参数 (如 hnsw.ef_search, OPT-17)。
         """
         if self._identity_active and self.data_role_name:
             await conn.execute("SELECT set_config('role', $1, false)", self.data_role_name)
             await conn.execute("SELECT set_config('logbook.agent', $1, false)", self.identity)
+        try:
+            await conn.execute("RESET hnsw.ef_search;")
+        except Exception:
+            pass
 
     async def _acquire_system(self) -> asyncpg.pool.Pool:
         """系统面连接池 (登录角色, 用于 DDL/授权/引导等特权操作)。"""
@@ -2964,7 +2968,7 @@ class Database:
         date_to: date | str | None = None,
         amount_min: Decimal | float | None = None,
         amount_max: Decimal | float | None = None,
-        status: str | None = None,
+        status: str | list[str] | None = None,
         batch_id: str | None = None,
         parent_id: int | None = None,
         payload_filter: dict | None = None,
@@ -3007,8 +3011,14 @@ class Database:
             params.append(Decimal(str(amount_max)))
             conditions.append(f"amount <= ${len(params)}")
         if status:
-            params.append(status.strip().lower())
-            conditions.append(f"status = ${len(params)}")
+            if isinstance(status, (list, tuple, set)):
+                st_arr = [str(s).strip().lower() for s in status if s and str(s).strip()]
+                if st_arr:
+                    params.append(st_arr)
+                    conditions.append(f"status = ANY(${len(params)})")
+            else:
+                params.append(str(status).strip().lower())
+                conditions.append(f"status = ${len(params)}")
         if batch_id:
             params.append(batch_id.strip())
             conditions.append(f"batch_id = ${len(params)}")
@@ -3249,6 +3259,7 @@ class Database:
         date_from: date | str | None = None,
         date_to: date | str | None = None,
         group_by: str = "month",
+        status: str | list[str] | None = None,
     ) -> dict:
         """统计与汇总事实数据指标 (总笔数、总金额、分组汇总)。"""
         await self.ensure_datasets_and_records_schema()
@@ -3266,6 +3277,15 @@ class Database:
             d_to = date_to if isinstance(date_to, date) else date.fromisoformat(str(date_to).strip()[:10])
             params.append(d_to)
             conditions.append(f"event_date <= ${len(params)}")
+        if status:
+            if isinstance(status, (list, tuple, set)):
+                st_arr = [str(s).strip().lower() for s in status if s and str(s).strip()]
+                if st_arr:
+                    params.append(st_arr)
+                    conditions.append(f"status = ANY(${len(params)})")
+            else:
+                params.append(str(status).strip().lower())
+                conditions.append(f"status = ${len(params)}")
 
         where_clause = " AND ".join(conditions)
 

@@ -25,9 +25,20 @@ from .negotiation import validate_and_negotiate_project, ProjectNegotiationError
 
 console = Console()
 
+try:
+    import asyncpg
+    POSTGRES_ERRORS = (ConnectionRefusedError, OSError, asyncpg.PostgresError)
+except ImportError:
+    POSTGRES_ERRORS = (ConnectionRefusedError, OSError)
+
 
 def run_async(coro):
-    return asyncio.run(coro)
+    try:
+        return asyncio.run(coro)
+    except POSTGRES_ERRORS as e:
+        console.print(f"[bold red]✘ 无法连接到 PostgreSQL 数据库或底层服务未就绪[/bold red]: [dim]{e}[/dim]")
+        console.print("[dim]请检查 DATABASE_URL 环境变量或容器服务状态。[/dim]")
+        sys.exit(1)
 
 
 @click.group()
