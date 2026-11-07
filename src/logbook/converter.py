@@ -274,6 +274,13 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
     return ParseSummary(tasks_imported=t_count, findings_imported=f_count, waitings_imported=w_count, batches_imported=b_count)
 
 
+def _clean_table_cell(text: str | None) -> str:
+    """清洗 Markdown 表格单元格内容，防止换行和未转义竖线破坏表格结构 (OPT-35)。"""
+    if not text:
+        return ""
+    return str(text).replace("\r\n", " ").replace("\n", " ").replace("|", "\\|").strip()
+
+
 async def export_devlog_markdown(project: str, max_items: int = 10000) -> str:
     """从数据库生成格式兼容的标准 DEVLOG.md (OPT-06: 消除硬编码截断，支持全量导出)。"""
     tasks = await db.query_tasks(project, limit=max_items)
@@ -301,9 +308,10 @@ async def export_devlog_markdown(project: str, max_items: int = 10000) -> str:
 
     for t in tasks:
         st_icon = "closed" if t.status == TaskStatus.CLOSED else t.status.value
-        commit_str = t.commit_hash or ""
-        proof_or_notes = t.proof_link or t.notes or ""
-        lines.append(f"| {t.id} | {st_icon} | {t.task_type.value} | {t.title} | {commit_str} | {proof_or_notes} |")
+        commit_str = _clean_table_cell(t.commit_hash)
+        title_str = _clean_table_cell(t.title)
+        proof_or_notes = _clean_table_cell(t.proof_link or t.notes)
+        lines.append(f"| {t.id} | {st_icon} | {t.task_type.value} | {title_str} | {commit_str} | {proof_or_notes} |")
 
     lines.extend([
         "",
@@ -316,8 +324,9 @@ async def export_devlog_markdown(project: str, max_items: int = 10000) -> str:
     ])
 
     for f in findings:
-        res = f.resolution or ""
-        lines.append(f"| {f.id} | {f.source} | {f.severity.value} | {f.status.value} | {res} | {f.summary} |")
+        res = _clean_table_cell(f.resolution)
+        sum_str = _clean_table_cell(f.summary)
+        lines.append(f"| {f.id} | {f.source} | {f.severity.value} | {f.status.value} | {res} | {sum_str} |")
 
     lines.extend([
         "",
@@ -330,7 +339,8 @@ async def export_devlog_markdown(project: str, max_items: int = 10000) -> str:
     ])
 
     for w in waitings:
-        lines.append(f"| {w.id} | {w.category.value} | {w.status.value} | {w.description} |")
+        desc_str = _clean_table_cell(w.description)
+        lines.append(f"| {w.id} | {w.category.value} | {w.status.value} | {desc_str} |")
 
     if batches:
         for b in batches:

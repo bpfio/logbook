@@ -9,11 +9,12 @@
 
 ---
 
-## 一、任务台账 (44)
+## 一、任务台账 (45)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
-| L-OPT-072 | closed | feat | Logbook 0.7.2: 独立第三方代码审计闭环、标准MCP生命周期握手、客户端上下文SDK与越权目录防御 | HEAD | 落实 OPT-09~22 专项整改: ① 补齐 MCP 2024-11-05 协议 initialize、notifications/initialized、ping、resources/list 等生命周期方法并打通 HTTP /rpc 端点; ② LogbookClient 补齐异步上下文管理器 (async with) 与 brief/query/upsert 等高阶快捷方法，指数退避重试器纳入 httpx.RequestError; ③ record_query 与 record_stats 支持 status 数组 (ANY($N)) 参数化检索，空状态输入精准拦截; ④ 单条入库 record_upsert 与 DataRecord 对齐批量入库人体工学，省略 event_date 自动填充今日; ⑤ 修复 FactEngine 布尔型伪装为数值 (bool 是 int 子类) 的 Schema 穿透缺陷; ⑥ export_markdown 强制路径白名单防越权目录遍历 (PERMISSION_DENIED); ⑦ project_manage 补齐 list 与 query 操作，消除盲猜; ⑧ CLI run_async 捕获连接异常输出友好指引; 单元测试 76 项 100% 绿灯，生产热更新平滑落地，真机 10 项全链路穿透验收 100% 通过 (DEV-2026-11-07-05) |
+| L-OPT-073 | closed | feat | Logbook 0.7.3: 闭环独立第三方深度审计OPT-23~35、ContextVar协程隔离、SingleFlight锁粒度优化与批量复合键幂等 | HEAD | 落实 OPT-23~35 专项整改: ① record_search 入参及底座 search_records 支持 status 数组 (ANY($N)) 参数化查询，与 record_query 体验 100% 正交对齐; ② tool_shell 捕获 ValueError 映射为 INVALID_ARGUMENT，根除错误码语义降级 (消灭伪 INTERNAL_ERROR); ③ DataRecord 金额字段增加空串宽容容错 (解析为 0.0000); ④ 消除各工具体内部冗余的 ProjectNegotiationError 手工捕获样板代码; ⑤ 项目协商开户引导消除重复的 list_projects 查库往返; ⑥ 引入 ContextVar("current_caller_ip") 实现 HTTP 调用端 IP 的协程级并发硬隔离; ⑦ run_server 增加 finally 停机钩子显式关闭数据库连接池 db.close(); ⑧ FactEngine 消除负向缓存污染并支持 additionalProperties: false 严防未知字段噪音; ⑨ SingleFlight 缩小锁粒度，消除不同 key 请求被串行化的并发瓶颈，并将 project_manage 与 dataset_manage 只读动作纳入合并削峰; ⑩ bulk_upsert_records 引入 (dataset_code, doc_no) 复合键匹配，杜绝跨数据集覆盖与遗漏; ⑪ export_devlog_markdown 表格防破裂清洗换行与竖线; 单元测试 82 项 100% 绿灯，生产平滑部署 logbook:0.7.3，生产真机 8 项全维验收 100% 通过 (DEV-2026-11-07-06) |
+| L-OPT-072 | closed | feat | Logbook 0.7.2: 独立第三方代码审计闭环、标准MCP生命周期握手、客户端上下文SDK与越权目录防御 | f385564 | 落实 OPT-09~22 专项整改: ① 补齐 MCP 2024-11-05 协议 initialize、notifications/initialized、ping、resources/list 等生命周期方法并打通 HTTP /rpc 端点; ② LogbookClient 补齐异步上下文管理器 (async with) 与 brief/query/upsert 等高阶快捷方法，指数退避重试器纳入 httpx.RequestError; ③ record_query 与 record_stats 支持 status 数组 (ANY($N)) 参数化检索，空状态输入精准拦截; ④ 单条入库 record_upsert 与 DataRecord 对齐批量入库人体工学，省略 event_date 自动填充今日; ⑤ 修复 FactEngine 布尔型伪装为数值 (bool 是 int 子类) 的 Schema 穿透缺陷; ⑥ export_markdown 强制路径白名单防越权目录遍历 (PERMISSION_DENIED); ⑦ project_manage 补齐 list 与 query 操作，消除盲猜; ⑧ CLI run_async 捕获连接异常输出友好指引; 单元测试 76 项 100% 绿灯，生产热更新平滑落地，真机 10 项全链路穿透验收 100% 通过 (DEV-2026-11-07-05) |
 | L-OPT-071 | closed | feat | Logbook 0.7.1: 批量Schema防线加固、单表极速聚合、无状态RPC端点与优雅停机闭环 | ece134e | 落实 OPT-01~08 专项整改: ① records_bulk_upsert 批量导入全面覆盖 payload JSON Schema 声明式校验，单据集合预检消灭 N+1 查询; ② 补齐 Schema 校验引擎布尔型 (boolean) 与枚举白名单 (enum) 校验，实现数据集 Schema 修改即时缓存失效; ③ brief_project 与核心查询脱离遗留动态 SQL 视图，直查底层 shared.records 单表条件聚合，网络 RTT 从 5 次降至 1 次，时延从 ~15ms 压制至 3ms; ④ HTTP 接入面增设无状态直连 POST /rpc 与 POST /call 端点，无需维护长连接即可低延迟执行 MCP 原语; ⑤ FastMCP 与 SSH 网关统一引入 ServerHolder 优雅停机信号处理，消除端口悬挂与连接池泄漏; ⑥ export_markdown 结构化信封统一为 dict 并解除 50 条导出截断 (max_items=10000); ⑦ 增补迁移 18 (sql/18_update_research_schema.sql) 补齐 sys_research 契约; 单元测试 71 项 100% 绿灯，生产环境热更新成功，生产真机 HTTP /rpc、SSH MCP 与 Schema 拦截 100% 验证通过 (DEV-2026-11-07-04) |
 | L-OPT-070 | closed | feat | Logbook 0.7.0: MCP工具集大归一 (46→14核心)、动态 JSON Schema 验证引擎、客户端 SDK 与 HTTP/HTTPS FastMCP 双通道落地 | e9e1213 | 吸收全量优化建议: ① tools/list 归一化为 14 个核心高内聚工具 (Schema 瘦身 63% 从 59.8KB 缩减至 22KB, 32 老工具 100% 保持就绪); ② 落地迁移 17 (sql/17_dataset_json_schema.sql), shared.datasets 增设 json_schema 字段并预置 8 大系统业务数据集校验契约, FactEngine 声明式拦截非标 payload 入库; ③ 落地 src/logbook/client.py 内置 SingleFlight 削峰、Full Jitter 退避重试与心跳保活; ④ 保留并增强 FastMCP SSE HTTP/HTTPS 双通道 (端口 8000 与 22 并行监听); ⑤ 修复 read_agent_message/archive_agent_message asyncpg $1 参数类型推断冲突 (int/str 22000); 单元测试 70 项 100% 绿灯, 生产环境部署成功, 13 项真机穿透测试 100% 通过 (DEV-2026-11-07-03) |
 | L-AUD-061 | closed | audit | Logbook 0.6.1 独立第三方全量审计、P0/P1缺陷闭环、物理直写迁移与生产真机 13 项 100% 验收 | 87cfd88 | 独立第三方视角完成对 Logbook 0.6.0/0.6.1 的全量架构与 46 MCP 工具深度审计; 落地迁移 16 (sql/16_unify_fact_triggers_and_timeline.sql) 补齐联合唯一索引与统一时间线表 shared.task_timeline; DAO 层彻底消除视图写入风险, 统一直写 shared.records 事实表; 根治 asyncpg 参数类型推断冲突 (devlog_record bigint=text 42883) 与 normalizer 状态机放行越界缺陷; 自动登记新数据集杜绝外键阻断; 本地 65 单元测试全绿; 生产 NAS 成功部署 logbook:0.6.1; 真机 13 核心链路穿透测试 100% 通过; 存量 6,917+ 条业务记录与 500+ 条时间线 0 丢失; 产出完整审计与治理正典 docs/AUDIT_REPORT_V061.md (DEV-2026-11-07-02) |
@@ -110,6 +111,51 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-07-06] Logbook 0.7.3: 闭环独立第三方深度审计OPT-23~35、ContextVar协程隔离、SingleFlight锁粒度优化与批量复合键幂等 — ✅ 闭环
+
+根据用户指令，站在独立第三方使用者视角对 Logbook 开展全量系统性代码审计，获批落实 OPT-23 ~ OPT-35 共 13 项深度优化（目标：优雅、简单、可靠、高效、鲁棒），全面落地实施、通过门禁并完成生产部署与全维真机验收：
+
+1. **结构化四要素复盘 (SSOT)**:
+   - **故障/需求背景 (Problem)**:
+     - `record_search` 的 `status` 仅支持单个标量字符串，无法与 `record_query` 一样接受状态数组进行并发筛选，参数体验存在不对称割裂；
+     - `FactEngine` 或参数校验抛出 `ValueError` 时，`@tool_shell` 顶层将其归入 `INTERNAL_ERROR` 兜底，导致客户端将参数不合规误判为服务端内部系统故障（错误码语义降级）；
+     - HTTP `/rpc` 端点使用全局进程环境变量 `os.environ["HTTP_CLIENT_IP"]` 传递调用端 IP，在高并发 HTTP 下存在不同协程相互覆盖的竞态污染；
+     - `SingleFlight.do` 在互斥锁内直接 `await self._in_flight[key]`，导致排队的协程一直死霸着锁，把完全不同 key 的并发读请求全部强制串行化；
+     - `bulk_upsert_records` 预检仅按单列 `doc_no` 进行匹配，且只检查了首条记录的 `dataset_code`。当批量导入混排不同数据集单据时，产生跨数据集覆盖或存量记录更新失败；
+     - 生产服务停机时未调用 `db.close()`，导致连接池被强行 RST 并在 PG 日志中产生告警；Schema 校验异常时缓存 `None` 造成负向缓存污染；导出的 Markdown 表格单元格缺少换行和竖线转义清洗。
+   - **根因定位 (Root Cause)**:
+     - 检索层未对 `search_records` 启用 `status = ANY($N)` 参数化重构；
+     - `@tool_shell` 异常捕获链缺少针对 `ValueError` 的显式映射；
+     - 异步上下文字段传递未使用 Python 原生 `ContextVar`；
+     - 并发控制器的锁粒度设计反模式（在锁内等待外部 Future）；
+     - 批量预检 SQL 与映射字典缺少复合维度 `(dataset_code, doc_no)`。
+   - **解决方案 (Solution)**:
+     - `src/logbook/mcp_server.py` & `src/logbook/db.py`: `record_search` 与 `search_records` 的 `status` 扩展为 `str | list[str] | None`，采用 `status = ANY($N)` 参数化查询；
+     - `src/logbook/mcp_server.py`: `@tool_shell` 增加 `except ValueError as e: return tool_error("INVALID_ARGUMENT", str(e))`，根除错误码语义降级；清理工具体内部多余的 try-except 样板代码；
+     - `src/logbook/mcp_server.py` & `src/logbook/ssh_server.py`: 引入 `ContextVar("current_caller_ip")` 实现协程级调用方 IP 强隔离；`run_server` 的 `finally` 钩子增加 `await db.close()`；
+     - `src/logbook/client.py`: `SingleFlight.do` 缩小锁粒度，锁内仅读取/创建 Future，退出锁后再 `await future`，释放不同 key 请求的并发性能；
+     - `src/logbook/db.py`: `bulk_upsert_records` 预检 SQL 支持 `dataset_code = ANY($2)`，`existing_map` 的 key 重构为 `(dataset_code, doc_no)` 复合元组键；
+     - `src/logbook/engine.py`: 消除负向缓存污染；Schema 增加 `additionalProperties: false` 严密性防御；
+     - `src/logbook/models.py`: `DataRecord.parse_amount` 支持空字符串宽容度解析；
+     - `src/logbook/converter.py`: 导出 Markdown 表格增加换行与竖线安全转义清洗。
+   - **验证证据 (Evidence)**:
+     - 本地单元测试套件扩充至 82 项，`scripts/gate.sh unit` 100% 绿灯；
+     - 生产镜像 `logbook:0.7.3` 构建并成功载入生产 NAS；
+     - `/health` 探针返回 `version: 0.7.3`；
+     - Schema 契约不合规实测返回 `"error_type": "INVALID_ARGUMENT"`；
+     - `amount=""` 宽容度测试成功解析为 `0.0` 入库；
+     - `record_search` 实测传入 `status: ["recorded", "running"]` 成功召回；
+     - `records_bulk_upsert` 复合键匹配更新实测 PASS (`total_inserted: 0, total_updated: 2`)；
+     - SSH Doctor 巡检全绿，时钟漂移 +0.020s；
+     - 生产数据库 6,924 条物理业务记录 100% 完整无损。
+
+2. **生产实测指标**:
+   - 单元测试通过率: 82/82 (100% PASS, 56 deselected integration)
+   - 生产环境容器运行态: healthy, 端口 22 & 8000 双通道正常监听
+   - 生产数据库物理记录数: 6,924 条 (数据 100% 无损)
 
 ---
 

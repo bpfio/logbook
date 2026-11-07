@@ -29,11 +29,17 @@ class SingleFlight:
     async def do(self, key: str, coro_factory: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
         async with self._lock:
             if key in self._in_flight:
-                # 已经有相同的请求在空中飞，直接复用其 Future 结果
-                return await self._in_flight[key]
-            loop = asyncio.get_running_loop()
-            future = loop.create_future()
-            self._in_flight[key] = future
+                # 已经有相同的请求在空中飞，退出锁后再 await 其 Future (OPT-31: 锁粒度优化)
+                future = self._in_flight[key]
+                is_leader = False
+            else:
+                loop = asyncio.get_running_loop()
+                future = loop.create_future()
+                self._in_flight[key] = future
+                is_leader = True
+
+        if not is_leader:
+            return await future
 
         try:
             result = await coro_factory()
@@ -154,10 +160,14 @@ class LogbookClient:
         use_single_flight: bool = True,
     ) -> dict[str, Any]:
         """统一调用 MCP 工具。自动对只读查询使用 Single-Flight 削峰与退避重试。"""
-        # 只读高频操作自动参与 Single-Flight 合并
-        is_read_query = tool_name in (
-            "record_query", "record_search", "record_stats", "logbook_brief",
-            "message_inbox", "lease_query", "group_query", "principal_query",
+        # 只读高频操作自动参与 Single-Flight 合并 (OPT-33: 纳入 project_manage 与 dataset_manage 只读动作)
+        is_read_query = (
+            tool_name in (
+                "record_query", "record_search", "record_stats", "logbook_brief",
+                "message_inbox", "lease_query", "group_query", "principal_query",
+            )
+            or (tool_name == "project_manage" and arguments.get("action") in ("list", "query"))
+            or (tool_name == "dataset_manage" and arguments.get("action") == "query")
         )
 
         async def _do_call() -> dict[str, Any]:

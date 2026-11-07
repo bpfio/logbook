@@ -124,7 +124,15 @@ async def validate_and_negotiate_project(
 
     # 2. 未匹配到任何已注册项目 -> 双态判定 (疑似手滑纠偏 vs 新项目开户指引)
     if not matched:
-        all_candidates = await get_registered_projects()
+        # OPT-27: 单次拉取项目列表，同时满足候选纠错与开户引导，消除二次查库往返
+        registered_projs = await db.list_projects()
+        names: set[str] = set()
+        active_slugs: list[str] = []
+        for p in registered_projs:
+            names.add(p.slug.lower())
+            names.add(p.schema_name.lower())
+            active_slugs.append(p.slug)
+        all_candidates = sorted(list(names))
         suggestions = difflib.get_close_matches(req, all_candidates, n=3, cutoff=0.7)
 
         # 场景 A: 存在高度相似的已注册项目 (如 briz -> brix) -> 判定为疑似输入手滑
@@ -143,8 +151,6 @@ async def validate_and_negotiate_project(
             )
 
         # 场景 B: 无相近项目，确认为全新项目 (如 tax, 8cli/ovh) -> 判定为需要自愈开户
-        registered_projs = await db.list_projects()
-        active_slugs = [p.slug for p in registered_projs]
         msg = (
             f"【Logbook 开户引导】项目 '{req}' 尚未在 Logbook 中开立台账空间。\n"
             f"• 当前已注册项目: {active_slugs}\n"

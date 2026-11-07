@@ -2868,18 +2868,19 @@ class Database:
                     """, code)
 
                 proj = records[0].project_id
-                dataset = records[0].dataset_code
+                dataset_codes = list({r.dataset_code for r in records})
                 doc_nos = [r.doc_no for r in records]
 
+                # OPT-32: 采用 (dataset_code, doc_no) 复合键匹配，支持同批次多数据集与杜绝跨数据集覆盖
                 existing_rows = await conn.fetch(
                     """
-                    SELECT id, doc_no FROM shared.records
-                    WHERE project_id = $1 AND dataset_code = $2 AND doc_no = ANY($3)
+                    SELECT id, dataset_code, doc_no FROM shared.records
+                    WHERE project_id = $1 AND dataset_code = ANY($2) AND doc_no = ANY($3)
                       AND parent_id IS NULL;
                     """,
-                    proj, dataset, doc_nos
+                    proj, dataset_codes, doc_nos
                 )
-                existing_map = {row["doc_no"]: row["id"] for row in existing_rows}
+                existing_map = {(row["dataset_code"], row["doc_no"]): row["id"] for row in existing_rows}
 
                 insert_sql = """
                     INSERT INTO shared.records (
@@ -2919,7 +2920,7 @@ class Database:
 
                     vec_literal = f"[{','.join(str(x) for x in r.embedding)}]" if r.embedding else None
 
-                    target_id = existing_map.get(r.doc_no) if r.parent_id is None else None
+                    target_id = existing_map.get((r.dataset_code, r.doc_no)) if r.parent_id is None else None
                     if target_id is not None:
                         await conn.execute(
                             update_sql,
@@ -3069,7 +3070,7 @@ class Database:
         query_vector: list[float] | None = None,
         query_text: str | None = None,
         dataset_code: str | None = None,
-        status: str | None = None,
+        status: str | list[str] | None = None,
         limit: int = 10,
         offset: int = 0,
         min_score: float | None = None,
@@ -3097,8 +3098,16 @@ class Database:
             base_params.append(dataset_code.strip().lower())
             base_conditions.append(f"dataset_code = ${len(base_params)}")
         if status:
-            base_params.append(status.strip().lower())
-            base_conditions.append(f"status = ${len(base_params)}")
+            if isinstance(status, (list, tuple, set)):
+                st_arr = [str(s).strip().lower() for s in status if s and str(s).strip()]
+                if st_arr:
+                    base_params.append(st_arr)
+                    base_conditions.append(f"status = ANY(${len(base_params)})")
+            else:
+                s_val = str(status).strip().lower()
+                if s_val:
+                    base_params.append(s_val)
+                    base_conditions.append(f"status = ${len(base_params)}")
 
         async with self._pool.acquire() as conn:
             # 探测当前过滤范围下是否存在已建立向量的记录 (F-SEARCH-08)

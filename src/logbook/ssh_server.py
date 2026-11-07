@@ -543,6 +543,8 @@ async def start_sse_server(host: str = "0.0.0.0", port: int = 8000, server_holde
             client_ip = request.client.host
         if client_ip:
             os.environ["HTTP_CLIENT_IP"] = client_ip
+            from logbook.mcp_server import CURRENT_CALLER_IP
+            CURRENT_CALLER_IP.set(client_ip)
 
         req_id = body.get("id", 1)
         req_method = body.get("method")
@@ -742,6 +744,14 @@ async def run_server():
             if not t.done():
                 t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        _trigger_graceful_shutdown()
+        try:
+            from logbook.db import db
+            await db.close()
+            logger.info("Database connection pools gracefully closed.")
+        except Exception as e:
+            logger.warning("Error closing database connection pools: %s", e)
 
 
 if __name__ == "__main__":

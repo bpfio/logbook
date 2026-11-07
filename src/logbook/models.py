@@ -467,7 +467,7 @@ class DataRecord(BaseModel):
     @field_validator("amount", mode="before")
     @classmethod
     def parse_amount(cls, v: Any) -> Decimal:
-        if v is None:
+        if v is None or (isinstance(v, str) and not v.strip()):
             return Decimal("0.0000")
         try:
             return Decimal(str(v).strip())

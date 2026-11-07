@@ -306,3 +306,114 @@ async def test_opt10_client_sdk_enhancements():
         assert hasattr(c, "inbox")
         assert hasattr(c, "list_projects")
 
+
+@pytest.mark.asyncio
+async def test_opt24_tool_shell_value_error_mapping():
+    """验证 OPT-24: tool_shell 装饰器将 ValueError 映射为 INVALID_ARGUMENT 而非 INTERNAL_ERROR。"""
+    from logbook.mcp_server import tool_shell
+
+    @tool_shell
+    async def _failing_tool():
+        raise ValueError("参数非法或Schema校验不通过")
+
+    res = await _failing_tool()
+    assert res.get("isError") is True
+    assert res.get("error_type") == "INVALID_ARGUMENT"
+    assert "参数非法或Schema校验不通过" in res.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_opt25_amount_empty_string_tolerance():
+    """验证 OPT-25: DataRecord 金额支持空串宽容度解析为 0。"""
+    from decimal import Decimal
+    from logbook.models import DataRecord
+
+    rec = DataRecord(
+        project_id="test_proj",
+        doc_no="DOC-AMOUNT-01",
+        dataset_code="task",
+        amount="",
+    )
+    assert rec.amount == Decimal("0.0000")
+
+
+@pytest.mark.asyncio
+async def test_opt34_schema_additional_properties_false():
+    """验证 OPT-34: Schema 校验器严格执行 additionalProperties: false 拦截多余未知字段。"""
+    fact_engine._schema_cache["sys_strict_fields"] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["code"],
+        "properties": {
+            "code": {"type": "string"},
+            "desc": {"type": "string"},
+        },
+    }
+
+    # 1. 合法字段通过
+    await fact_engine.validate_payload_schema("sys_strict_fields", {"code": "C1", "desc": "OK"})
+
+    # 2. 传入多余未知字段被拦截
+    with pytest.raises(ValueError, match="存在未定义的非法多余字段: \\[extra_bogus\\]"):
+        await fact_engine.validate_payload_schema("sys_strict_fields", {"code": "C1", "extra_bogus": "BAD"})
+
+
+@pytest.mark.asyncio
+async def test_opt31_single_flight_non_blocking_keys():
+    """验证 OPT-31: SingleFlight 不同 key 的并发请求不会被锁阻塞。"""
+    flight = SingleFlight()
+    start_times = {}
+
+    async def _slow_job(key: str, delay: float):
+        start_times[key] = asyncio.get_running_loop().time()
+        await asyncio.sleep(delay)
+        return f"{key}_done"
+
+    # key_a 耗时 0.1s，key_b 耗时 0.02s
+    # 若锁未缩小，key_b 会被排队等待 key_a，耗时将 > 0.1s；
+    # 缩小锁后，key_b 能够立刻启动并先于 key_a 结束。
+    t0 = asyncio.get_running_loop().time()
+    task_a = asyncio.create_task(flight.do("key_a", lambda: _slow_job("key_a", 0.1)))
+    await asyncio.sleep(0.005)  # 确保 key_a 已启动
+    task_b = asyncio.create_task(flight.do("key_b", lambda: _slow_job("key_b", 0.02)))
+
+    res_b = await task_b
+    t_b_finished = asyncio.get_running_loop().time() - t0
+    res_a = await task_a
+
+    assert res_b == "key_b_done"
+    assert res_a == "key_a_done"
+    # key_b 耗时应远小于 0.08s，证明完全没有被 key_a 阻塞
+    assert t_b_finished < 0.08, f"key_b 耗时 {t_b_finished:.3f}s，疑似被 key_a 阻塞！"
+
+
+@pytest.mark.asyncio
+async def test_opt35_markdown_table_cell_cleaning():
+    """验证 OPT-35: Markdown 表格单元格内容清洗，转义换行与竖线。"""
+    from logbook.converter import _clean_table_cell
+
+    assert _clean_table_cell(None) == ""
+    assert _clean_table_cell("hello\nworld") == "hello world"
+    assert _clean_table_cell("a | b | c") == "a \\| b \\| c"
+    assert _clean_table_cell("multi\r\nline | with | pipe") == "multi line \\| with \\| pipe"
+
+
+@pytest.mark.asyncio
+async def test_opt28_caller_ip_contextvar():
+    """验证 OPT-28: detect_caller_ip 优先读取 ContextVar 且具备协程隔离性。"""
+    from logbook.mcp_server import CURRENT_CALLER_IP, detect_caller_ip
+
+    async def _check_ip(ip_val: str):
+        CURRENT_CALLER_IP.set(ip_val)
+        await asyncio.sleep(0.01)
+        return detect_caller_ip()
+
+    # 并发两协程，各自设置不同 IP，验证互不串扰
+    t1 = asyncio.create_task(_check_ip("192.0.2.11"))
+    t2 = asyncio.create_task(_check_ip("192.0.2.22"))
+
+    ip1, ip2 = await asyncio.gather(t1, t2)
+    assert ip1 == "192.0.2.11"
+    assert ip2 == "192.0.2.22"
+
+

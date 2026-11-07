@@ -72,10 +72,11 @@ class FactEngine:
                     )
                     if val:
                         schema = val if isinstance(val, dict) else json.loads(val)
+                # 仅在数据库成功查询后写入缓存 (OPT-30: 消除负向缓存污染)
+                self._schema_cache[dataset_code] = schema
             except Exception as e:
                 logger.warning("Failed to query json_schema for dataset %s: %s", dataset_code, e)
                 schema = None
-            self._schema_cache[dataset_code] = schema
         
         if not schema:
             return
@@ -89,6 +90,14 @@ class FactEngine:
         
         # 校验属性类型与最小长度及枚举约束 (OPT-02)
         props = schema.get("properties", {})
+
+        # OPT-34: 严防未知字段噪音 (additionalProperties: false)
+        if schema.get("additionalProperties") is False:
+            allowed_fields = set(props.keys())
+            extra_keys = set(payload.keys()) - allowed_fields
+            if extra_keys:
+                extra_str = ", ".join(sorted(extra_keys))
+                raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 存在未定义的非法多余字段: [{extra_str}]！")
         for field, spec in props.items():
             if field in payload and payload[field] is not None:
                 val = payload[field]

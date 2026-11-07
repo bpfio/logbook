@@ -13,8 +13,11 @@ import re
 import json
 import socket
 import asyncio
+from contextvars import ContextVar
 import functools
 import asyncpg
+
+CURRENT_CALLER_IP: ContextVar[str | None] = ContextVar("current_caller_ip", default=None)
 from datetime import datetime, date
 from typing import Any, Literal
 try:
@@ -181,6 +184,9 @@ def tool_shell(fn):
             return e.to_dict()
         except ToolError as e:
             return e.to_dict()
+        except ValueError as e:
+            # OPT-24: 业务与Schema校验错误统一归纳为 INVALID_ARGUMENT，彻底消除语义降级
+            return tool_error("INVALID_ARGUMENT", str(e), tool=fn.__name__)
         except asyncpg.PostgresError as e:
             return pg_tool_error(e, tool=fn.__name__)
         except Exception as e:
@@ -270,13 +276,18 @@ def detect_node_ip() -> str:
 def detect_caller_ip(explicit_ip: str | None = None) -> str:
     """自动探测调用端 Agent IP:
     1. 优先使用显式入参 explicit_ip；
-    2. 其次从 SSH 会话环境变量 SSH_CLIENT / SSH_CONNECTION 获取远端客户端实际 IP；
-    3. 再次从 HTTP 接入层环境变量 HTTP_CLIENT_IP (X-Forwarded-For 或 client.host) 获取客户端 IP；
-    4. 再次通过 socket/UDP 探测本地宿主 IP；
-    5. 兜底回退 127.0.0.1。
+    2. 优先从当前异步协程上下文 ContextVar 获取 (OPT-28: 协程并发隔离)；
+    3. 其次从 SSH 会话环境变量 SSH_CLIENT / SSH_CONNECTION 获取远端客户端实际 IP；
+    4. 再次从 HTTP 接入层环境变量 HTTP_CLIENT_IP (X-Forwarded-For 或 client.host) 获取客户端 IP；
+    5. 再次通过 socket/UDP 探测本地宿主 IP；
+    6. 兜底回退 127.0.0.1。
     """
     if explicit_ip and explicit_ip.strip():
         return explicit_ip.strip()
+
+    ctx_ip = CURRENT_CALLER_IP.get()
+    if ctx_ip and ctx_ip.strip():
+        return ctx_ip.strip()
 
     ssh_client = os.environ.get("SSH_CLIENT") or os.environ.get("SSH_CONNECTION")
     if ssh_client:
@@ -1614,10 +1625,7 @@ async def export_markdown(project: str, output_path: str | None = None) -> dict:
     显式传入时服务端仍代写该文件并在返回信封中确认 (旧客户端零破坏)。
     强制要求显式提供 project 参数。
     """
-    try:
-        proj = await validate_and_negotiate_project(project, is_write=False)
-    except ProjectNegotiationError as e:
-        return e.to_dict()
+    proj = await validate_and_negotiate_project(project, is_write=False)
 
     if output_path:
         # 向后兼容: 旧客户端显式指定路径时保留服务端落盘行为 (OPT-21: 目录遍历安全防御，前置拦截)
@@ -2671,10 +2679,7 @@ async def record_upsert(
     - id: 可选。指定物理记录 ID 更新。
     - with_embedding: 可选。是否同步生成 768 维语义向量 (缺省 False)。
     """
-    try:
-        proj = await validate_and_negotiate_project(project, is_write=True)
-    except ProjectNegotiationError as e:
-        return e.to_dict()
+    proj = await validate_and_negotiate_project(project, is_write=True)
 
     st = normalize_record_status(status)
     actual_event_date = str(event_date).strip() if event_date and str(event_date).strip() else date.today().isoformat()
@@ -2762,10 +2767,7 @@ async def record_query(
     - offset: 分页偏移量 (缺省 0)。
     - fields: 可选列投影，缺省返回全列。
     """
-    try:
-        proj = await validate_and_negotiate_project(project, is_write=False)
-    except ProjectNegotiationError as e:
-        return e.to_dict()
+    proj = await validate_and_negotiate_project(project, is_write=False)
 
     if offset < 0:
         return tool_error("INVALID_ARGUMENT", "offset 必须 >= 0", tool="record_query")
@@ -2865,10 +2867,7 @@ async def record_stats(
     - group_by: 可选。聚合维度: 'month' (缺省), 'day', 'year', 'currency', 'status', 'entity', 'dataset', 'none'。
     - status: 可选。单据状态过滤 (支持单值或数组，如 'recorded', ['planned', 'running'])。
     """
-    try:
-        proj = await validate_and_negotiate_project(project, is_write=False)
-    except ProjectNegotiationError as e:
-        return e.to_dict()
+    proj = await validate_and_negotiate_project(project, is_write=False)
 
     valid_groups = ("day", "month", "year", "currency", "status", "entity", "dataset", "none")
     grp = (group_by or "none").strip().lower()
@@ -2909,7 +2908,7 @@ async def record_search(
     project: str,
     query: str,
     dataset_code: str | None = None,
-    status: str | None = None,
+    status: str | list[str] | None = None,
     limit: int = 10,
     offset: int = 0,
     fields: list[str] | None = None,
@@ -2930,16 +2929,13 @@ async def record_search(
     - project: 必填。项目代号 (如 'taxbase', 'brix')。
     - query: 必填。自然语言提问、法规主题或搜索关键词。
     - dataset_code: 可选。限定数据集编码过滤 (如 'tax_regulation')。
-    - status: 可选。状态过滤 (recorded, reconciled, verified, cancelled)。
+    - status: 可选。状态过滤 (支持单值或数组，如 'recorded', ['planned', 'running'])。
     - limit: 返回条数上限 (1..100, 缺省 10)。
     - offset: 分页偏移量 (缺省 0)。
     - fields: 可选列投影，缺省返回全列。
     - min_score: 可选相似度截断阈值 (0.0..1.0，缺省 0.40)。低于该得分的弱相关记录将被过滤；传 0.0 保留全量。
     """
-    try:
-        proj = await validate_and_negotiate_project(project, is_write=False)
-    except ProjectNegotiationError as e:
-        return e.to_dict()
+    proj = await validate_and_negotiate_project(project, is_write=False)
 
     if isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
         return tool_error("INVALID_ARGUMENT", f"min_score 必须为 0.0 至 1.0 之间的数值，收到: {min_score!r}", tool="record_search")
@@ -2956,11 +2952,17 @@ async def record_search(
     embed_res = await get_embedding(s_query)
 
     st = None
-    if status:
-        try:
-            st = normalize_record_status(status)
-        except ValueError as exc:
-            return tool_error("INVALID_ARGUMENT", str(exc), tool="record_search")
+    if status is not None:
+        st_list = fact_engine.normalize_status_list(status)
+        if not st_list:
+            return tool_error("INVALID_ARGUMENT", "status 不能为空！", tool="record_search")
+        validated = []
+        for s in st_list:
+            try:
+                validated.append(normalize_record_status(s))
+            except ValueError as exc:
+                return tool_error("INVALID_ARGUMENT", str(exc), tool="record_search")
+        st = validated if len(validated) > 1 else validated[0]
     rows, search_mode = await db.search_records(
         project_id=proj,
         query_vector=embed_res.embedding,
