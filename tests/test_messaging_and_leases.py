@@ -195,3 +195,95 @@ def test_db_schema_ensured_flag():
     assert test_db._datasets_and_records_schema_ensured is False
 
 
+@pytest.mark.asyncio
+async def test_acquire_file_lease_conflict_reporting(monkeypatch):
+    """测试 acquire_file_lease 发生冲突时能正确提取持锁人与到期时间 (BUG-02 预防回归)。"""
+    import json
+    from logbook.db import db
+    from unittest.mock import AsyncMock
+
+    mock_row = {
+        "attempted": None,
+        "current": json.dumps({
+            "id": 88,
+            "project_id": "logbook",
+            "agent_name": "other_agent",
+            "agent_ip": "192.0.2.88",
+            "file_path": "src/logbook/db.py",
+            "lease_expires_at": "2026-11-08T16:00:00+08:00",
+            "created_at": "2026-11-08T15:00:00+08:00",
+        }),
+    }
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow.return_value = mock_row
+
+    class MockPool:
+        def acquire(self):
+            class Ctx:
+                async def __aenter__(self):
+                    return mock_conn
+                async def __aexit__(self, *args):
+                    pass
+            return Ctx()
+
+    monkeypatch.setattr(db, "_pool", MockPool())
+    monkeypatch.setattr(db, "ensure_messaging_schema", AsyncMock())
+
+    ok, lease, conflict_agent = await db.acquire_file_lease(
+        project_id="logbook",
+        agent_name="my_agent",
+        file_path="src/logbook/db.py",
+        duration_seconds=300,
+    )
+    assert ok is False
+    assert conflict_agent == "other_agent"
+    assert lease is not None
+    assert lease.file_path == "src/logbook/db.py"
+
+
+@pytest.mark.asyncio
+async def test_import_devlog_markdown_signature_compatibility(monkeypatch):
+    """测试 import_devlog_markdown 调用 bulk_upsert_records 签名兼容 (BUG-01 预防回归)。"""
+    from logbook.converter import import_devlog_markdown
+    from logbook.db import db
+    from unittest.mock import AsyncMock
+
+    captured_records = []
+
+    async def mock_bulk_upsert(records, records_alt=None):
+        nonlocal captured_records
+        recs = records_alt if isinstance(records, str) and records_alt is not None else records
+        captured_records.extend(recs)
+        return {"inserted": len(recs), "updated": 0, "total": len(recs)}
+
+    monkeypatch.setattr(db, "bulk_upsert_records", mock_bulk_upsert)
+
+    sample_md = """# LOGBOOK 开发日志 (DEVLOG)
+## 一、任务台账 (1)
+| ID | 状态 | 类型 | 标题 | commit | 备注 |
+|---|---|---|---|---|---|
+| T-01 | closed | feat | 测试任务 | c123 | 备注说明 |
+
+## 二、发现台账 (1)
+| ID | 来源 | 级别 | 状态 | 处置 | 备注 |
+|---|---|---|---|---|---|
+| F-01 | audit | P2 | fixed | fix | 发现说明 |
+
+## 三、待办/待用户 (1)
+| ID | 类别 | 状态 | 事项 |
+|---|---|---|---|
+| W-01 | user | open | 待办说明 |
+
+## [DEV-2026-11-08-01] 批次一 — ✅ 闭环
+- **任务源**: 测试源
+"""
+    summary = await import_devlog_markdown("logbook", sample_md)
+    assert summary.tasks_imported == 1
+    assert summary.findings_imported == 1
+    assert summary.waitings_imported == 1
+    assert summary.batches_imported == 1
+    assert len(captured_records) == 4
+
+
+

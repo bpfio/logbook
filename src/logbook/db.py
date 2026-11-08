@@ -1253,7 +1253,7 @@ class Database:
                     SELECT id, project_id, agent_name, agent_ip, file_path,
                            lease_expires_at, created_at
                     FROM shared.file_leases
-                    WHERE project_id = $1 AND file_path = $2
+                    WHERE project_id = $1 AND file_path = $4
                 )
                 SELECT
                     (SELECT to_jsonb(attempted) FROM attempted) AS attempted,
@@ -1653,10 +1653,16 @@ class Database:
                     count += 1
         return count
 
-    async def bulk_upsert_records(self, records: list[DataRecord]) -> dict:
+    async def bulk_upsert_records(
+        self,
+        records: list[DataRecord] | str,
+        records_alt: list[DataRecord] | None = None,
+    ) -> dict:
         """批量写入或更新通用事实单据 (单事务批处理，支持同单号幂等更新)。返回统计字典。"""
+        # 兼容 (records) 与历史 (project, records) 双形态调用防呆
+        actual_records: list[DataRecord] = records_alt if isinstance(records, str) and records_alt is not None else records  # type: ignore
         await self.ensure_datasets_and_records_schema()
-        if not records:
+        if not actual_records:
             return {"inserted": 0, "updated": 0, "total": 0}
 
         inserted_cnt = 0
@@ -1664,16 +1670,16 @@ class Database:
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                for code in list({r.dataset_code for r in records}):
+                for code in list({r.dataset_code for r in actual_records}):
                     await conn.execute("""
                         INSERT INTO shared.datasets (code, name, category, field_schema)
                         VALUES ($1, $1, 'custom', '[]'::jsonb)
                         ON CONFLICT (code) DO NOTHING;
                     """, code)
 
-                proj = records[0].project_id
-                dataset_codes = list({r.dataset_code for r in records})
-                doc_nos = [r.doc_no for r in records]
+                proj = actual_records[0].project_id
+                dataset_codes = list({r.dataset_code for r in actual_records})
+                doc_nos = [r.doc_no for r in actual_records]
 
                 # OPT-32: 采用 (dataset_code, doc_no) 复合键匹配，支持同批次多数据集与杜绝跨数据集覆盖
                 existing_rows = await conn.fetch(
@@ -1713,7 +1719,7 @@ class Database:
                     WHERE id = $1 AND project_id = $11;
                 """
 
-                for r in records:
+                for r in actual_records:
                     ev_date = r.event_date
                     if isinstance(ev_date, str):
                         cleaned = ev_date.strip().replace("/", "-")
@@ -1761,7 +1767,7 @@ class Database:
                         )
                         inserted_cnt += 1
 
-        return {"inserted": inserted_cnt, "updated": updated_cnt, "total": len(records)}
+        return {"inserted": inserted_cnt, "updated": updated_cnt, "total": len(actual_records)}
 
     async def query_records(
         self,

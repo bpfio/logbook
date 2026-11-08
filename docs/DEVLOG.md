@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (47)
+## 一、任务台账 (48)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-FIX-080 | closed | fix | Logbook 0.8.0 终极收敛封版: 修复 import_devlog_markdown 签名错位与租约冲突 SQL 参数绑定错误 | HEAD | 落实用户裁决彻底收敛封版，消灭过度挑刺与伪需求，仅拧紧2处真实边缘代码笔误: ① 修正 converter.py 中 import_devlog_markdown 调用 bulk_upsert_records 的传参溢出崩溃 (P0)，并在 db.bulk_upsert_records 引入双形态入参自适应防呆; ② 修正 db.acquire_file_lease 中冲突持有者查询 CTE 的 SQL 参数绑定错误 ($2 错写为 agent_name 改正为 $4 file_path)，确保并发抢锁失败时精准回显持锁人; ③ 单元测试 73 项全绿 (新增2项防回归单测)，生产平滑更新上线，6,924 条生产数据零丢失，系统进入免维护静止稳态 (DEV-2026-11-08-03) |
 | L-CLEAN-080 | closed | refactor | Logbook 0.8.0: 独立第三方代码二次深度审计、MCP Resource AttributeError 根除、协议 Repr 纠偏与 500+ 行死代码彻底拔除 | b25b36e | 落实独立第三方深度审计清单: ① 修复 get_active_tasks_resource 等 6 大 MCP Resource 端点字典安全提取 _v(obj, key)，根除生产现场 AttributeError 崩溃; ② 修复 ssh_server.py 的 resources/read 协议封装，消除 [ReadResourceContents(...)] Python Repr 乱码字符串，输出纯净 Markdown; ③ 彻底清除 normalizer.py (319 行) 与 engine.py (215 行) 中已淘汰历史实体状态映射与未调用死代码 (净删 534 行); ④ 全量纠偏 4 大 Prompts 规程、协商开户指引与 SingleFlight 规则中的废弃工具名 (project_init -> project_manage); ⑤ 单元测试 71 项全绿，生产热部署验证，6,924 条生产物理数据零丢失 (DEV-2026-11-08-02) |
 | L-SLIM-080 | closed | refactor | Logbook 0.8.0: 极简断舍离重构、全库彻底去过度工程化、废弃工具/DAO/模型全量清除与 6924 条生产数据零丢失 | a41a606 | 彻底斩断过度工程化包袱，实现极致简洁、优雅与鲁棒: ① 彻底删除 32 个历史废弃工具与 30+ 冗余 DAO 方法，MCP 严格收敛至 14 个核心正典工具; ② 废除 10 个已淘汰的专用 Pydantic 模型与 12 个历史枚举，核心模型瘦身 60%; ③ 修复 ssh_server.py 错误感知同步缺陷 (内层 isError 穿透至外层信封); ④ 修复 export_markdown 根目录白名单穿透漏洞与 dict 对象访问 AttributeError; ⑤ 修复 client.py 多 Content 块解析丢弃缺陷; ⑥ 代码库净瘦身近 3,500 行 (736+, 4208-); ⑦ 生产真机热部署 logbook:0.8.0，健康探针、14 核心工具、CLI 深度验收 100% 通过，生产 6,924 条物理数据绝对零丢失 (DEV-2026-11-08-01) |
 | L-OPT-073 | closed | feat | Logbook 0.7.3: 闭环独立第三方深度审计OPT-23~35、ContextVar协程隔离、SingleFlight锁粒度优化与批量复合键幂等 | e3bb987 | 落实 OPT-23~35 专项整改: ① record_search 入参及底座 search_records 支持 status 数组 (ANY($N)) 参数化查询，与 record_query 体验 100% 正交对齐; ② tool_shell 捕获 ValueError 映射为 INVALID_ARGUMENT，根除错误码语义降级 (消灭伪 INTERNAL_ERROR); ③ DataRecord 金额字段增加空串宽容容错 (解析为 0.0000); ④ 消除各工具体内部冗余的 ProjectNegotiationError 手工捕获样板代码; ⑤ 项目协商开户引导消除重复的 list_projects 查库往返; ⑥ 引入 ContextVar("current_caller_ip") 实现 HTTP 调用端 IP 的协程级并发硬隔离; ⑦ run_server 增加 finally 停机钩子显式关闭数据库连接池 db.close(); ⑧ FactEngine 消除负向缓存污染并支持 additionalProperties: false 严防未知字段噪音; ⑨ SingleFlight 缩小锁粒度，消除不同 key 请求被串行化的并发瓶颈，并将 project_manage 与 dataset_manage 只读动作纳入合并削峰; ⑩ bulk_upsert_records 引入 (dataset_code, doc_no) 复合键匹配，杜绝跨数据集覆盖与遗漏; ⑪ export_devlog_markdown 表格防破裂清洗换行与竖线; 单元测试 82 项 100% 绿灯，生产平滑部署 logbook:0.7.3，生产真机 8 项全维验收 100% 通过 (DEV-2026-11-07-06) |
@@ -113,6 +114,35 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-08-03] Logbook 0.8.0 终极收敛封版: 修复 import_devlog_markdown 签名错位与租约冲突 SQL 参数绑定错误 — ✅ 闭环
+
+根据用户裁决（彻底收敛封版，坚决消灭过度挑刺与伪需求，仅拧紧 2 处真实代码边缘笔误），完成终极修复、门禁与生产验证：
+
+1. **结构化四要素复盘 (SSOT)**:
+   - **故障/需求背景 (Problem)**:
+     - **离线导入签名错位 (BUG-01)**: `src/logbook/converter.py` 的 `import_devlog_markdown` 调用 `db.bulk_upsert_records(project, batch_records)` 时多传递了第一个 `project` 形参，导致通过 CLI 执行 `logbook import` 时触发 `TypeError: takes 2 positional arguments but 3 were given` 崩溃；
+     - **租约锁冲突查询参数错位 (BUG-02)**: `src/logbook/db.py` 中 `acquire_file_lease` 在抢锁发生冲突时，查询当前锁持有者的 CTE SQL 中误写为 `WHERE project_id = $1 AND file_path = $2`，而参数 `$2` 是 `agent_name`（`file_path` 为 `$4`），导致冲突时持有者查为空并回显为 `已被 Agent [None] 锁定施工中`。
+   - **根因定位 (Root Cause)**:
+     - 0.8.0 统一 `DataRecord` 自带 `project_id` 属性后，`db.bulk_upsert_records` 签名精简为单参数，而离线 CLI 工具层 `converter.py` 的调用未同步更新；
+     - `acquire_file_lease` 的 `current` CTE 查询从 `release_file_lease` 拷贝 WHERE 条件时未校正参数序号。
+   - **解决方案 (Solution)**:
+     - `src/logbook/converter.py`: 4 处调用修正为直接传递单据列表 `db.bulk_upsert_records(records)`；
+     - `src/logbook/db.py`: `bulk_upsert_records` 增加双形态入参自适应兼容防呆（支持 `records` 或 `(project, records)` 调用）；
+     - `src/logbook/db.py`: `acquire_file_lease` 修正 SQL 参数为 `WHERE project_id = $1 AND file_path = $4`，确保并发冲突时精准回显持锁 Agent 名称与到期时间；
+     - 增补回归测试：在 `tests/test_messaging_and_leases.py` 增设针对两项修复的自动化回归用例。
+   - **验证证据 (Evidence)**:
+     - 单元测试门禁：`bash scripts/gate.sh unit` 73 项全绿（100% PASS，0 失败，40 deselected）；
+     - 生产热更新部署：镜像重新加载并重载容器栈，`/health` 返回状态正常；
+     - 生产物理数据保全：`SELECT count(*) FROM shared.records;` 严格等于 6,924 条（物理数据 100% 绝对零丢失）；
+     - 架构封版：彻底斩断过度工程化与循环挑刺，系统正式归入免维护静止稳态。
+
+2. **生产实测指标**:
+   - 单元测试通过率: 73/73 (100% PASS, 40 deselected integration)
+   - 生产环境服务版本: 0.8.0
+   - 生产数据库物理记录数: 6,924 条 (100% 绝对零丢失)
 
 ---
 

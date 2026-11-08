@@ -143,7 +143,7 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
         batch_records.append(rec)
         b_count += 1
     if batch_records:
-        await db.bulk_upsert_records(project, batch_records)
+        await db.bulk_upsert_records(batch_records)
 
     # 2. 解析任务、发现与待办表格
     current_table = None
@@ -291,11 +291,11 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
                     pass
 
     if task_records:
-        await db.bulk_upsert_records(project, task_records)
+        await db.bulk_upsert_records(task_records)
     if finding_records:
-        await db.bulk_upsert_records(project, finding_records)
+        await db.bulk_upsert_records(finding_records)
     if waiting_records:
-        await db.bulk_upsert_records(project, waiting_records)
+        await db.bulk_upsert_records(waiting_records)
 
     return ParseSummary(tasks_imported=t_count, findings_imported=f_count, waitings_imported=w_count, batches_imported=b_count)
 
