@@ -17,7 +17,7 @@ os.environ.setdefault("LOGBOOK_ADMIN_AGENTS", "agy")
 
 from logbook.db import db
 from logbook.errors import ToolError
-from logbook.models import DevLog, DevLogVisibility, Task, TaskStatus
+from logbook.models import DataRecord
 
 pytestmark = pytest.mark.integration
 
@@ -116,13 +116,13 @@ async def test_02_legacy_open_project_visible_to_all():
     await _become(BOB)
     proj = await db.get_project(P_OPEN)
     assert proj is not None
-    task = await db.upsert_task(
-        P_OPEN, Task(id="MU-T-OPEN", title="开放项目写入", status=TaskStatus.PLANNED, assignee=BOB)
+    task = await db.upsert_record(
+        DataRecord(project_id=P_OPEN, dataset_code="sys_task", doc_no="MU-T-OPEN", entity_name="开放项目写入", status="planned", payload={"assignee": BOB})
     )
-    assert task.id == "MU-T-OPEN"
+    assert task["doc_no"] == "MU-T-OPEN"
     await _become(CAROL)
-    tasks = await db.query_tasks(P_OPEN)
-    assert any(t.id == "MU-T-OPEN" for t in tasks)
+    tasks = await db.query_records(P_OPEN, dataset_code="sys_task")
+    assert any(t.doc_no == "MU-T-OPEN" for t in tasks)
 
 
 @pytest.mark.asyncio
@@ -131,16 +131,16 @@ async def test_03_attached_project_group_isolation():
     await _become(ALICE)
     proj = await db.get_project(P_CLOSED)
     assert proj is not None
-    await db.upsert_task(
-        P_CLOSED, Task(id="MU-T-A1", title="组内写入", status=TaskStatus.PLANNED, assignee=ALICE)
+    await db.upsert_record(
+        DataRecord(project_id=P_CLOSED, dataset_code="sys_task", doc_no="MU-T-A1", entity_name="组内写入", status="planned", payload={"assignee": ALICE})
     )
 
     await _become(BOB)
     assert await db.get_project(P_CLOSED) is None
     assert all(p.schema_name != P_CLOSED for p in await db.list_projects())
     with pytest.raises(asyncpg.InsufficientPrivilegeError):
-        await db.upsert_task(
-            P_CLOSED, Task(id="MU-T-B1", title="越权写入", status=TaskStatus.PLANNED, assignee=BOB)
+        await db.upsert_record(
+            DataRecord(project_id=P_CLOSED, dataset_code="sys_task", doc_no="MU-T-B1", entity_name="越权写入", status="planned", payload={"assignee": BOB})
         )
 
     await _become(CAROL)
@@ -163,8 +163,8 @@ async def test_05_grant_then_reveal_revoke_then_hide():
     await db.reset_data_pool()
     await _become(BOB)
     assert await db.get_project(P_CLOSED) is not None
-    await db.upsert_task(
-        P_CLOSED, Task(id="MU-T-B2", title="加组后写入", status=TaskStatus.PLANNED, assignee=BOB)
+    await db.upsert_record(
+        DataRecord(project_id=P_CLOSED, dataset_code="sys_task", doc_no="MU-T-B2", entity_name="加组后写入", status="planned", payload={"assignee": BOB})
     )
 
     assert await db.remove_group_member(G_DEV, BOB, ADMIN) is True
@@ -172,8 +172,8 @@ async def test_05_grant_then_reveal_revoke_then_hide():
     await _become(BOB)
     assert await db.get_project(P_CLOSED) is None
     with pytest.raises(asyncpg.InsufficientPrivilegeError):
-        await db.upsert_task(
-            P_CLOSED, Task(id="MU-T-B3", title="移组后写入", status=TaskStatus.PLANNED, assignee=BOB)
+        await db.upsert_record(
+            DataRecord(project_id=P_CLOSED, dataset_code="sys_task", doc_no="MU-T-B3", entity_name="移组后写入", status="planned", payload={"assignee": BOB})
         )
 
 
@@ -194,25 +194,24 @@ async def test_06_revoke_project_returns_legacy_open():
 async def test_07_devlog_group_visibility_and_public_safe():
     """手记知识库: 跨组不可见; public_safe 密级保持全局可见 (ASCII 标记规避 CJK 分词)。"""
     await _become(ALICE)
-    await db.record_devlog(DevLog(
-        project_id=P_CLOSED, task_id="MU-T-A1", title="mu-group-note",
-        problem="p", root_cause="r", solution="s", evidence="e", author=ALICE,
+    await db.upsert_record(DataRecord(
+        project_id=P_CLOSED, dataset_code="sys_devlog", doc_no="DEVLOG-1", entity_name="mu-group-note",
+        payload={"task_id": "MU-T-A1", "problem": "p", "root_cause": "r", "solution": "s", "evidence": "e", "author": ALICE, "visibility": "project_private"},
     ))
-    await db.record_devlog(DevLog(
-        project_id=P_CLOSED, task_id=None, title="mu-open-note",
-        problem="p", root_cause="r", solution="s", evidence="e", author=ALICE,
-        visibility=DevLogVisibility.PUBLIC_SAFE,
+    await db.upsert_record(DataRecord(
+        project_id=P_CLOSED, dataset_code="sys_devlog", doc_no="DEVLOG-2", entity_name="mu-open-note",
+        payload={"task_id": None, "problem": "p", "root_cause": "r", "solution": "s", "evidence": "e", "author": ALICE, "visibility": "public_safe"},
     ))
 
     await _become(BOB)
-    found = await db.search_devlogs(P_CLOSED, query_text="note")
-    titles = {d["title"] for d in found}
+    found = await db.query_records(P_CLOSED, dataset_code="sys_devlog", query_text="note")
+    titles = {d.entity_name for d in found}
     assert "mu-open-note" in titles
     assert "mu-group-note" not in titles
 
     await _become(ALICE)
-    mine = await db.search_devlogs(P_CLOSED, query_text="note")
-    assert {"mu-group-note", "mu-open-note"} <= {d["title"] for d in mine}
+    mine = await db.query_records(P_CLOSED, dataset_code="sys_devlog", query_text="note")
+    assert {"mu-group-note", "mu-open-note"} <= {d.entity_name for d in mine}
 
 
 @pytest.mark.asyncio

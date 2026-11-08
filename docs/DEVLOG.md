@@ -9,11 +9,12 @@
 
 ---
 
-## 一、任务台账 (45)
+## 一、任务台账 (46)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
-| L-OPT-073 | closed | feat | Logbook 0.7.3: 闭环独立第三方深度审计OPT-23~35、ContextVar协程隔离、SingleFlight锁粒度优化与批量复合键幂等 | HEAD | 落实 OPT-23~35 专项整改: ① record_search 入参及底座 search_records 支持 status 数组 (ANY($N)) 参数化查询，与 record_query 体验 100% 正交对齐; ② tool_shell 捕获 ValueError 映射为 INVALID_ARGUMENT，根除错误码语义降级 (消灭伪 INTERNAL_ERROR); ③ DataRecord 金额字段增加空串宽容容错 (解析为 0.0000); ④ 消除各工具体内部冗余的 ProjectNegotiationError 手工捕获样板代码; ⑤ 项目协商开户引导消除重复的 list_projects 查库往返; ⑥ 引入 ContextVar("current_caller_ip") 实现 HTTP 调用端 IP 的协程级并发硬隔离; ⑦ run_server 增加 finally 停机钩子显式关闭数据库连接池 db.close(); ⑧ FactEngine 消除负向缓存污染并支持 additionalProperties: false 严防未知字段噪音; ⑨ SingleFlight 缩小锁粒度，消除不同 key 请求被串行化的并发瓶颈，并将 project_manage 与 dataset_manage 只读动作纳入合并削峰; ⑩ bulk_upsert_records 引入 (dataset_code, doc_no) 复合键匹配，杜绝跨数据集覆盖与遗漏; ⑪ export_devlog_markdown 表格防破裂清洗换行与竖线; 单元测试 82 项 100% 绿灯，生产平滑部署 logbook:0.7.3，生产真机 8 项全维验收 100% 通过 (DEV-2026-11-07-06) |
+| L-SLIM-080 | closed | refactor | Logbook 0.8.0: 极简断舍离重构、全库彻底去过度工程化、废弃工具/DAO/模型全量清除与 6924 条生产数据零丢失 | HEAD | 彻底斩断过度工程化包袱，实现极致简洁、优雅与鲁棒: ① 彻底删除 32 个历史废弃工具与 30+ 冗余 DAO 方法，MCP 严格收敛至 14 个核心正典工具; ② 废除 10 个已淘汰的专用 Pydantic 模型与 12 个历史枚举，核心模型瘦身 60%; ③ 修复 ssh_server.py 错误感知同步缺陷 (内层 isError 穿透至外层信封); ④ 修复 export_markdown 根目录白名单穿透漏洞与 dict 对象访问 AttributeError; ⑤ 修复 client.py 多 Content 块解析丢弃缺陷; ⑥ 代码库净瘦身近 3,500 行 (736+, 4208-); ⑦ 生产真机热部署 logbook:0.8.0，健康探针、14 核心工具、CLI 深度验收 100% 通过，生产 6,924 条物理数据绝对零丢失 (DEV-2026-11-08-01) |
+| L-OPT-073 | closed | feat | Logbook 0.7.3: 闭环独立第三方深度审计OPT-23~35、ContextVar协程隔离、SingleFlight锁粒度优化与批量复合键幂等 | e3bb987 | 落实 OPT-23~35 专项整改: ① record_search 入参及底座 search_records 支持 status 数组 (ANY($N)) 参数化查询，与 record_query 体验 100% 正交对齐; ② tool_shell 捕获 ValueError 映射为 INVALID_ARGUMENT，根除错误码语义降级 (消灭伪 INTERNAL_ERROR); ③ DataRecord 金额字段增加空串宽容容错 (解析为 0.0000); ④ 消除各工具体内部冗余的 ProjectNegotiationError 手工捕获样板代码; ⑤ 项目协商开户引导消除重复的 list_projects 查库往返; ⑥ 引入 ContextVar("current_caller_ip") 实现 HTTP 调用端 IP 的协程级并发硬隔离; ⑦ run_server 增加 finally 停机钩子显式关闭数据库连接池 db.close(); ⑧ FactEngine 消除负向缓存污染并支持 additionalProperties: false 严防未知字段噪音; ⑨ SingleFlight 缩小锁粒度，消除不同 key 请求被串行化的并发瓶颈，并将 project_manage 与 dataset_manage 只读动作纳入合并削峰; ⑩ bulk_upsert_records 引入 (dataset_code, doc_no) 复合键匹配，杜绝跨数据集覆盖与遗漏; ⑪ export_devlog_markdown 表格防破裂清洗换行与竖线; 单元测试 82 项 100% 绿灯，生产平滑部署 logbook:0.7.3，生产真机 8 项全维验收 100% 通过 (DEV-2026-11-07-06) |
 | L-OPT-072 | closed | feat | Logbook 0.7.2: 独立第三方代码审计闭环、标准MCP生命周期握手、客户端上下文SDK与越权目录防御 | f385564 | 落实 OPT-09~22 专项整改: ① 补齐 MCP 2024-11-05 协议 initialize、notifications/initialized、ping、resources/list 等生命周期方法并打通 HTTP /rpc 端点; ② LogbookClient 补齐异步上下文管理器 (async with) 与 brief/query/upsert 等高阶快捷方法，指数退避重试器纳入 httpx.RequestError; ③ record_query 与 record_stats 支持 status 数组 (ANY($N)) 参数化检索，空状态输入精准拦截; ④ 单条入库 record_upsert 与 DataRecord 对齐批量入库人体工学，省略 event_date 自动填充今日; ⑤ 修复 FactEngine 布尔型伪装为数值 (bool 是 int 子类) 的 Schema 穿透缺陷; ⑥ export_markdown 强制路径白名单防越权目录遍历 (PERMISSION_DENIED); ⑦ project_manage 补齐 list 与 query 操作，消除盲猜; ⑧ CLI run_async 捕获连接异常输出友好指引; 单元测试 76 项 100% 绿灯，生产热更新平滑落地，真机 10 项全链路穿透验收 100% 通过 (DEV-2026-11-07-05) |
 | L-OPT-071 | closed | feat | Logbook 0.7.1: 批量Schema防线加固、单表极速聚合、无状态RPC端点与优雅停机闭环 | ece134e | 落实 OPT-01~08 专项整改: ① records_bulk_upsert 批量导入全面覆盖 payload JSON Schema 声明式校验，单据集合预检消灭 N+1 查询; ② 补齐 Schema 校验引擎布尔型 (boolean) 与枚举白名单 (enum) 校验，实现数据集 Schema 修改即时缓存失效; ③ brief_project 与核心查询脱离遗留动态 SQL 视图，直查底层 shared.records 单表条件聚合，网络 RTT 从 5 次降至 1 次，时延从 ~15ms 压制至 3ms; ④ HTTP 接入面增设无状态直连 POST /rpc 与 POST /call 端点，无需维护长连接即可低延迟执行 MCP 原语; ⑤ FastMCP 与 SSH 网关统一引入 ServerHolder 优雅停机信号处理，消除端口悬挂与连接池泄漏; ⑥ export_markdown 结构化信封统一为 dict 并解除 50 条导出截断 (max_items=10000); ⑦ 增补迁移 18 (sql/18_update_research_schema.sql) 补齐 sys_research 契约; 单元测试 71 项 100% 绿灯，生产环境热更新成功，生产真机 HTTP /rpc、SSH MCP 与 Schema 拦截 100% 验证通过 (DEV-2026-11-07-04) |
 | L-OPT-070 | closed | feat | Logbook 0.7.0: MCP工具集大归一 (46→14核心)、动态 JSON Schema 验证引擎、客户端 SDK 与 HTTP/HTTPS FastMCP 双通道落地 | e9e1213 | 吸收全量优化建议: ① tools/list 归一化为 14 个核心高内聚工具 (Schema 瘦身 63% 从 59.8KB 缩减至 22KB, 32 老工具 100% 保持就绪); ② 落地迁移 17 (sql/17_dataset_json_schema.sql), shared.datasets 增设 json_schema 字段并预置 8 大系统业务数据集校验契约, FactEngine 声明式拦截非标 payload 入库; ③ 落地 src/logbook/client.py 内置 SingleFlight 削峰、Full Jitter 退避重试与心跳保活; ④ 保留并增强 FastMCP SSE HTTP/HTTPS 双通道 (端口 8000 与 22 并行监听); ⑤ 修复 read_agent_message/archive_agent_message asyncpg $1 参数类型推断冲突 (int/str 22000); 单元测试 70 项 100% 绿灯, 生产环境部署成功, 13 项真机穿透测试 100% 通过 (DEV-2026-11-07-03) |
@@ -111,6 +112,44 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-08-01] Logbook 0.8.0: 极简断舍离重构、全库彻底去过度工程化、废弃工具/DAO/模型全量清除与 6924 条生产数据零丢失 — ✅ 闭环
+
+根据用户裁决（“不再考虑向下兼容，旧客户端可以使用即可，彻底解决过度工程化问题”），全面实施 Logbook 0.8.0 极简重构断舍离计划，实现代码库净瘦身近 3,500 行（736 insertions(+), 4208 deletions(-)），严格保障生产 6,924 条物理事实数据绝对零丢失：
+
+1. **结构化四要素复盘 (SSOT)**:
+   - **故障/需求背景 (Problem)**:
+     - 历史包袱沉重：0.6.0 全库归一为通用事实双表底座后，因顾虑向下兼容，代码库中依然完整保留了 32 个历史单业务工具、30+ 个旧 DAO CRUD 方法、10 个专有 Pydantic 模型（`Task`, `Finding`, `Waiting`, `Batch`, `DevLog`, `Rule`, `Research` 等）与 12 个废弃枚举，形成严重的“双轨维护”与过度工程化，造成心智负担与认知噪音；
+     - 走查发现真实 Bug：① `ssh_server.py` 在工具被 `@tool_shell` 捕获异常返回 JSON 时，仅根据 Python 是否抛出未捕获异常设置 `isError`，导致外层 JSON-RPC 信封与内层 `content.isError` 状态失步；② `mcp_server.py` 的 `export_markdown` 目录白名单中若 `safe_root` 为 `/` 时会引发白名单穿透；③ `client.py` 解析返回仅提取首个 Content 块，多块响应被静默丢失；④ `converter.py` 与 `cli.py` 在直接消费通用事实记录时未兼顾字典与对象属性访问。
+   - **根因定位 (Root Cause)**:
+     - 归一化后未彻底断舍离，保留了过度冗余的兼容胶水层与废弃代码；
+     - FastMCP 工具包装层返回结构未在外层接入层中做深度递归感知；
+     - 路径规范化遍历缺少对系统根目录的显式排除。
+   - **解决方案 (Solution)**:
+     - **数据模型瘦身 (models.py)**: 彻底删除 `Task`, `Finding`, `Waiting`, `Batch`, `DevLog`, `Rule`, `Research` 等 10 个淘汰模型及其 12 个专用枚举，代码从 478 行缩减至 180 行；仅保留 `Project`, `AgentMessage`, `FileLease`, `Dataset`, `DataRecord` 5 大正典实体；
+     - **数据访问层瘦身 (db.py)**: 彻底删除 30+ 个旧专有 CRUD 方法，代码净删 1,200+ 行，全线收敛至 `upsert_record`, `query_records`, `search_records`, `bulk_upsert_records`；
+     - **接口层瘦身 (mcp_server.py)**: 彻底剔除 37 个冗余废弃工具，代码净删 1,300+ 行，严格收拢至 `CORE_TOOL_NAMES` 定义的 14 个核心工具；
+     - **闭环走查 3 项 Bug**:
+       - `ssh_server.py`: 深度感知 `content_list` 文本内容中的 `"isError": true` 标记，外层信封与内层 100% 准确同步；
+       - `mcp_server.py`: 目录白名单增加 `if str(safe_root) == "/": continue` 根目录硬排除，防御白名单穿透；
+       - `client.py`: 遍历并合并多 Content 块，彻底消除信息静默丢弃；
+       - `converter.py` & `cli.py`: 通用安全提取器 `_v(item, field)` 兼容字典与实体对象，修复 `export_markdown` 与 CLI 的 `AttributeError`。
+   - **验证证据 (Evidence)**:
+     - 阶段零生产冷备：`/share/Container/logbook/backup_pre_slimming_20261108.sql.gz` (33MB)，`gzip -t` 校验通过，Git 打标 `v0.7.3-stable` 并推送；
+     - 单元测试门禁：70 passed, 40 deselected in 10.42s，门禁全绿 (退出码 0)；
+     - 生产镜像构建与热更新：`logbook:0.8.0` 成功加载并部署至生产 NAS；
+     - 生产环境探针 `/health`：正常返回 `version: "0.8.0"`；
+     - **生产数据绝对零丢失**：`SELECT count(*) FROM shared.records;` 严格等于 6,924 条（100% 完整无损）；
+     - 生产工具列表验证：`tools/list` 严格返回 14 个核心工具；
+     - 生产真机实测：`export_markdown` 返回 `success: true, line_count: 202`；SSH Doctor 巡检全绿，时钟漂移 +0.019s；CLI `status logbook` 与 `show L-SRV-057` 渲染完美。
+
+2. **生产实测指标**:
+   - 单元测试通过率: 70/70 (100% PASS, 40 deselected integration)
+   - 代码瘦身净收益: 22 文件变更, 736 insertions(+), 4208 deletions(-) (净缩减 ~3,500 行)
+   - 生产环境服务版本: 0.8.0
+   - 生产数据库物理记录数: 6,924 条 (100% 绝对零丢失)
 
 ---
 

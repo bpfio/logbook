@@ -36,7 +36,6 @@ from logbook.mcp_server import (
     record_stats,
     record_search,
     records_bulk_upsert,
-    tasks_bulk_upsert,
     mcp,
 )
 
@@ -302,10 +301,11 @@ async def test_validation_layer_rejections_and_envelope_unit():
         assert res_bulk_nodoc.get("error_type") == "INVALID_ARGUMENT"
         assert "doc_no" in res_bulk_nodoc.get("detail", "")
 
-        # 6. F-API-06: tasks_bulk_upsert 校验枚举合法性
-        res_task_bad = await tasks_bulk_upsert(
+        # 6. F-API-06: records_bulk_upsert 校验枚举合法性
+        res_task_bad = await records_bulk_upsert(
             project="test_proj",
-            tasks=[{"id": "t1", "title": "test", "status": "wrong_status"}],
+            dataset_code="sys_task",
+            records=[{"doc_no": "t1", "entity_name": "test", "status": "wrong_status"}],
         )
         assert res_task_bad.get("isError") is True
         assert res_task_bad.get("error_type") == "INVALID_ARGUMENT"

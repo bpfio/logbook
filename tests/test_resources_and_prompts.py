@@ -23,7 +23,7 @@ from logbook.mcp_server import (
     prompt_conduct_research,
     prompt_agent_collaborate,
 )
-from logbook.models import FileLease, Research, ResearchCategory, ResearchStatus
+from logbook.models import FileLease, DataRecord
 
 
 # =============================================================================
@@ -106,29 +106,32 @@ async def test_get_recent_researches_resource_empty_and_populated():
     """测试最新技术调研快照只读挂载 (logbook://{project}/researches/recent)。"""
     with patch("logbook.mcp_server.validate_and_negotiate_project", new=AsyncMock(return_value="bpfio/logbook")):
         # 1. 空记录场景
-        with patch("logbook.mcp_server.db.query_researches", new=AsyncMock(return_value=[])):
+        with patch("logbook.mcp_server.db.query_records", new=AsyncMock(return_value=[])):
             out_empty = await get_recent_researches_resource("bpfio/logbook")
             assert "当前暂无技术调研" in out_empty
 
         # 2. 存在调研记录场景
         now = datetime.now(timezone.utc)
-        fake_research = Research(
-            id=10,
+        fake_research = DataRecord(
             project_id="bpfio/logbook",
-            title="PostgreSQL 18 vs SQLite 并发评测",
-            category=ResearchCategory.ARCHITECTURE,
-            status=ResearchStatus.COMPLETED,
-            author="agy",
-            agent_ip="192.168.1.68",
-            objective="评估低内存边缘 NAS 下的数据库选型",
-            market_landscape="SQLite 易写锁; PG18 支持高并发与原生向量",
-            tradeoffs="PG18 需 48MB 常驻内存; SQLite 无法满足跨 Agent 并发写",
-            decision="选用 PG18 容器化部署",
-            references="https://postgresql.org",
+            dataset_code="sys_research",
+            doc_no="RES-10",
+            entity_name="PostgreSQL 18 vs SQLite 并发评测",
+            status="completed",
+            payload={
+                "category": "architecture",
+                "author": "agy",
+                "agent_ip": "192.168.1.68",
+                "objective": "评估低内存边缘 NAS 下的数据库选型",
+                "market_landscape": "SQLite 易写锁; PG18 支持高并发与原生向量",
+                "tradeoffs": "PG18 需 48MB 常驻内存; SQLite 无法满足跨 Agent 并发写",
+                "decision": "选用 PG18 容器化部署",
+                "references": "https://postgresql.org",
+            },
             created_at=now,
             updated_at=now
         )
-        with patch("logbook.mcp_server.db.query_researches", new=AsyncMock(return_value=[fake_research])):
+        with patch("logbook.mcp_server.db.query_records", new=AsyncMock(return_value=[fake_research])):
             out_pop = await get_recent_researches_resource("bpfio/logbook")
             assert "架构调研与技术决策快照" in out_pop
             assert "PostgreSQL 18 vs SQLite 并发评测" in out_pop

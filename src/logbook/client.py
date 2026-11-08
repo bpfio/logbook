@@ -198,13 +198,25 @@ class LogbookClient:
                 if isinstance(result, dict) and "content" in result:
                     content = result["content"]
                     if content and isinstance(content, list):
-                        first = content[0]
-                        txt = first.get("text") if isinstance(first, dict) else getattr(first, "text", str(first))
-                        if txt:
+                        if len(content) == 1:
+                            first = content[0]
+                            txt = first.get("text") if isinstance(first, dict) else getattr(first, "text", str(first))
+                            if txt:
+                                try:
+                                    return json.loads(txt)
+                                except Exception:
+                                    return {"text": txt}
+                        else:
+                            texts = []
+                            for c in content:
+                                t = c.get("text") if isinstance(c, dict) else getattr(c, "text", str(c))
+                                if t:
+                                    texts.append(t)
+                            merged_text = "\n".join(texts)
                             try:
-                                return json.loads(txt)
+                                return json.loads(merged_text)
                             except Exception:
-                                return {"text": txt}
+                                return {"text": merged_text, "content": content}
                 return result
             else:
                 raise NotImplementedError("直接 SSH 命令调用可通过 CLI 或底层 AsyncSSH 发起")

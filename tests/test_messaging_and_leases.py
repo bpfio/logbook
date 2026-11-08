@@ -2,11 +2,12 @@
 
 import pytest
 from logbook.models import (
-    Task, TaskStatus, TaskPriority, TaskType,
+    RecordStatus,
     AgentMessageSend, AgentMessage,
-    FileLeaseAcquire, FileLease
+    FileLeaseAcquire, FileLease,
+    DataRecord
 )
-from logbook.normalizer import normalize_status
+from logbook.normalizer import normalize_record_status
 from logbook.mcp_server import (
     message_send,
     message_inbox,
@@ -14,27 +15,25 @@ from logbook.mcp_server import (
     lease_acquire,
     lease_release,
     lease_query,
-    task_upsert,
 )
 
 
 def test_models_and_normalizer_review_status():
-    """测试 TaskStatus.REVIEW 枚举与 Normalizer 状态归一化支持。"""
-    assert TaskStatus.REVIEW == "review"
-    assert normalize_status("review") == "review"
-    assert normalize_status("in_review") == "review"
-    assert normalize_status("reviewing") == "review"
+    """测试 RecordStatus.REVIEW 枚举与 Normalizer 状态归一化支持。"""
+    assert RecordStatus.REVIEW == "review"
+    assert normalize_record_status("review") == "review"
 
-    t = Task(
-        id="T-TEST-01",
-        title="测试待验收任务",
-        status=TaskStatus.REVIEW,
-        assignee="codebuddy",
-        reviewer="zcode",
+    rec = DataRecord(
+        project_id="logbook",
+        dataset_code="sys_task",
+        doc_no="T-TEST-01",
+        entity_name="测试待验收任务",
+        status=RecordStatus.REVIEW,
+        payload={"assignee": "codebuddy", "reviewer": "zcode"}
     )
-    assert t.status == TaskStatus.REVIEW
-    assert t.assignee == "codebuddy"
-    assert t.reviewer == "zcode"
+    assert rec.status == "review"
+    assert rec.payload["assignee"] == "codebuddy"
+    assert rec.payload["reviewer"] == "zcode"
 
 
 def test_message_and_lease_models():
@@ -189,10 +188,10 @@ async def test_personal_mailbox_resources(monkeypatch):
 
 
 def test_db_schema_ensured_flag():
-    """测试 Database 类的 _messaging_schema_ensured 与 _researches_schema_ensured 初始状态。"""
+    """测试 Database 类的 _messaging_schema_ensured 与 _datasets_and_records_schema_ensured 初始状态。"""
     from logbook.db import Database
     test_db = Database()
     assert test_db._messaging_schema_ensured is False
-    assert test_db._researches_schema_ensured is False
+    assert test_db._datasets_and_records_schema_ensured is False
 
 

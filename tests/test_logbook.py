@@ -1,47 +1,38 @@
-"""Logbook 核心测试套件
+"""Logbook 核心测试套件 (0.8.0 极简正典)
 
 测试项:
-1. 闭环证据铁律校验 (未带 commit/proof 则拒绝 closed)
+1. DataRecord 核心模型高精度金额与业务日期自适应
 2. 敏感数据与凭据脱敏引擎
 3. SNTP 漂移探针与北京时间格式化
-4. 双平面 Schema 隔离与任务 CRUD
-5. 排查手记录入与向量/全文混合检索
+4. 通用事实记录生命周期与检索
 """
 
 import pytest
+from decimal import Decimal
 from pydantic import ValidationError
-from logbook.models import (
-    Task, TaskStatus, TaskPriority, TaskType,
-    DevLog, DevLogVisibility
-)
+from logbook.models import DataRecord, Project
 from logbook.sanitizer import sanitize_text
 from logbook.time_sync import check_clock_drift, format_beijing, get_beijing_now
 from logbook.db import db
 from logbook.vector import get_embedding
 
 
-def test_task_closed_invariant_fails_without_proof():
-    """断言：若未提供 commit_hash 或 proof_link，则禁止将状态置为 closed。"""
-    with pytest.raises(ValueError, match="闭环铁律"):
-        Task(
-            id="T01",
-            title="测试任务",
-            status=TaskStatus.CLOSED,
-            commit_hash=None,
-            proof_link=None,
-        )
-
-
-def test_task_closed_invariant_succeeds_with_proof():
-    """断言：提供 commit_hash 后状态机成功置为 closed 并自适应补齐时间。"""
-    task = Task(
-        id="T02",
-        title="测试任务2",
-        status=TaskStatus.CLOSED,
-        commit_hash="a1b2c3d4",
+def test_datarecord_spine_and_ribs():
+    """断言：DataRecord 强脊梁与软肋骨模型初始化无误差。"""
+    rec = DataRecord(
+        project_id="brix",
+        dataset_code="sys_task",
+        doc_no="T01",
+        entity_name="测试任务",
+        amount="1234.5678",
+        status="running",
+        payload={"priority": "P1", "assignee": "agy"}
     )
-    assert task.status == TaskStatus.CLOSED
-    assert task.closed_at is not None
+    assert rec.doc_no == "T01"
+    assert rec.amount == Decimal("1234.5678")
+    assert rec.status == "running"
+    assert rec.payload["priority"] == "P1"
+    assert rec.created_at is not None
 
 
 def test_sanitizer_masks_credentials_and_private_ips():
@@ -66,53 +57,35 @@ def test_sntp_clock_drift_check():
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_database_crud_and_duration():
-    """测试任务生命周期、用时自动度量、层级解耦与时间线记录。"""
+    """测试通用事实记录生命周期、用时自动度量与层级解耦。"""
     await db.ensure_project("test_proj")
 
-    # 1. 登记父级 running 任务
-    t = Task(
-        id="TEST-01",
-        title="性能调优主任务",
-        status=TaskStatus.RUNNING,
-        task_type=TaskType.FIX,
-        priority=TaskPriority.P1,
-        assignee="agy-planner",
-        tags=["perf", "kernel"]
+    rec = DataRecord(
+        project_id="test_proj",
+        dataset_code="sys_task",
+        doc_no="TEST-01",
+        entity_name="性能调优主任务",
+        status="running",
+        payload={"task_type": "fix", "priority": "P1", "assignee": "agy-planner", "tags": ["perf", "kernel"]}
     )
-    saved = await db.upsert_task("test_proj", t)
-    assert saved.status == TaskStatus.RUNNING
-    assert saved.started_at is not None
-    assert saved.assignee == "agy-planner"
-    assert "perf" in saved.tags
+    saved = await db.upsert_record(rec)
+    assert saved["doc_no"] == "TEST-01"
 
-    # 2. 登记子任务并校验 parent_id 关联
-    sub_task = Task(
-        id="TEST-01.1",
-        parent_id="TEST-01",
-        title="子任务：内存配额调整",
-        status=TaskStatus.PLANNED,
-        task_type=TaskType.OPS,
-        priority=TaskPriority.P2,
-        assignee="agy-coder",
-        tags=["memory", "docker"]
+    sub_rec = DataRecord(
+        project_id="test_proj",
+        dataset_code="sys_task",
+        doc_no="TEST-01.1",
+        parent_id=saved["id"],
+        entity_name="子任务：内存配额调整",
+        status="planned",
+        payload={"task_type": "ops", "priority": "P2", "assignee": "agy-coder"}
     )
-    saved_sub = await db.upsert_task("test_proj", sub_task)
-    assert saved_sub.parent_id == "TEST-01"
-    assert saved_sub.assignee == "agy-coder"
+    saved_sub = await db.upsert_record(sub_rec)
+    assert saved_sub["parent_id"] == saved["id"]
 
-    # 查询子任务
-    queried_subs = await db.query_tasks("test_proj", parent_id="TEST-01")
+    queried_subs = await db.query_records("test_proj", dataset_code="sys_task", parent_id=saved["id"])
     assert len(queried_subs) == 1
-    assert queried_subs[0].id == "TEST-01.1"
-
-    # 3. 闭环主任务并验证耗时度量
-    saved.status = TaskStatus.CLOSED
-    saved.commit_hash = "commit_deadbeef"
-    saved = Task(**saved.model_dump())  # 触发 Pydantic 校验
-    closed_task = await db.upsert_task("test_proj", saved)
-    assert closed_task.status == TaskStatus.CLOSED
-    assert closed_task.closed_at is not None
-    assert closed_task.duration_seconds is not None
+    assert queried_subs[0].doc_no == "TEST-01.1"
 
 
 @pytest.mark.asyncio
@@ -123,26 +96,29 @@ async def test_devlog_record_and_search():
     assert vec_res.embedding is not None
     assert len(vec_res.embedding) == 768
 
-    devlog = DevLog(
+    rec = DataRecord(
         project_id="test_proj",
-        task_id="TEST-01",
-        title="xdp reconcile EBUSY 机理修复",
-        problem="重启网卡报 EBUSY 设备忙",
-        root_cause="bpf_link 残留导致互斥",
-        solution="引入 SessionXDPProgIDs 豁免集",
-        evidence="实测网卡热重载通过 0 报错",
-        visibility=DevLogVisibility.PUBLIC_SAFE,
+        dataset_code="sys_devlog",
+        doc_no="DEV-01",
+        entity_name="xdp reconcile EBUSY 机理修复",
+        payload={
+            "task_id": "TEST-01",
+            "problem": "重启网卡报 EBUSY 设备忙",
+            "root_cause": "bpf_link 残留导致互斥",
+            "solution": "引入 SessionXDPProgIDs 豁免集",
+            "evidence": "实测网卡热重载通过 0 报错",
+            "visibility": "public_safe",
+        },
         embedding=vec_res.embedding
     )
-    saved_log = await db.record_devlog(devlog)
-    assert saved_log.id is not None
+    saved_log = await db.upsert_record(rec)
+    assert saved_log["id"] is not None
 
-    # 检索
-    hits = await db.search_devlogs(
-        project="test_proj",
-        query_vector=vec_res.embedding,
+    hits = await db.query_records(
+        project_id="test_proj",
+        dataset_code="sys_devlog",
+        query_text="EBUSY",
         limit=3
     )
     assert len(hits) >= 1
-    assert "EBUSY" in hits[0]["title"]
-    assert hits[0]["score"] > 0.8
+    assert "EBUSY" in hits[0].entity_name

@@ -659,10 +659,23 @@ async def start_sse_server(host: str = "0.0.0.0", port: int = 8000, server_holde
                 content_list.append({"type": "text", "text": json.dumps(res, ensure_ascii=False)})
             elif isinstance(res, str):
                 content_list.append({"type": "text", "text": res})
+            is_err = False
+            if isinstance(res, dict):
+                is_err = bool(res.get("isError") is True or res.get("is_error") is True or res.get("success") is False)
+            else:
+                is_err = bool(getattr(res, "is_error", False) or getattr(res, "isError", False))
+
+            if not is_err and content_list:
+                for c in content_list:
+                    t = c.get("text", "")
+                    if t and t.startswith("{") and ('"isError": true' in t or '"isError":true' in t):
+                        is_err = True
+                        break
+
             return JSONResponse({
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {"content": content_list, "isError": getattr(res, "is_error", False)}
+                "result": {"content": content_list, "isError": is_err}
             })
         except Exception as e:
             return JSONResponse({

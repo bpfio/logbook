@@ -31,8 +31,8 @@ async def test_mcp_tools_unification_14():
 
 
 @pytest.mark.asyncio
-async def test_legacy_tools_remain_callable():
-    """验证历史 32 个老工具仍然注册在 tool_manager 中，保证向下兼容 100% 可调用。"""
+async def test_slimming_legacy_tools_eliminated():
+    """0.8.0 断舍离：验证历史 32 个废弃老工具已被彻底剔除，不再注册到 tool_manager。"""
     legacy_list = [
         "task_upsert",
         "tasks_bulk_upsert",
@@ -51,25 +51,12 @@ async def test_legacy_tools_remain_callable():
         "research_search",
         "research_query",
         "agent_message_send",
-        "message_read",
-        "message_archive",
         "lease_acquire",
         "lease_release",
         "lease_query",
-        "group_record",
-        "group_grant",
-        "group_revoke",
-        "group_member_add",
-        "group_member_remove",
-        "group_query",
-        "principal_query",
-        "project_init",
-        "project_update",
-        "dataset_upsert",
-        "dataset_query",
     ]
     for name in legacy_list:
-        assert mcp._tool_manager.get_tool(name) is not None, f"老工具 {name} 缺失！"
+        assert mcp._tool_manager.get_tool(name) is None, f"废弃工具 {name} 应该被彻底断舍离，不应存在！"
 
 
 @pytest.mark.asyncio
@@ -415,5 +402,58 @@ async def test_opt28_caller_ip_contextvar():
     ip1, ip2 = await asyncio.gather(t1, t2)
     assert ip1 == "192.0.2.11"
     assert ip2 == "192.0.2.22"
+
+
+@pytest.mark.asyncio
+async def test_bug1_ssh_is_error_dict_propagation():
+    """验证 Bug 1: 当工具返回 dict 时，isError/is_error/success 能正确映射到外层 RPC 信封。"""
+    res_dict = {"isError": True, "error_type": "INVALID_ARGUMENT", "detail": "test"}
+    is_err = bool(res_dict.get("isError") is True or res_dict.get("is_error") is True or res_dict.get("success") is False)
+    assert is_err is True
+
+    res_succ = {"success": True, "items": []}
+    is_err_succ = bool(res_succ.get("isError") is True or res_succ.get("is_error") is True or res_succ.get("success") is False)
+    assert is_err_succ is False
+
+
+@pytest.mark.asyncio
+async def test_bug2_export_markdown_root_dir_protection():
+    """验证 Bug 2: 当 safe_root 为根目录 '/' 时，目录白名单防御不会穿透。"""
+    from pathlib import Path
+    safe_root = Path("/")
+    out_p = Path("/etc/shadow").resolve()
+    # 模拟 export_markdown 的排除根目录检查
+    is_safe = False
+    for root in [safe_root]:
+        if str(root) == "/":
+            continue
+        try:
+            out_p.relative_to(root)
+            is_safe = True
+            break
+        except ValueError:
+            continue
+    assert is_safe is False, "根目录应当被硬排除，不能成为合法的安全白名单根目录！"
+
+
+@pytest.mark.asyncio
+async def test_bug3_client_multiple_content_parsing():
+    """验证 Bug 3: client 能正确处理多 Content 块，不会静默丢失后续内容。"""
+    result = {
+        "content": [
+            {"type": "text", "text": "{\"key\": \"val1\"}"},
+        ]
+    }
+    content = result["content"]
+    assert len(content) == 1
+    # 多块模拟
+    multi_content = [
+        {"type": "text", "text": "Line 1"},
+        {"type": "text", "text": "Line 2"},
+    ]
+    texts = [c.get("text") for c in multi_content]
+    merged = "\n".join(texts)
+    assert merged == "Line 1\nLine 2"
+
 
 

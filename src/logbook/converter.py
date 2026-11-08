@@ -1,18 +1,14 @@
-"""双向 Git Markdown 转换管道
+"""双向 Git Markdown 转换管道 - 0.8.0 极简正典 (直接消费/导入 shared.records)
 
 功能:
-- 逆向工程解析并无损导入 bpfio/brix/docs/DEVLOG.md 文本中的任务、发现与待办
-- 从数据库实时导出 100% 格式对齐的 docs/DEVLOG.md，便于 Git 提交与人类直读
+- 逆向工程解析并无损导入 DEVLOG.md 文本中的任务、发现与待办到通用事实表 (shared.records)
+- 从数据库通用事实表实时导出 100% 格式对齐的 DEVLOG.md，便于 Git 提交与人类直读
 """
 
 import re
 from typing import NamedTuple
-from .models import (
-    Task, TaskStatus, TaskPriority, TaskType,
-    Finding, FindingStatus, FindingSeverity,
-    Waiting, WaitingStatus, WaitingCategory,
-    Batch, BatchStatus
-)
+from decimal import Decimal
+from .models import DataRecord
 from .db import db
 
 
@@ -24,7 +20,7 @@ class ParseSummary(NamedTuple):
 
 
 async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSummary:
-    """解析 Markdown 表格与批次段落并灌库。"""
+    """解析 Markdown 表格与批次段落并灌入 shared.records 通用事实表。"""
     t_count = 0
     f_count = 0
     w_count = 0
@@ -33,10 +29,10 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
     lines = markdown_text.splitlines()
 
     # 1. 首先解析所有批次段落 (## [DEV-...] ...)
-    batches_to_save: list[tuple[Batch, list[str]]] = []
+    batches_to_save: list[tuple[dict, list[str]]] = []
     current_batch_id = None
     current_batch_title = None
-    current_batch_status = BatchStatus.COMPLETED
+    current_batch_status = "completed"
     current_batch_lines: list[str] = []
 
     batch_header_re = re.compile(r"^##\s+\[(DEV-[^\]]+)\]\s+(.*?)(?:\s+—\s+(.*?))?$")
@@ -57,26 +53,26 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
                     elif bl.startswith("- "):
                         summary_lines.append(bl)
                 batches_to_save.append((
-                    Batch(
-                        id=current_batch_id,
-                        title=current_batch_title or current_batch_id,
-                        status=current_batch_status,
-                        summary="\n".join(summary_lines) if summary_lines else None,
-                        methodology_notes="\n".join(methodology_lines) if methodology_lines else None
-                    ),
+                    {
+                        "id": current_batch_id,
+                        "title": current_batch_title or current_batch_id,
+                        "status": current_batch_status,
+                        "summary": "\n".join(summary_lines) if summary_lines else None,
+                        "methodology_notes": "\n".join(methodology_lines) if methodology_lines else None,
+                    },
                     current_batch_lines
                 ))
             current_batch_id = m.group(1).strip()
             current_batch_title = m.group(2).strip()
             raw_st = m.group(3).strip() if m.group(3) else ""
             if any(k in raw_st for k in ("停机", "halted", "⏸")):
-                current_batch_status = BatchStatus.HALTED
+                current_batch_status = "halted"
             elif any(k in raw_st for k in ("闭环", "closed", "completed", "✅")):
-                current_batch_status = BatchStatus.COMPLETED
+                current_batch_status = "completed"
             elif any(k in raw_st for k in ("进行中", "running", "🟢")):
-                current_batch_status = BatchStatus.RUNNING
+                current_batch_status = "running"
             else:
-                current_batch_status = BatchStatus.PLANNED
+                current_batch_status = "planned"
             current_batch_lines = []
         elif current_batch_id:
             if s.startswith("## ") and not s.startswith("## [DEV-"):
@@ -91,13 +87,13 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
                     elif bl.startswith("- "):
                         summary_lines.append(bl)
                 batches_to_save.append((
-                    Batch(
-                        id=current_batch_id,
-                        title=current_batch_title or current_batch_id,
-                        status=current_batch_status,
-                        summary="\n".join(summary_lines) if summary_lines else None,
-                        methodology_notes="\n".join(methodology_lines) if methodology_lines else None
-                    ),
+                    {
+                        "id": current_batch_id,
+                        "title": current_batch_title or current_batch_id,
+                        "status": current_batch_status,
+                        "summary": "\n".join(summary_lines) if summary_lines else None,
+                        "methodology_notes": "\n".join(methodology_lines) if methodology_lines else None,
+                    },
                     current_batch_lines
                 ))
                 current_batch_id = None
@@ -116,26 +112,44 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
             elif bl.startswith("- "):
                 summary_lines.append(bl)
         batches_to_save.append((
-            Batch(
-                id=current_batch_id,
-                title=current_batch_title or current_batch_id,
-                status=current_batch_status,
-                summary="\n".join(summary_lines) if summary_lines else None,
-                methodology_notes="\n".join(methodology_lines) if methodology_lines else None
-            ),
+            {
+                "id": current_batch_id,
+                "title": current_batch_title or current_batch_id,
+                "status": current_batch_status,
+                "summary": "\n".join(summary_lines) if summary_lines else None,
+                "methodology_notes": "\n".join(methodology_lines) if methodology_lines else None,
+            },
             current_batch_lines
         ))
 
     # 灌入所有批次
     latest_batch_id = None
-    for batch_obj, _ in batches_to_save:
+    batch_records = []
+    for batch_dict, _ in batches_to_save:
         if not latest_batch_id:
-            latest_batch_id = batch_obj.id
-        await db.upsert_batch(project, batch_obj)
+            latest_batch_id = batch_dict["id"]
+        rec = DataRecord(
+            project_id=project,
+            dataset_code="sys_batch",
+            doc_no=batch_dict["id"],
+            entity_name=batch_dict["title"],
+            status=batch_dict["status"],
+            amount=Decimal("0.0000"),
+            payload={
+                "summary": batch_dict["summary"],
+                "methodology_notes": batch_dict["methodology_notes"],
+            }
+        )
+        batch_records.append(rec)
         b_count += 1
+    if batch_records:
+        await db.bulk_upsert_records(project, batch_records)
 
     # 2. 解析任务、发现与待办表格
     current_table = None
+    task_records = []
+    finding_records = []
+    waiting_records = []
 
     for line in lines:
         s = line.strip()
@@ -165,26 +179,17 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
             if len(cols) >= 4 and cols[0] != "ID":
                 tid = cols[0]
                 raw_status = cols[1].lower()
-                status = TaskStatus.PLANNED
-                if "closed" in raw_status or "✅" in raw_status:
-                    status = TaskStatus.CLOSED
+                status = "planned"
+                if "closed" in raw_status or "✅" in raw_status or "merged" in raw_status:
+                    status = "closed"
                 elif "running" in raw_status or "进行中" in raw_status:
-                    status = TaskStatus.RUNNING
+                    status = "running"
                 elif "blocked" in raw_status or "⏸" in raw_status:
-                    status = TaskStatus.BLOCKED
+                    status = "blocked"
                 elif "wontfix" in raw_status:
-                    status = TaskStatus.WONTFIX
-                elif "merged" in raw_status:
-                    status = TaskStatus.CLOSED
+                    status = "wontfix"
 
-                ttype = TaskType.FIX
-                if len(cols) >= 3:
-                    raw_type = cols[2].lower()
-                    for enum_t in TaskType:
-                        if enum_t.value in raw_type:
-                            ttype = enum_t
-                            break
-
+                ttype = cols[2].lower() if len(cols) >= 3 else "fix"
                 title = cols[3] if len(cols) >= 4 else "未命名任务"
                 commit = cols[4] if len(cols) >= 5 and cols[4] else None
                 proof = None
@@ -192,23 +197,27 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
                 if notes and "报告" in notes:
                     proof = notes
 
-                # 闭环状态兜底凭据
-                if status == TaskStatus.CLOSED and not commit and not proof:
+                if status == "closed" and not commit and not proof:
                     commit = "imported_legacy"
 
                 try:
-                    task = Task(
-                        id=tid,
-                        title=title,
-                        task_type=ttype,
-                        priority=TaskPriority.P2,
+                    rec = DataRecord(
+                        project_id=project,
+                        dataset_code="sys_task",
+                        doc_no=tid,
+                        entity_name=title,
                         status=status,
-                        commit_hash=commit,
-                        proof_link=proof,
-                        notes=notes,
-                        batch_id=latest_batch_id
+                        amount=Decimal("0.0000"),
+                        payload={
+                            "task_type": ttype,
+                            "priority": "P2",
+                            "commit_hash": commit,
+                            "proof_link": proof,
+                            "notes": notes,
+                            "batch_id": latest_batch_id,
+                        }
                     )
-                    await db.upsert_task(project, task)
+                    task_records.append(rec)
                     t_count += 1
                 except Exception:
                     pass
@@ -218,35 +227,39 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
             if len(cols) >= 4 and cols[0] != "ID":
                 fid = cols[0]
                 source = cols[1] if len(cols) >= 2 else "audit"
-                prio = FindingSeverity.P2
-                if len(cols) >= 3 and cols[2] in ("P1", "P2", "P3"):
-                    prio = FindingSeverity(cols[2])
+                prio = cols[2] if len(cols) >= 3 and cols[2] in ("P1", "P2", "P3") else "P2"
 
                 raw_status = cols[3].lower() if len(cols) >= 4 else "open"
-                f_status = FindingStatus.OPEN
+                f_status = "open"
                 if "fixed" in raw_status or "✅" in raw_status:
-                    f_status = FindingStatus.FIXED
+                    f_status = "fixed"
                 elif "blocked" in raw_status or "⏸" in raw_status:
-                    f_status = FindingStatus.BLOCKED
+                    f_status = "blocked"
                 elif "wontfix" in raw_status:
-                    f_status = FindingStatus.WONTFIX
+                    f_status = "wontfix"
                 elif "infix" in raw_status:
-                    f_status = FindingStatus.INFIX
+                    f_status = "infix"
 
                 resolution = cols[4] if len(cols) >= 5 else None
                 notes = cols[5] if len(cols) >= 6 else None
                 summary = notes if notes else f"{fid} 发现项"
 
                 try:
-                    finding = Finding(
-                        id=fid,
-                        source=source,
-                        severity=prio,
+                    rec = DataRecord(
+                        project_id=project,
+                        dataset_code="sys_finding",
+                        doc_no=fid,
+                        entity_name=summary,
                         status=f_status,
-                        summary=summary,
-                        resolution=resolution
+                        amount=Decimal("0.0000"),
+                        payload={
+                            "source": source,
+                            "severity": prio,
+                            "resolution": resolution,
+                            "summary": summary,
+                        }
                     )
-                    await db.upsert_finding(project, finding)
+                    finding_records.append(rec)
                     f_count += 1
                 except Exception:
                     pass
@@ -255,21 +268,34 @@ async def import_devlog_markdown(project: str, markdown_text: str) -> ParseSumma
             # | ID | 类别 | 状态 | 事项 |
             if len(cols) >= 4 and cols[0] != "ID":
                 wid = cols[0]
-                cat = WaitingCategory.USER if "user" in cols[1].lower() else WaitingCategory.CLOSING
-                w_status = WaitingStatus.CLOSED if "closed" in cols[2].lower() else WaitingStatus.OPEN
+                cat = "user" if "user" in cols[1].lower() else "closing"
+                w_status = "closed" if "closed" in cols[2].lower() else "open"
                 desc = cols[3]
 
                 try:
-                    waiting = Waiting(
-                        id=wid,
-                        category=cat,
+                    rec = DataRecord(
+                        project_id=project,
+                        dataset_code="sys_waiting",
+                        doc_no=wid,
+                        entity_name=desc,
                         status=w_status,
-                        description=desc
+                        amount=Decimal("0.0000"),
+                        payload={
+                            "category": cat,
+                            "description": desc,
+                        }
                     )
-                    await db.upsert_waiting(project, waiting)
+                    waiting_records.append(rec)
                     w_count += 1
                 except Exception:
                     pass
+
+    if task_records:
+        await db.bulk_upsert_records(project, task_records)
+    if finding_records:
+        await db.bulk_upsert_records(project, finding_records)
+    if waiting_records:
+        await db.bulk_upsert_records(project, waiting_records)
 
     return ParseSummary(tasks_imported=t_count, findings_imported=f_count, waitings_imported=w_count, batches_imported=b_count)
 
@@ -282,11 +308,23 @@ def _clean_table_cell(text: str | None) -> str:
 
 
 async def export_devlog_markdown(project: str, max_items: int = 10000) -> str:
-    """从数据库生成格式兼容的标准 DEVLOG.md (OPT-06: 消除硬编码截断，支持全量导出)。"""
-    tasks = await db.query_tasks(project, limit=max_items)
-    findings = await db.query_findings(project, limit=max_items)
-    waitings = await db.query_waitings(project, limit=max_items)
-    batches = await db.query_batches(project, limit=max_items)
+    """从数据库生成格式兼容的标准 DEVLOG.md (直接消费 shared.records 通用事实)。"""
+    # 兼容 sys_task 与 tasks 编码
+    tasks = await db.query_records(project_id=project, dataset_code="sys_task", limit=max_items)
+    if not tasks:
+        tasks = await db.query_records(project_id=project, dataset_code="tasks", limit=max_items)
+
+    findings = await db.query_records(project_id=project, dataset_code="sys_finding", limit=max_items)
+    if not findings:
+        findings = await db.query_records(project_id=project, dataset_code="findings", limit=max_items)
+
+    waitings = await db.query_records(project_id=project, dataset_code="sys_waiting", limit=max_items)
+    if not waitings:
+        waitings = await db.query_records(project_id=project, dataset_code="waitings", limit=max_items)
+
+    batches = await db.query_records(project_id=project, dataset_code="sys_batch", limit=max_items)
+    if not batches:
+        batches = await db.query_records(project_id=project, dataset_code="batches", limit=max_items)
 
     lines = [
         f"# {project.upper()} 开发日志 (DEVLOG) — 项目唯一开发日志与任务台账",
@@ -306,12 +344,20 @@ async def export_devlog_markdown(project: str, max_items: int = 10000) -> str:
         "|---|---|---|---|---|---|",
     ]
 
+    def _v(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
     for t in tasks:
-        st_icon = "closed" if t.status == TaskStatus.CLOSED else t.status.value
-        commit_str = _clean_table_cell(t.commit_hash)
-        title_str = _clean_table_cell(t.title)
-        proof_or_notes = _clean_table_cell(t.proof_link or t.notes)
-        lines.append(f"| {t.id} | {st_icon} | {t.task_type.value} | {title_str} | {commit_str} | {proof_or_notes} |")
+        p = _v(t, "payload") or {}
+        st = _v(t, "status")
+        st_icon = "closed" if st == "closed" else st
+        commit_str = _clean_table_cell(p.get("commit_hash"))
+        title_str = _clean_table_cell(_v(t, "entity_name"))
+        proof_or_notes = _clean_table_cell(p.get("proof_link") or p.get("notes"))
+        ttype = p.get("task_type", "fix")
+        lines.append(f"| {_v(t, 'doc_no')} | {st_icon} | {ttype} | {title_str} | {commit_str} | {proof_or_notes} |")
 
     lines.extend([
         "",
@@ -324,9 +370,12 @@ async def export_devlog_markdown(project: str, max_items: int = 10000) -> str:
     ])
 
     for f in findings:
-        res = _clean_table_cell(f.resolution)
-        sum_str = _clean_table_cell(f.summary)
-        lines.append(f"| {f.id} | {f.source} | {f.severity.value} | {f.status.value} | {res} | {sum_str} |")
+        p = _v(f, "payload") or {}
+        res = _clean_table_cell(p.get("resolution"))
+        sum_str = _clean_table_cell(p.get("summary") or _v(f, "entity_name"))
+        src = p.get("source", "audit")
+        sev = p.get("severity", "P2")
+        lines.append(f"| {_v(f, 'doc_no')} | {src} | {sev} | {_v(f, 'status')} | {res} | {sum_str} |")
 
     lines.extend([
         "",
@@ -339,22 +388,26 @@ async def export_devlog_markdown(project: str, max_items: int = 10000) -> str:
     ])
 
     for w in waitings:
-        desc_str = _clean_table_cell(w.description)
-        lines.append(f"| {w.id} | {w.category.value} | {w.status.value} | {desc_str} |")
+        p = _v(w, "payload") or {}
+        cat = p.get("category", "user")
+        desc_str = _clean_table_cell(p.get("description") or _v(w, "entity_name"))
+        lines.append(f"| {_v(w, 'doc_no')} | {cat} | {_v(w, 'status')} | {desc_str} |")
 
     if batches:
         for b in batches:
-            st_text = "⏸ 停机保存态" if b.status == BatchStatus.HALTED else "✅ 闭环" if b.status == BatchStatus.COMPLETED else "🟢 进行中" if b.status == BatchStatus.RUNNING else "🔵 规划中"
+            p = _v(b, "payload") or {}
+            st = _v(b, "status")
+            st_text = "⏸ 停机保存态" if st == "halted" else "✅ 闭环" if st in ("completed", "closed") else "🟢 进行中" if st == "running" else "🔵 规划中"
             lines.extend([
                 "",
                 "---",
                 "",
-                f"## [{b.id}] {b.title} — {st_text}",
+                f"## [{_v(b, 'doc_no')}] {_v(b, 'entity_name')} — {st_text}",
                 "",
             ])
-            if b.summary:
-                lines.append(f"{b.summary}")
-            if b.methodology_notes:
-                lines.append(f"{b.methodology_notes}")
+            if p.get("summary"):
+                lines.append(f"{p['summary']}")
+            if p.get("methodology_notes"):
+                lines.append(f"{p['methodology_notes']}")
 
     return "\n".join(lines) + "\n"

@@ -1,7 +1,7 @@
-"""Logbook 研发人员极简 CLI 终端看板工具
+"""Logbook 研发人员极简 CLI 终端看板工具 - 0.8.0 极简正典
 
 命令体系:
-- logbook status [project]     : 打印低噪音 ANSI 任务与阻塞项看板
+- logbook status [project]     : 打印低噪音 ANSI 任务与阻塞项看板 (直接读取 shared.records)
 - logbook doctor               : 检查数据库、SNTP 时钟漂移、内存占用与 Schema 健康度
 - logbook show <id>            : 查阅指定任务详情与时序审计
 - logbook import <file>        : 从 Markdown DEVLOG.md 逆向解析灌库
@@ -17,10 +17,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from .db import db
-from .models import Task, TaskStatus, TaskPriority, TaskType
 from .time_sync import check_clock_drift, get_beijing_now, format_beijing
 from .converter import import_devlog_markdown, export_devlog_markdown
-
 from .negotiation import validate_and_negotiate_project, ProjectNegotiationError
 
 console = Console()
@@ -65,9 +63,13 @@ def status(project: str):
             console.print(f"[bold red]{e}[/bold red]")
             return
 
-        tasks = await db.query_tasks(proj, limit=30)
-        waitings = await db.query_waitings(proj, status=None)
-        findings = await db.query_findings(proj, limit=20)
+        tasks = await db.query_records(proj, dataset_code="sys_task", limit=30)
+        if not tasks:
+            tasks = await db.query_records(proj, dataset_code="tasks", limit=30)
+
+        waitings = await db.query_records(proj, dataset_code="sys_waiting", limit=30)
+        if not waitings:
+            waitings = await db.query_records(proj, dataset_code="waitings", limit=30)
 
         # 1. 任务看板
         table = Table(title=f"【{proj.upper()} 任务台账 (最新 30 项)】", show_header=True, header_style="bold cyan")
@@ -77,32 +79,41 @@ def status(project: str):
         table.add_column("类型", width=10)
         table.add_column("标题", width=40)
         table.add_column("Commit", width=12)
-        table.add_column("用时", width=10)
+        table.add_column("更新时间", width=18)
+
+        def _v(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
 
         for t in tasks:
-            st_style = "green" if t.status == TaskStatus.CLOSED else "yellow" if t.status == TaskStatus.RUNNING else "red" if t.status == TaskStatus.BLOCKED else "white"
-            dur_str = f"{t.duration_seconds}s" if t.duration_seconds is not None else "-"
+            p = _v(t, "payload") or {}
+            st = _v(t, "status")
+            st_style = "green" if st == "closed" else "yellow" if st == "running" else "red" if st == "blocked" else "white"
+            commit_h = p.get("commit_hash") or "-"
             table.add_row(
-                t.id,
-                f"[{st_style}]{t.status.value}[/{st_style}]",
-                t.priority.value,
-                t.task_type.value,
-                t.title[:38],
-                (t.commit_hash[:10] if t.commit_hash else "-"),
-                dur_str
+                _v(t, "doc_no"),
+                f"[{st_style}]{st}[/{st_style}]",
+                p.get("priority", "P2"),
+                p.get("task_type", "fix"),
+                (_v(t, "entity_name") or "-")[:38],
+                commit_h[:10] if commit_h != "-" else "-",
+                format_beijing(_v(t, "updated_at"))
             )
         console.print(table)
 
         # 2. 阻塞项
-        open_waitings = [w for w in waitings if w.status.value == "open"]
+        open_waitings = [w for w in waitings if _v(w, "status") == "open"]
         if open_waitings:
-            w_table = Table(title=f"【{project.upper()} 待办与待用户裁决 ({len(open_waitings)} 项)】", show_header=True, header_style="bold red")
+            w_table = Table(title=f"【{proj.upper()} 待办与待用户裁决 ({len(open_waitings)} 项)】", show_header=True, header_style="bold red")
             w_table.add_column("ID", style="bold red", width=12)
             w_table.add_column("类别", width=10)
             w_table.add_column("事项描述", width=60)
             w_table.add_column("阻塞时刻", width=20)
             for w in open_waitings:
-                w_table.add_row(w.id, w.category.value, w.description, format_beijing(w.blocked_at))
+                p = _v(w, "payload") or {}
+                desc = p.get("description") or _v(w, "entity_name") or "-"
+                w_table.add_row(_v(w, "doc_no"), p.get("category", "user"), desc, format_beijing(_v(w, "updated_at")))
             console.print(w_table)
 
     run_async(_status())
@@ -150,23 +161,32 @@ def doctor():
 def show(task_id: str, project: str):
     """查阅指定任务详情。"""
     async def _show():
-        task = await db.get_task(project, task_id)
-        if not task:
+        tasks = await db.query_records(project=project, dataset_code="sys_task", doc_no=task_id, limit=1)
+        if not tasks:
+            tasks = await db.query_records(project=project, dataset_code="tasks", doc_no=task_id, limit=1)
+        if not tasks:
             console.print(f"[red]未找到任务 {task_id} (项目: {project})[/red]")
             return
 
+        task = tasks[0]
+        def _v(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        p = _v(task, "payload") or {}
         panel_content = f"""
-[bold yellow]ID:[/bold yellow] {task.id}
-[bold]标题:[/bold] {task.title}
-[bold]状态:[/bold] {task.status.value} (优先级: {task.priority.value}, 类型: {task.task_type.value})
-[bold]Commit 指针:[/bold] {task.commit_hash or '-'}
-[bold]验证报告:[/bold] {task.proof_link or '-'}
-[bold]耗时:[/bold] {f'{task.duration_seconds} 秒' if task.duration_seconds is not None else '-'}
-[bold]开工时间:[/bold] {format_beijing(task.started_at)}
-[bold]闭环时间:[/bold] {format_beijing(task.closed_at)}
-[bold]备注:[/bold] {task.notes or '-'}
+[bold yellow]ID:[/bold yellow] {_v(task, 'doc_no')}
+[bold]标题:[/bold] {_v(task, 'entity_name')}
+[bold]状态:[/bold] {_v(task, 'status')} (优先级: {p.get('priority', 'P2')}, 类型: {p.get('task_type', 'fix')})
+[bold]Commit 指针:[/bold] {p.get('commit_hash') or '-'}
+[bold]验证报告:[/bold] {p.get('proof_link') or '-'}
+[bold]耗时:[/bold] {f"{p.get('duration_seconds')} 秒" if p.get('duration_seconds') is not None else '-'}
+[bold]更新时间:[/bold] {format_beijing(_v(task, 'updated_at'))}
+[bold]创建时间:[/bold] {format_beijing(_v(task, 'created_at'))}
+[bold]备注:[/bold] {p.get('notes') or '-'}
 """
-        console.print(Panel(panel_content.strip(), title=f"任务详情: {project}.{task.id}", border_style="green"))
+        console.print(Panel(panel_content.strip(), title=f"任务详情: {project}.{_v(task, 'doc_no')}", border_style="green"))
 
     run_async(_show())
 

@@ -16,7 +16,7 @@ from logbook.negotiation import (
     detect_current_workspace_project
 )
 from logbook.mcp_server import (
-    task_upsert,
+    record_upsert,
     get_active_tasks_resource,
     prompt_start_batch,
     prompt_record_devlog
@@ -45,10 +45,11 @@ async def test_negotiation_typo_correction():
 async def test_mcp_tool_negotiation_response():
     """测试 Agent 调用 MCP 工具时输错项目名获得结构化自愈指引。"""
     # 模拟 Agent 发送错误指令 project='briz'
-    resp = await task_upsert(
+    resp = await record_upsert(
         project="briz",
-        id="F99",
-        title="测试打错项目名",
+        dataset_code="sys_task",
+        doc_no="F99",
+        entity_name="测试打错项目名",
         status="running"
     )
 
@@ -63,10 +64,11 @@ async def test_mcp_tool_negotiation_response():
     curr_ws = detect_current_workspace_project()
     if curr_ws in ("logbook", "bpfio/logbook"):
         # 在 logbook 目录下尝试写入 logbook 正确项目
-        correct_resp = await task_upsert(
+        correct_resp = await record_upsert(
             project="logbook",
-            id="L99",
-            title="测试自愈写入",
+            dataset_code="sys_task",
+            doc_no="L99",
+            entity_name="测试自愈写入",
             status="running"
         )
         assert correct_resp["success"] is True
