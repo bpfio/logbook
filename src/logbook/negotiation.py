@@ -44,7 +44,7 @@ class ProjectNegotiationError(ValueError):
             "message": self.message
         }
         if self.action_required == "PROJECT_INIT_NEEDED":
-            data["guidance"] = f"可调用 project_init(repo='{self.requested_project}', title='<项目名称>') 一键初始化专属台账。"
+            data["guidance"] = f"可调用 project_manage(action='init', project='{self.requested_project}', title='<项目名称>') 一键初始化专属台账。"
         return data
 
 
@@ -154,7 +154,7 @@ async def validate_and_negotiate_project(
         msg = (
             f"【Logbook 开户引导】项目 '{req}' 尚未在 Logbook 中开立台账空间。\n"
             f"• 当前已注册项目: {active_slugs}\n"
-            f"如这是一个全新项目，请调用 MCP 原语 'project_init(repo=\"{req}\", title=\"<项目全称>\")' 完成一键建库；\n"
+            f"如这是一个全新项目，请调用 MCP 原语 'project_manage(action=\"init\", project=\"{req}\", title=\"<项目全称>\")' 完成一键建库；\n"
             f"建库完成后即可正常开展任务记录与排查手记沉淀。"
         )
         raise ProjectNegotiationError(

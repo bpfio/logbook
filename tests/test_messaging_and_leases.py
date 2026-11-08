@@ -101,13 +101,13 @@ def test_agent_message_ip_fields_and_validation():
     msg_custom = AgentMessageSend(
         project_id="logbook",
         from_agent="codebuddy",
-        from_ip="192.168.1.100",
+        from_ip="192.0.2.100",
         to_agent="zcode",
         to_ip="2001:0db8:85a3:0000:0000:8a2e:0370:7334",
         subject="自定义IP",
         content="内容"
     )
-    assert msg_custom.from_ip == "192.168.1.100"
+    assert msg_custom.from_ip == "192.0.2.100"
     assert msg_custom.to_ip == "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
 
     # 3. 超过 45 字符校验拒绝
@@ -148,9 +148,9 @@ async def test_personal_mailbox_resources(monkeypatch):
             id=101,
             project_id="brix",
             from_agent="zcode",
-            from_ip="192.168.1.22",
+            from_ip="192.0.2.22",
             to_agent="agy",
-            to_ip="192.168.1.30",
+            to_ip="192.0.2.30",
             subject="联调对讲测试",
             content="这是一封测试信件",
             task_id="L-MSG-1",
@@ -166,10 +166,10 @@ async def test_personal_mailbox_resources(monkeypatch):
 
     monkeypatch.setattr(db, "get_agent_inbox", mock_get_agent_inbox)
 
-    # 1. 验证全局个人信箱资源返回包含真实局域网 IP
+    # 1. 验证全局个人信箱资源返回包含测试 IP
     inbox_md = await get_agent_personal_inbox_resource("agy")
     assert "Agent [agy] 个人信箱" in inbox_md
-    assert "192.168.1.22" in inbox_md
+    assert "192.0.2.22" in inbox_md
     assert "101" in inbox_md
     assert "联调对讲测试" in inbox_md
 
@@ -180,7 +180,7 @@ async def test_personal_mailbox_resources(monkeypatch):
 
     proj_md = await get_agent_project_mailbox_resource("brix", "agy")
     assert "项目 [brix] Agent [agy] 专属信箱" in proj_md
-    assert "192.168.1.22" in proj_md
+    assert "192.0.2.22" in proj_md
     assert "101" in proj_md
 
     denied = await get_agent_personal_inbox_resource("zcode")

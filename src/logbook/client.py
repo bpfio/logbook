@@ -160,14 +160,13 @@ class LogbookClient:
         use_single_flight: bool = True,
     ) -> dict[str, Any]:
         """统一调用 MCP 工具。自动对只读查询使用 Single-Flight 削峰与退避重试。"""
-        # 只读高频操作自动参与 Single-Flight 合并 (OPT-33: 纳入 project_manage 与 dataset_manage 只读动作)
+        # 只读高频操作自动参与 Single-Flight 合并 (统一支持 0.8.0 核心工具只读动作)
         is_read_query = (
-            tool_name in (
-                "record_query", "record_search", "record_stats", "logbook_brief",
-                "message_inbox", "lease_query", "group_query", "principal_query",
-            )
+            tool_name in ("record_query", "record_search", "record_stats", "logbook_brief", "message_inbox")
             or (tool_name == "project_manage" and arguments.get("action") in ("list", "query"))
-            or (tool_name == "dataset_manage" and arguments.get("action") == "query")
+            or (tool_name == "dataset_manage" and arguments.get("action") in ("list", "query"))
+            or (tool_name == "lease_manage" and arguments.get("action") in ("query", "list"))
+            or (tool_name == "group_manage" and arguments.get("action") in ("list_groups", "list_principals", "query"))
         )
 
         async def _do_call() -> dict[str, Any]:

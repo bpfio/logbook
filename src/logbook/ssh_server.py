@@ -601,7 +601,18 @@ async def start_sse_server(host: str = "0.0.0.0", port: int = 8000, server_holde
                 return JSONResponse({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "Missing uri"}}, status_code=400)
             try:
                 res_content = await mcp.read_resource(uri) if hasattr(mcp, "read_resource") else ""
-                text_content = getattr(res_content, "text", str(res_content)) if hasattr(res_content, "text") else str(res_content)
+                if isinstance(res_content, list):
+                    texts = []
+                    for c in res_content:
+                        t = getattr(c, "content", getattr(c, "text", str(c)))
+                        texts.append(str(t))
+                    text_content = "\n".join(texts)
+                elif hasattr(res_content, "content"):
+                    text_content = str(getattr(res_content, "content"))
+                elif hasattr(res_content, "text"):
+                    text_content = str(getattr(res_content, "text"))
+                else:
+                    text_content = str(res_content)
                 return JSONResponse({
                     "jsonrpc": "2.0",
                     "id": req_id,

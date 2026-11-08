@@ -42,7 +42,7 @@ def test_prompt_conduct_research_five_elements_and_discipline():
     assert "tradeoffs" in p
     assert "decision" in p
     assert "references" in p
-    assert "research_record" in p
+    assert "record_upsert" in p
 
 
 def test_prompt_agent_collaborate_workflow():
@@ -51,22 +51,22 @@ def test_prompt_agent_collaborate_workflow():
     assert "bpfio/logbook" in p
     assert "src/logbook/db.py" in p
     assert "zcode" in p
-    assert "lease_acquire" in p
+    assert "lease_manage" in p
     assert "message_send" in p
-    assert "lease_release" in p
 
 
 def test_existing_prompts_intact():
     """验证既有规程模板 (start_batch, record_devlog) 保持完好。"""
     p1 = prompt_start_batch("logbook", "DEV-01")
     assert "AGENTS.md" in p1
-    assert "task_upsert" in p1
+    assert "record_upsert" in p1
 
     p2 = prompt_record_devlog("logbook", "T101")
     assert "故障现象 (Problem)" in p2
     assert "根因定位 (Root Cause)" in p2
     assert "解决方案 (Solution)" in p2
     assert "验证证据 (Evidence)" in p2
+    assert "record_upsert" in p2
 
 
 # =============================================================================
@@ -88,7 +88,7 @@ async def test_get_active_leases_resource_empty_and_populated():
             id=1,
             project_id="bpfio/logbook",
             agent_name="codebuddy",
-            agent_ip="192.168.1.68",
+            agent_ip="192.0.2.1",
             file_path="src/logbook/db.py",
             lease_expires_at=now,
             created_at=now
@@ -98,7 +98,7 @@ async def test_get_active_leases_resource_empty_and_populated():
             assert "# 项目 [bpfio/logbook] 活跃文件租约看板" in out_populated
             assert "src/logbook/db.py" in out_populated
             assert "codebuddy" in out_populated
-            assert "192.168.1.68" in out_populated
+            assert "192.0.2.1" in out_populated
 
 
 @pytest.mark.asyncio
@@ -110,33 +110,72 @@ async def test_get_recent_researches_resource_empty_and_populated():
             out_empty = await get_recent_researches_resource("bpfio/logbook")
             assert "当前暂无技术调研" in out_empty
 
-        # 2. 存在调研记录场景
+        # 2. 存在调研记录场景 (以真实字典结构测试)
         now = datetime.now(timezone.utc)
-        fake_research = DataRecord(
-            project_id="bpfio/logbook",
-            dataset_code="sys_research",
-            doc_no="RES-10",
-            entity_name="PostgreSQL 18 vs SQLite 并发评测",
-            status="completed",
-            payload={
+        fake_research = {
+            "project_id": "bpfio/logbook",
+            "dataset_code": "sys_research",
+            "doc_no": "RES-10",
+            "entity_name": "PostgreSQL 18 vs SQLite 并发评测",
+            "status": "completed",
+            "payload": {
                 "category": "architecture",
                 "author": "agy",
-                "agent_ip": "192.168.1.68",
+                "agent_ip": "192.0.2.1",
                 "objective": "评估低内存边缘 NAS 下的数据库选型",
                 "market_landscape": "SQLite 易写锁; PG18 支持高并发与原生向量",
                 "tradeoffs": "PG18 需 48MB 常驻内存; SQLite 无法满足跨 Agent 并发写",
                 "decision": "选用 PG18 容器化部署",
                 "references": "https://postgresql.org",
             },
-            created_at=now,
-            updated_at=now
-        )
+            "created_at": now,
+            "updated_at": now
+        }
         with patch("logbook.mcp_server.db.query_records", new=AsyncMock(return_value=[fake_research])):
             out_pop = await get_recent_researches_resource("bpfio/logbook")
             assert "架构调研与技术决策快照" in out_pop
             assert "PostgreSQL 18 vs SQLite 并发评测" in out_pop
             assert "选用 PG18 容器化部署" in out_pop
-            assert "192.168.1.68" in out_pop
+            assert "192.0.2.1" in out_pop
+
+
+@pytest.mark.asyncio
+async def test_get_active_tasks_and_rules_resource_with_dicts():
+    """测试活跃任务与工程铁律端点消费字典记录 (防 AttributeError 回归)。"""
+    with patch("logbook.mcp_server.validate_and_negotiate_project", new=AsyncMock(return_value="bpfio/logbook")):
+        now = datetime.now(timezone.utc)
+        fake_tasks = [
+            {
+                "doc_no": "T-101",
+                "entity_name": "核心功能开发",
+                "status": "running",
+                "payload": {"priority": "P1"},
+                "updated_at": now,
+            }
+        ]
+        with patch("logbook.mcp_server.db.query_records", new=AsyncMock(return_value=fake_tasks)):
+            out_tasks = await get_active_tasks_resource("bpfio/logbook")
+            assert "活跃任务看板" in out_tasks
+            assert "T-101" in out_tasks
+            assert "P1" in out_tasks
+
+        fake_rules = [
+            {
+                "doc_no": "RULE-01",
+                "entity_name": "禁止重复造轮子",
+                "payload": {
+                    "summary": "调研先行",
+                    "bad_practice": "自己手写正则",
+                    "good_practice": "选用成熟库",
+                    "constraints": "无",
+                }
+            }
+        ]
+        with patch("logbook.mcp_server.db.query_records", new=AsyncMock(return_value=fake_rules)):
+            out_rules = await get_engineering_rules_resource()
+            assert "团队统一工程红线与架构铁律" in out_rules
+            assert "RULE-01" in out_rules
+            assert "禁止重复造轮子" in out_rules
 
 
 @pytest.mark.asyncio

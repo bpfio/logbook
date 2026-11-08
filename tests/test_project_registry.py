@@ -116,7 +116,7 @@ async def test_negotiation_dual_track_and_init_guide():
 
     err = exc_info.value
     assert err.action_required == "PROJECT_INIT_NEEDED"
-    assert "project_init" in err.message
+    assert "project_manage" in err.message or "project_init" in err.message
 
 
 @pytest.mark.asyncio

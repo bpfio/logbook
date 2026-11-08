@@ -133,7 +133,7 @@ def test_ssh_mcp_latency(target_host: str = "127.0.0.1"):
     }
 
 
-def test_negotiation_engine(target_host: str = "192.168.1.68"):
+def test_negotiation_engine(target_host: str = "127.0.0.1"):
     # 模糊测试：传递拼写错误的 'briz'
     p = subprocess.Popen(
         ["ssh", "-o", "BatchMode=yes", f"sysadmin@{target_host}", "logbook status briz"],

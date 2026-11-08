@@ -272,6 +272,13 @@ def detect_caller_ip(explicit_ip: str | None = None) -> str:
 # 一、 Resources (只读上下文面 - 零开销挂载)
 # =============================================================================
 
+def _v(obj: Any, key: str, default: Any = None) -> Any:
+    """通用实体与字典安全属性提取器。"""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 @mcp.resource("logbook://{project}/tasks/active")
 async def get_active_tasks_resource(project: str) -> str:
     """提供指定项目当前所有活跃 (running) 与阻塞 (blocked) 任务的只读 Markdown 快照。"""
@@ -280,13 +287,13 @@ async def get_active_tasks_resource(project: str) -> str:
         tasks = await db.query_records(proj, dataset_code="sys_task", limit=50)
         if not tasks:
             tasks = await db.query_records(proj, dataset_code="tasks", limit=50)
-        active_tasks = [t for t in tasks if t.status in ("running", "blocked")]
+        active_tasks = [t for t in tasks if _v(t, "status") in ("running", "blocked")]
         if not active_tasks:
             return f"项目 [{proj}] 当前无活跃或阻塞中的任务。"
         lines = [f"# 项目 [{proj}] 活跃任务看板", "", "| ID | 状态 | 优先级 | 标题 | 开工时间 |", "|---|---|---|---|---|"]
         for t in active_tasks:
-            p = t.payload or {}
-            lines.append(f"| {t.doc_no} | {t.status} | {p.get('priority', 'P2')} | {t.entity_name} | {format_beijing(t.updated_at)} |")
+            p = _v(t, "payload") or {}
+            lines.append(f"| {_v(t, 'doc_no')} | {_v(t, 'status')} | {p.get('priority', 'P2')} | {_v(t, 'entity_name')} | {format_beijing(_v(t, 'updated_at'))} |")
         return "\n".join(lines)
     except Exception as e:
         return f"读取活跃任务失败: {e}"
@@ -304,8 +311,8 @@ async def get_open_waitings_resource(project: str) -> str:
             return f"项目 [{proj}] 当前无阻塞待办项。"
         lines = [f"# 项目 [{proj}] 未决待办与裁决项", "", "| ID | 类别 | 事项描述 | 阻塞时刻 |", "|---|---|---|---|"]
         for w in waitings:
-            p = w.payload or {}
-            lines.append(f"| {w.doc_no} | {p.get('category', 'user')} | {p.get('description') or w.entity_name} | {format_beijing(w.updated_at)} |")
+            p = _v(w, "payload") or {}
+            lines.append(f"| {_v(w, 'doc_no')} | {p.get('category', 'user')} | {p.get('description') or _v(w, 'entity_name')} | {format_beijing(_v(w, 'updated_at'))} |")
         return "\n".join(lines)
     except Exception as e:
         return f"读取阻塞待办失败: {e}"
@@ -326,7 +333,7 @@ async def get_active_leases_resource(project: str) -> str:
             "|---|---|---|---|"
         ]
         for l in leases:
-            lines.append(f"| {l.file_path} | {l.agent_name} | {l.agent_ip} | {format_beijing(l.lease_expires_at)} |")
+            lines.append(f"| {_v(l, 'file_path')} | {_v(l, 'agent_name')} | {_v(l, 'agent_ip')} | {format_beijing(_v(l, 'lease_expires_at'))} |")
         return "\n".join(lines)
     except Exception as e:
         return f"读取活跃文件租约失败: {e}"
@@ -344,15 +351,15 @@ async def get_recent_researches_resource(project: str) -> str:
             return f"项目 [{proj}] 当前暂无技术调研与架构选型记录。"
         lines = [f"# 项目 [{proj}] 架构调研与技术决策快照 (最近 10 项)", ""]
         for r in researches:
-            p = r.payload or {}
+            p = _v(r, "payload") or {}
             lines.extend([
-                f"## [{p.get('category', 'general')}] {r.entity_name} ({r.status})",
+                f"## [{p.get('category', 'general')}] {_v(r, 'entity_name')} ({_v(r, 'status')})",
                 f"- **调研目的**: {p.get('objective', '-')}",
                 f"- **业界现状**: {p.get('market_landscape', '-')}",
                 f"- **对抗成本与权衡**: {p.get('tradeoffs', '-')}",
                 f"- **选型决策**: {p.get('decision', '-')}",
                 f"- **权威参考**: {p.get('references', '-')}",
-                f"- **作者/节点**: {p.get('author', 'agy')} ({p.get('agent_ip', '未知 IP')}) | 归档时间: {format_beijing(r.created_at)}",
+                f"- **作者/节点**: {p.get('author', 'agy')} ({p.get('agent_ip', '未知 IP')}) | 归档时间: {format_beijing(_v(r, 'created_at'))}",
                 ""
             ])
         return "\n".join(lines)
@@ -464,7 +471,7 @@ async def get_projects_resource() -> str:
             return "当前暂无已注册项目。"
         lines = ["# Logbook 已注册项目中心", "", "| Git 仓库坐标 | 物理 Schema | 项目全称 |", "|---|---|---|"]
         for p in projs:
-            lines.append(f"| {p.slug} | {p.schema_name} | {p.title} |")
+            lines.append(f"| {_v(p, 'slug')} | {_v(p, 'schema_name')} | {_v(p, 'title')} |")
         return "\n".join(lines)
     except Exception as e:
         return f"读取项目列表失败: {e}"
@@ -479,9 +486,9 @@ async def get_engineering_rules_resource() -> str:
             return "当前暂无架构铁律记录。"
         lines = ["# 团队统一工程红线与架构铁律 (SSOT)", ""]
         for r in rules:
-            p = r.payload or {}
+            p = _v(r, "payload") or {}
             lines.extend([
-                f"## [{r.doc_no}] {r.entity_name}",
+                f"## [{_v(r, 'doc_no')}] {_v(r, 'entity_name')}",
                 f"- **核心原则**: {p.get('summary', '-')}",
                 f"- **错误示范**: {p.get('bad_practice', '-')}",
                 f"- **正确做法**: {p.get('good_practice', '-')}",
@@ -552,7 +559,7 @@ def prompt_start_batch(project: str, batch_id: str) -> str:
     return f"""你现在正在执行项目 [{project}] 的研发批次 [{batch_id}]。
 请严格执行 AGENTS.md 研发纪律：
 1. 【行前必读】：开工前必须先查询当前所有未结任务与最新状态；
-2. 【状态推进】：开工时必须调用 task_upsert 将目标任务标记为 running；
+2. 【状态推进】：开工时必须调用 record_upsert(project='{project}', dataset_code='sys_task', doc_no=..., status='running') 将目标任务标记为 running；
 3. 【证据闭环】：办结 (closed) 时必须提交真实的 commit_hash 或实测报告指针，严禁虚假闭环；
 4. 【红线铁律】：方案先行，执行前必须经用户显式批准，严禁先斩后奏。"""
 
@@ -566,7 +573,7 @@ def prompt_record_devlog(project: str, task_id: str) -> str:
 - 【根因定位 (Root Cause)】：机理分析，穿透至代码行或系统内核
 - 【解决方案 (Solution)】：明确修复逻辑与架构重构
 - 【验证证据 (Evidence)】：复现与修复后的实测比对输出
-请整理完成后调用 devlog_record 工具入库。"""
+请整理完成后调用 record_upsert(project='{project}', dataset_code='sys_devlog', doc_no=...) 工具入库。"""
 
 
 @mcp.prompt("conduct_research")
@@ -578,7 +585,7 @@ def prompt_conduct_research(project: str, topic: str) -> str:
 2. 【评估对抗成本】：技术选型不仅看优势，必须深入评估我们要对抗该组件的什么默认行为 (如线程模型、内存开销、上下文切换等)，列出对抗代价；
 3. 【0/1 与 1-100 证据纪律】：有良率/指标数据即证明产线或能力存在 (0/1 跨越)，质量优劣是量变指标 (1-100 提升)，两者不得混淆；
 4. 【沉淀五要素】：输出必须包含 目标与背景 (objective)、市场现状与选型清单 (market_landscape)、优劣权衡与对抗成本 (tradeoffs)、最终选型决策 (decision)、权威参考 (references)；
-5. 【入库归档】：调研梳理完毕后，必须调用 research_record 工具持久化入库，作为全团队知识底座。"""
+5. 【入库归档】：调研梳理完毕后，必须调用 record_upsert(project='{project}', dataset_code='sys_research', doc_no=...) 工具持久化入库，作为全团队知识底座。"""
 
 
 @mcp.prompt("agent_collaborate")
@@ -586,10 +593,10 @@ def prompt_agent_collaborate(project: str, target_file: str, partner_agent: str)
     """跨 Agent 协同作业规程：引导排他软锁申请与对讲信件联动。"""
     return f"""你现在正准备在项目 [{project}] 中修改核心代码文件 [{target_file}]，并与伙伴 [{partner_agent}] 协同作业。
 请严格执行多 Agent 协同正典：
-1. 【排他锁抢占】：在修改前必须先调用 lease_acquire(project='{project}', file_path='{target_file}') 申请独占租约；
+1. 【排他锁抢占】：在修改前必须先调用 lease_manage(action='acquire', project='{project}', file_path='{target_file}') 申请独占租约；
 2. 【租约冲突规避】：若抢占失败 (返回锁定中)，必须等待或联系持有者释放，严禁强行覆盖写代码；
 3. 【对讲通知】：抢占成功后，必须调用 message_send 向 [{partner_agent}] 发送对讲信件，说明修改目的与预计耗时；
-4. 【用后即释】：代码修改与测试验收通过后，必须调用 lease_release 及时释放租约。"""
+4. 【用后即释】：代码修改与测试验收通过后，必须调用 lease_manage(action='release', project='{project}', file_path='{target_file}') 及时释放租约。"""
 
 
 # =============================================================================
@@ -938,7 +945,7 @@ async def brief(project: str, devlog_limit: int = 5) -> dict:
     if brief_project is None:
         return tool_error(
             "BRIEF_UNAVAILABLE",
-            "db 层 brief_project 尚未落地 (A1 并行开发中)，请暂用 task_query/finding_query/waiting_query/batch_query/devlog_search 组合。",
+            "db 层 brief_project 尚未落地，请暂用 record_query/record_search 组合。",
         )
 
     data = await brief_project(proj, devlog_limit=clamp_limit(devlog_limit, maximum=QUERY_LIMIT_MAX))
