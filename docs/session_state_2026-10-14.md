@@ -96,6 +96,6 @@
 | 每会话连接数翻倍（数据面+系统面两池，各 min1） | postgres 默认 max_connections=100，日常 2~3 并发会话无压力 | 无需动作 |
 | 收件人未读满 500 拒收（`logbook.mailbox_cap` GUC 可调） | 按现消息量级不会触顶 | 无法本会话核验生产积压（见下） |
 
-**核验受限项**：生产库直读核验（pg_trgm 现状/未读积压）未完成 —— `ssh nas` 需交互密码（admin@192.168.1.33）、`logbook` 别名（192.168.1.68 容器 SSH）本会话公钥不匹配。pg_trgm 风险已由 2692efc 在代码侧消除；未读积压按量级判断不会触顶，部署后可用 `docker exec logbook-postgres psql -U postgres -d logbook -c "SELECT to_agent, count(*) FROM shared.agent_messages WHERE NOT is_read GROUP BY 1 ORDER BY 2 DESC;"` 一次性确认。
+**核验受限项**：生产库直读核验（pg_trgm 现状/未读积压）未完成 —— `ssh nas` 需交互密码（admin@192.0.2.33）、`logbook` 别名（192.0.2.68 容器 SSH）本会话公钥不匹配。pg_trgm 风险已由 2692efc 在代码侧消除；未读积压按量级判断不会触顶，部署后可用 `docker exec logbook-postgres psql -U postgres -d logbook -c "SELECT to_agent, count(*) FROM shared.agent_messages WHERE NOT is_read GROUP BY 1 ORDER BY 2 DESC;"` 一次性确认。
 
 **部署后验证清单**：① 任一 agent 发一封站内测试信 + 收件确认；② 查一次 `logbook_brief` 确认会话引导无降级告警（stderr 出现 `ACL bootstrap degraded` 即为引导失败，属 legacy 降级非故障，但应排查）；③ 需要分组时再配置 `LOGBOOK_ADMIN_AGENTS` 并重建容器。

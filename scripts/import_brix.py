@@ -1,7 +1,7 @@
 """Brix DEVLOG.md 结构化对齐与向量化灌库脚本
 
 功能:
-1. 解析 /home/yupeng/brix/docs/DEVLOG.md
+1. 解析 DEVLOG.md (默认 docs/DEVLOG.md 或通过 BRIX_DEVLOG_PATH 注入)
 2. 灌库 brix.batches (4 大批次: DEV-2026-10-07-02 停机保存态, DEV-2026-10-07-01 等)
 3. 灌库 brix.tasks (20 项任务, 绑定 batch_id, 状态对齐 F19 blocked, 责任人, 证据指针)
 4. 灌库 brix.findings (91 项发现, 级别 P1~P3, 状态 open/infix/fixed/wontfix/blocked)
@@ -29,7 +29,7 @@ from logbook.converter import import_devlog_markdown
 from logbook.vector import get_embedding
 
 
-DEVLOG_PATH = Path("/home/yupeng/brix/docs/DEVLOG.md")
+DEVLOG_PATH = Path(os.getenv("BRIX_DEVLOG_PATH", "docs/DEVLOG.md"))
 
 # 责任人映射表 (源自 CONTROL_LOG.md)
 AGENT_MAP = {

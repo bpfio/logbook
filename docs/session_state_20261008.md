@@ -11,7 +11,7 @@
 ## 一、 会话核心目标与成果总览
 
 1. **宿主身份确证**：
-   - 彻底梳理网络拓扑与主机命名，确证当前运行主机 `xhub`（`192.168.1.22` / `192.168.200.22`）即研发正典与密钥标识中定义的本地开发机 **`cliserver`**；
+   - 彻底梳理网络拓扑与主机命名，确证当前运行主机 `xhub`（`192.0.2.22` / `198.51.100.22`）即研发正典与密钥标识中定义的本地开发机 **`cliserver`**；
    - 确证 Agent 当前直接原生运行于 `cliserver`，具备原生终端、代码编辑与免密执行能力，无需外部跳转登录。
 
 2. **Git 仓库权威锚定与双轨寻址 (Dual-Track Resolution)**：
@@ -42,10 +42,10 @@
 
 | 节点角色 | 主机名 / 容器 | IP 地址 | 访问方式与通道职责 |
 |---|---|---|---|
-| **本地开发机** | `xhub` / `cliserver` | `192.168.1.22`<br>`192.168.200.22` | • 当前会话原生宿主，本地用户 `yupeng`<br>• SSH 公钥注释 `yupeng@cliserver`<br>• `agy` CLI 宿主环境，全局发现 `~/.gemini/config/mcp_config.json` |
-| **Logbook App 容器** | `logbook-app` | `192.168.1.68` | • 运行于 QNAP NAS Container Station（macvlan 直通）<br>• 暴露 SSH Stdio MCP 管道 (`sysadmin@192.168.1.68 mcp`)<br>• 内存硬配额 96MB，常驻 ~40MB |
-| **Logbook PG 容器** | `logbook-postgres` | `192.168.1.68` | • 共享 `logbook-app` 网络栈 (`127.0.0.1:5432`)<br>• PostgreSQL 18 + pgvector 插件<br>• 权威项目注册中心 (`shared.projects`) + 多项目独立 Schema |
-| **存储宿主机** | QNAP TS-453D | `192.168.1.33` | • 承载 Docker 编排与持久化存储卷 |
+| **本地开发机** | `xhub` / `cliserver` | `192.0.2.22`<br>`198.51.100.22` | • 当前会话原生宿主，本地用户 `developer`<br>• SSH 公钥注释 `developer@cliserver`<br>• `agy` CLI 宿主环境，全局发现 `~/.gemini/config/mcp_config.json` |
+| **Logbook App 容器** | `logbook-app` | `192.0.2.68` | • 运行于 QNAP NAS Container Station（macvlan 直通）<br>• 暴露 SSH Stdio MCP 管道 (`sysadmin@<container-ip> mcp`)<br>• 内存硬配额 96MB，常驻 ~40MB |
+| **Logbook PG 容器** | `logbook-postgres` | `192.0.2.68` | • 共享 `logbook-app` 网络栈 (`127.0.0.1:5432`)<br>• PostgreSQL 18 + pgvector 插件<br>• 权威项目注册中心 (`shared.projects`) + 多项目独立 Schema |
+| **存储宿主机** | QNAP TS-453D | `192.0.2.33` | • 承载 Docker 编排与持久化存储卷 |
 
 ---
 
@@ -63,7 +63,7 @@
       "args": [
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=no",
-        "sysadmin@192.168.1.68",
+        "sysadmin@192.0.2.68",
         "mcp"
       ]
     }
@@ -75,10 +75,10 @@
 ```bash
 # 1. 检查 CLI 注册状态
 agy mcp list
-# 输出: logbook  stdio  enabled  ssh -o BatchMode=yes -o StrictHostKeyChecking=no sysadmin@192.168.1.68 mcp
+# 输出: logbook  stdio  enabled  ssh -o BatchMode=yes -o StrictHostKeyChecking=no sysadmin@<container-ip> mcp
 
 # 2. 检查本地 SSH 免密连通性
-ssh -o BatchMode=yes sysadmin@192.168.1.68 "mcp"
+ssh -o BatchMode=yes sysadmin@192.0.2.68 "mcp"
 ```
 
 ---

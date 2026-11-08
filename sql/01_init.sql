@@ -1,6 +1,6 @@
 -- ============================================================================
 -- Logbook PostgreSQL 18 + pgvector 初始化 DDL (双平面架构)
--- SSOT: /home/yupeng/logbook/AGENTS.md
+-- SSOT: AGENTS.md
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS vector;

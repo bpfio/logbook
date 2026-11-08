@@ -63,7 +63,7 @@
 
 ### 2. 排查手记 (`devlogs`)
 * **根因四要素**：严格要求录入“故障现象 (Problem)”、“根因剖析 (Root Cause)”、“修复方案 (Solution)”、“验证证据 (Evidence)”；
-* **语义长期记忆**：自动提取 512 维向量与全文倒排索引（pgvector + tsvector），跨项目混合召回。
+* **语义长期记忆**：自动提取 768 维语义向量与全文倒排索引（pgvector + tsvector），跨项目混合召回。
 
 ### 3. 工程铁律 (`rules`)
 * **单一事实源 (SSOT)**：统一定义反面模式（Bad Practice）与最佳实践（Good Practice），开工前自动对齐。
@@ -97,41 +97,38 @@
 
 ---
 
-## 🚀 MCP 2.x 全维原语支持
+## 🚀 MCP 2.x 全维原语支持 (14 大核心正典工具)
 
-Logbook 原生实现全套 MCP 2.x 规范，兼备工具、上下文资源与规程提示词模板：
+Logbook 原生实现全套 MCP 2.x 规范，彻底摒弃过度工程化，全面收敛至 14 个高内聚核心正典原语：
 
-### 1. 核心 Tools
+### 1. 通用事实表操作原语 (Universal Fact Engine)
+* `record_upsert(project, dataset_code, doc_no, payload, ...)`：原子登记/更新业务事实单据（动态 JSON Schema 强校验，自动生成 768 维语义向量）
+* `records_bulk_upsert(project, records)`：单事务批量原子入库（复合键 `(dataset_code, doc_no)` 幂等更新）
+* `record_query(project, dataset_code, status, doc_no, ...)`：结构化多维事实查询（支持状态数组、时间范围、金额范围与字段投影）
+* `record_search(project, query, dataset_code, limit, min_score)`：768 维语义向量 + GIN 倒排全文混合检索（带相关度评分与截断）
+* `record_stats(project, dataset_code, status, ...)`：单表直查条件聚合统计（总数、总金额、状态分布等，时延 ~3ms）
 
-**台账类**
-* `task_upsert(project, ...)`：原子登记/推进任务状态机
-* `tasks_bulk_upsert(project, tasks, ...)`：单事务批量落库
-* `task_query / task_detail`：多维查询任务列表与详情
-* `finding_record / finding_query`：缺陷登记与查询（`findings_bulk_upsert` 批量原语将随 0.2.0 上线）
-* `waiting_record / waiting_query`：待决/阻塞项登记与查询（`waitings_bulk_upsert` 批量原语将随 0.2.0 上线）
-* `batch_upsert / batch_query`：研发批次演进记录
+### 2. 元数据字典与项目租户治理
+* `dataset_manage(action, dataset_code, name, schema, ...)`：业务数据集元数据与 JSON Schema 契约治理 (`register`, `update_schema`, `list`)
+* `project_manage(action, repo, title, description, ...)`：项目租户全生命周期管理 (`init`, `update`, `list`, `query`)
+* `group_manage(action, group_name, agent_name, project, ...)`：RBAC 多用户与群组权限管理 (`upsert`, `grant`, `revoke`, `add_member`, `remove_member`, `query_groups`, `query_principals`)
 
-**手记与规程类**
-* `devlog_record(project, ...)`：结构化录入排查手记（四要素+自动向量化，幂等去重）
-* `devlog_search(project, query, ...)`：全文 + 向量语义混合召回（结果按笔去重）
-* `rule_query`：读取研发规程与架构红线
-* `project_list / project_init`：项目注册中心与健康状态
+### 3. 智能体协同通信与代码互斥
+* `message_send(project, to_agent, subject, content, ...)`：跨 Agent 异步信箱点对点发送（带收件箱容量防灌爆校验 `acl_mailbox_has_room`）
+* `message_inbox(agent_name, unread_only, limit)`：异步信箱收件箱查阅与角标统计
+* `message_action(action, message_id)`：邮件状态流转管理 (`read` 已读核销, `archive` 归档/解归档)
+* `lease_manage(action, file_path, ...)`：代码文件并发软锁租约管理 (`acquire`, `release`, `renew`, `list`)，防止多 Agent 并发写冲突
 
-**效率端点（0.2.0 将上线）**
-* `logbook_brief(project)`：一次调用返回全项目 open tasks/findings/waitings + running 批次 + 最近 devlog 标题的 brief digest，单包目标 ≤2K token
-> **0.2.0 契约 (2026-10-08)**: ①`logbook_brief(project, devlog_limit=5)` 返回 `text`（紧凑行文本，优先消费）+ `brief`（结构化）。②写工具缺省瘦身响应 `{ok,id,status}`，要全对象传 `full=true`。③查询工具支持 `fields` 投影与 `limit` 钳制（≤200）；`waiting_query` 支持多 status 数组。④错误统一 `{isError:true, error_type, detail}`，错误码集：INVALID_ARGUMENT / CROSS_PROJECT_FORBIDDEN / TASK_NOT_FOUND / DUPLICATE_KEY / FK_VIOLATION / CHECK_VIOLATION / NOT_NULL_VIOLATION / DB_ERROR / INTERNAL_ERROR / BRIEF_UNAVAILABLE。⑤`export_markdown` 缺省只返内容不落盘，落盘需显式 `output_path`。
+### 4. 全局概览与正典导出
+* `logbook_brief(project)`：一次调用返回全项目 open tasks/findings/waitings + running 批次 + 最近 devlog 标题的 brief digest，单包严格 ≤2K token
+* `export_markdown(project, output_path)`：双向无损将事实数据导出为 100% 格式对齐的 DEVLOG.md（带路径白名单安全隔离）
 
-**响应与错误契约（0.2.0）**
-* 写响应瘦身：`*_record` / `*_upsert` 缺省仅回 `{ok, id, status}`，`full=true` 才回显全对象
-* 字段投影：查询工具支持 `fields` 参数，缺省精简列集
-* 结构化错误：全部工具异常统一返回 `{isError, error_type, detail}`（含 `TASK_NOT_FOUND` 预检），杜绝 "Error executing tool X" 裸包装
-
-### 2. 上下文 Resources (只读 URI)
+### 5. 上下文 Resources (只读 URI)
 * `logbook://{project}/tasks/active`：该项目当前活跃/进行中任务
 * `logbook://{project}/waitings/open`：该项目当前待决/阻塞项
 * `logbook://rules/engineering`：全团队工程铁律单一事实源
 
-### 3. 规程 Prompts (模板指令)
+### 6. 规程 Prompts (模板指令)
 * `/start_batch`：开工前通读任务台账与阻塞项的标准指导模板
 * `/record_devlog`：规范化填写排查手记四要素的辅助模板
 

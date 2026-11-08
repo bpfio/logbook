@@ -83,8 +83,8 @@ docker exec logbook-pg psql -U postgres -d logbook -c "
 在 brix 工作区重放真实写入，验证幂等（**零新副本**为通过标准）：
 
 ```bash
-cd /home/yupeng/brix
-python3 ../logbook/scripts/replay_brix_writes.py    # 重放 2026-10-07/08 共 18 笔写入
+cd /path/to/project
+python3 /path/to/logbook/scripts/replay_brix_writes.py    # 重放历史 18 笔写入
 ```
 
 验证点：

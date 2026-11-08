@@ -26,7 +26,7 @@ services:
       - ./sql:/docker-entrypoint-initdb.d:ro
 
   app:
-    image: logbook:0.5.3
+    image: logbook:0.8.0
     build: .
     container_name: logbook-app
     restart: unless-stopped

@@ -58,10 +58,10 @@
 
 | 节点角色 | 主机名 / 容器 | IP 地址 | 访问方式与通道职责 |
 |---|---|---|---|
-| **本地开发机** | `xhub` / `cliserver` | `192.168.1.22`<br>`192.168.200.22` | • 当前会话原生宿主，本地用户 `yupeng`<br>• SSH 公钥注释 `yupeng@cliserver`<br>• `agy` CLI 宿主环境，全局发现 `~/.gemini/config/mcp_config.json` |
-| **Logbook App 容器** | `logbook-app` | `192.168.1.68` | • 运行于 QNAP NAS Container Station（macvlan 直通）<br>• 暴露 SSH Stdio MCP 管道 (`sysadmin@192.168.1.68 mcp`)<br>• 内存硬配额 96MB，常驻 ~40MB |
-| **Logbook PG 容器** | `logbook-postgres` | `192.168.1.68` | • 共享 `logbook-app` 网络栈 (`127.0.0.1:5432`)<br>• PostgreSQL 18 + pgvector 插件 (HNSW 向量索引)<br>• 双平面架构：`shared` 共享知识面 + 动态项目执行面 |
-| **存储宿主机** | QNAP TS-453D | `192.168.1.33` | • 承载 Docker 编排与持久化存储卷 |
+| **本地开发机** | `xhub` / `cliserver` | `192.0.2.22`<br>`198.51.100.22` | • 当前会话原生宿主，本地用户 `developer`<br>• SSH 公钥注释 `developer@cliserver`<br>• `agy` CLI 宿主环境，全局发现 `~/.gemini/config/mcp_config.json` |
+| **Logbook App 容器** | `logbook-app` | `192.0.2.68` | • 运行于 QNAP NAS Container Station（macvlan 直通）<br>• 暴露 SSH Stdio MCP 管道 (`sysadmin@<container-ip> mcp`)<br>• 内存硬配额 96MB，常驻 ~40MB |
+| **Logbook PG 容器** | `logbook-postgres` | `192.0.2.68` | • 共享 `logbook-app` 网络栈 (`127.0.0.1:5432`)<br>• PostgreSQL 18 + pgvector 插件 (HNSW 向量索引)<br>• 双平面架构：`shared` 共享知识面 + 动态项目执行面 |
+| **存储宿主机** | QNAP TS-453D | `192.0.2.33` | • 承载 Docker 编排与持久化存储卷 |
 
 ---
 
@@ -120,7 +120,7 @@
 
 ## 五、 QNAP 生产环境部署验收与端到端双向实测闭环（100% 满分上线）
 
-生产环境（QNAP TS-453D，容器 macvlan IP `192.168.1.68`）已成功完成 0.4.0 平滑热投产升级，并通过跨节点真机实测验证：
+生产环境（QNAP TS-453D，容器 macvlan IP `192.0.2.68`）已成功完成 0.4.0 平滑热投产升级，并通过跨节点真机实测验证：
 
 1. **冷备与物理架构**：
    - 生产前完成全库冷备（`backups/logbook_pre_20261009_234403.dump`）；
@@ -130,7 +130,7 @@
 3. **协议全维矩阵**：
    - 开放 25 个 MCP 工具、8 大 Resources 只读看板、4 大 Prompts 规程模板。
 4. **端到端收信、阅信、回信双向实测闭环**：
-   - **收信与阅信**：成功调用 `message_read(message_id=5)` 提取发自 `agy@192.168.1.22` 的上线公告信件，原子核销标记已读（`is_read = true`, `read_at = 2026-10-09 23:29:29Z`）；
-   - **回信与发信**：成功调用 `message_send` 投递回执信件 ID `#6`（主题：`【回执】已收到 Logbook 0.4.0 上线通知与协作指引`，线索 `init-0.4.0`），自动捕获源 IP（`192.168.1.30`）安全落库；
+   - **收信与阅信**：成功调用 `message_read(message_id=5)` 提取发自 `agy@192.0.2.22` 的上线公告信件，原子核销标记已读（`is_read = true`, `read_at = 2026-10-09 23:29:29Z`）；
+   - **回信与发信**：成功调用 `message_send` 投递回执信件 ID `#6`（主题：`【回执】已收到 Logbook 0.4.0 上线通知与协作指引`，线索 `init-0.4.0`），自动捕获源 IP（`192.0.2.30`）安全落库；
    - **信箱复核**：`message_inbox` 查收列表完整呈现信件成对流转，多 Agent 协同底座 100% 验证就绪。任务 `L13.4` 正式闭环。
 

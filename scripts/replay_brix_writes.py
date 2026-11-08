@@ -3,7 +3,7 @@
 正典: docs/PLAN_OPT_2026-10-08.md §四 验证门 —
   "重放 2026-10-07/08 brix 18 笔写入 (幂等=零新副本)"。
 
-18 笔构成 (payload 均提取自 /home/yupeng/brix/docs/DEVLOG.md 发现台账/待办台账/夜11夜12 批段):
+18 笔构成 (payload 均提取自历史台账与发现/待办/批次段):
   - F-243 立案 (open) + F-243 终局更新 (fixed)          x2
   - F-322-6 / F-320 / F-132-C / F-317 翻账               x4
   - F-322-5 infix 裁决落账 / F-321 wontfix 裁决落账      x2
@@ -179,16 +179,17 @@ IDEMPOTENCY_MARKERS = ("cached", "reused", "dedup", "updated", "existing", "idem
 
 
 async def count_findings(session, fid: str) -> int:
-    res = await session.call_tool("finding_query", {"project": PROJECT, "limit": 500})
+    res = await session.call_tool("record_query", {"project": PROJECT, "dataset_code": "sys_finding", "limit": 500})
     obj = _obj(res)
-    return sum(1 for it in obj.get("items", []) if it.get("id") == fid)
+    records = obj.get("records") or obj.get("items") or []
+    return sum(1 for it in records if it.get("doc_no") == fid or (it.get("payload") or {}).get("id") == fid)
 
 
 async def count_waitings(session, wid: str) -> int:
-    # status=None 查全部 (缺省 status='open' 会漏掉 closed 项, WAIT-F320 判据需全态计数)
-    res = await session.call_tool("waiting_query", {"project": PROJECT, "status": None, "limit": 500})
+    res = await session.call_tool("record_query", {"project": PROJECT, "dataset_code": "sys_waiting", "limit": 500})
     obj = _obj(res)
-    return sum(1 for it in obj.get("items", []) if it.get("id") == wid)
+    records = obj.get("records") or obj.get("items") or []
+    return sum(1 for it in records if it.get("doc_no") == wid or (it.get("payload") or {}).get("id") == wid)
 
 
 # 前置任务登记 (不计入 18 笔): 10-07/08 生产库存在这些任务, 本地 dev PG 台账子集缺;
@@ -209,11 +210,17 @@ PREREQ_TASKS = [
 
 
 async def seed_prereq_tasks(session, results: list) -> set:
-    """前置任务尽力登记 (幂等 upsert)。src/** 由他线占用, 若其瞬时故障导致
-    某任务登记失败, 则对应 finding 剥离悬空 task_id 以脱离形态重放 (不计失败)。"""
+    """前置任务尽力登记 (幂等 upsert)"""
     ok_ids: set = set()
     for t in PREREQ_TASKS:
-        r = await session.call_tool("task_upsert", {**t, "allow_cross_project": True})
+        r = await session.call_tool("record_upsert", {
+            "project": PROJECT,
+            "dataset_code": "sys_task",
+            "doc_no": t["id"],
+            "entity_name": t.get("title", ""),
+            "status": t.get("status", "open"),
+            "payload": t,
+        })
         o = _obj(r)
         ok = (not o.get("isError")) and (not getattr(r, "is_error", False))
         if ok:
@@ -225,20 +232,34 @@ async def seed_prereq_tasks(session, results: list) -> set:
 
 async def replay_finding(session, entry: dict, results: list, prereq_ok: set) -> None:
     fid = entry["id"]
-    payload = {**entry["payload"], "allow_cross_project": True}  # 10-07/08 主控对 brix 真实调用形态 (跨项目显式授权)
+    payload = {**entry["payload"]}
     det = ""
     if payload.get("task_id") and payload["task_id"] not in prereq_ok:
         det = f" [task_id={payload['task_id']} 前置登记失败, 剥离悬空关联后重放]"
         payload.pop("task_id", None)
     before = await count_findings(session, fid)
 
-    r1 = await session.call_tool("finding_record", payload)
+    r1 = await session.call_tool("record_upsert", {
+        "project": PROJECT,
+        "dataset_code": "sys_finding",
+        "doc_no": fid,
+        "entity_name": payload.get("summary", ""),
+        "status": payload.get("status", "open"),
+        "payload": payload,
+    })
     if _call_failed(r1):
         results.append((f"finding:{fid}:{entry['phase']}", False, f"第一次调用报错: {_text(r1)[:200]}"))
         return
     mid = await count_findings(session, fid)
 
-    r2 = await session.call_tool("finding_record", payload)
+    r2 = await session.call_tool("record_upsert", {
+        "project": PROJECT,
+        "dataset_code": "sys_finding",
+        "doc_no": fid,
+        "entity_name": payload.get("summary", ""),
+        "status": payload.get("status", "open"),
+        "payload": payload,
+    })
     if _call_failed(r2):
         results.append((f"finding:{fid}:{entry['phase']}", False, f"第二次调用报错: {_text(r2)[:200]}"))
         return
@@ -246,29 +267,41 @@ async def replay_finding(session, entry: dict, results: list, prereq_ok: set) ->
 
     o2 = _obj(r2)
     marker = any(k in json.dumps(o2, ensure_ascii=False).lower() for k in IDEMPOTENCY_MARKERS)
-    det = det
     ok = (mid == 1) and (after == mid)  # 零新副本: 两遍后仍单行且行数不增
     ok = ok and (before <= 1)           # 基线本身无既有副本堆积 (首跑允许 before=0)
     detail = (f"id={fid} phase={entry['phase']} before={before} after1={mid} after2={after} "
               f"resp_marker={marker}{det}")
     if not marker and ok:
-        # 行数判据已兜底 (upsert 同 id 单行), marker 仅作信息披露
         detail += " (响应未带显式幂等标记, 以副本数判据为准)"
     results.append((f"finding:{fid}:{entry['phase']}", ok, detail))
 
 
 async def replay_waiting(session, entry: dict, results: list) -> None:
     wid = entry["id"]
-    payload = {**entry["payload"], "allow_cross_project": True}  # 同上: 跨项目显式授权
+    payload = {**entry["payload"]}
     before = await count_waitings(session, wid)
 
-    r1 = await session.call_tool("waiting_record", payload)
+    r1 = await session.call_tool("record_upsert", {
+        "project": PROJECT,
+        "dataset_code": "sys_waiting",
+        "doc_no": wid,
+        "entity_name": payload.get("description", ""),
+        "status": payload.get("status", "open"),
+        "payload": payload,
+    })
     if _call_failed(r1):
         results.append((f"waiting:{wid}", False, f"第一次调用报错: {_text(r1)[:200]}"))
         return
     mid = await count_waitings(session, wid)
 
-    r2 = await session.call_tool("waiting_record", payload)
+    r2 = await session.call_tool("record_upsert", {
+        "project": PROJECT,
+        "dataset_code": "sys_waiting",
+        "doc_no": wid,
+        "entity_name": payload.get("description", ""),
+        "status": payload.get("status", "open"),
+        "payload": payload,
+    })
     if _call_failed(r2):
         results.append((f"waiting:{wid}", False, f"第二次调用报错: {_text(r2)[:200]}"))
         return
@@ -309,9 +342,8 @@ async def main() -> int:
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = {t.name for t in (await session.list_tools()).tools}
-            print(f"[MCP] 握手成功, 工具 {len(tools)} 个; 需要 finding_record/waiting_record/"
-                  f"finding_query/waiting_query: "
-                  f"{all(t in tools for t in ('finding_record', 'waiting_record', 'finding_query', 'waiting_query'))}")
+            print(f"[MCP] 握手成功, 工具 {len(tools)} 个; 包含 record_upsert/record_query: "
+                  f"{all(t in tools for t in ('record_upsert', 'record_query'))}")
 
             prereq_ok = await seed_prereq_tasks(session, results)
 

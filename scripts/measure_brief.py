@@ -51,15 +51,15 @@ def textify(obj) -> str:
 async def measure(project: str, strict: bool, target: int) -> int:
     import logbook.mcp_server as ms
 
-    # ---- 基线: 四次查询拼全貌 ----
+    # ---- 基线: 四次查询拼全貌 (0.8.0 通用事实表原语) ----
     parts: dict[str, str] = {}
-    tq = await ms.task_query(project=project, limit=500)
+    tq = await ms.record_query(project=project, dataset_code="sys_task", limit=500)
     parts["task_query"] = textify(tq)
-    fq = await ms.finding_query(project=project, limit=500)
+    fq = await ms.record_query(project=project, dataset_code="sys_finding", limit=500)
     parts["finding_query"] = textify(fq)
-    wq = await ms.waiting_query(project=project, status="open")
+    wq = await ms.record_query(project=project, dataset_code="sys_waiting", status=["open"], limit=500)
     parts["waiting_query"] = textify(wq)
-    bq = await ms.batch_query(project=project, limit=50)
+    bq = await ms.record_query(project=project, dataset_code="sys_batch", limit=50)
     parts["batch_query"] = textify(bq)
 
     baseline_text = "".join(parts.values())
