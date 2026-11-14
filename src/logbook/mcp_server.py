@@ -19,6 +19,7 @@ import asyncpg
 
 CURRENT_CALLER_IP: ContextVar[str | None] = ContextVar("current_caller_ip", default=None)
 from datetime import datetime, date
+from decimal import Decimal
 from typing import Any, Literal
 try:
     from mcp.server.mcpserver import MCPServer
@@ -189,6 +190,22 @@ def clamp_limit(limit: int, maximum: int = QUERY_LIMIT_MAX) -> int:
     if n > maximum:
         raise ToolError("INVALID_ARGUMENT", f"limit 超出允许上限 {maximum}，收到: {n}")
     return n
+
+
+def _validate_positive_int_id(val: Any) -> int:
+    """严格校验并解析正整数 ID，杜绝负数、0、布尔型、浮点型、字母及 Unicode 伪数字 (F-3)。"""
+    if isinstance(val, bool):
+        raise ValueError(f"id 不能为布尔类型 (收到: {val})")
+    if isinstance(val, int):
+        if val <= 0:
+            raise ValueError(f"id 必须为正整数 (收到: {val})")
+        return val
+    if isinstance(val, str):
+        s = val.strip()
+        if not re.match(r"^[1-9]\d*$", s):
+            raise ValueError(f"id 必须为正整数 (收到: '{val}')")
+        return int(s)
+    raise ValueError(f"id 类型非法 (收到: {type(val).__name__})")
 
 
 VALID_RECORD_FIELDS = {
@@ -1403,10 +1420,10 @@ async def record_upsert(
     dataset_code: str,
     doc_no: str | None = None,
     event_date: str | None = None,
-    amount: float | str | int = 0,
-    currency: str = "CNY",
+    amount: float | str | int | None = None,
+    currency: str | None = None,
     entity_name: str | None = None,
-    status: str = "recorded",
+    status: str | None = None,
     payload: dict[str, Any] | None = None,
     parent_id: int | None = None,
     batch_id: str | None = None,
@@ -1443,8 +1460,7 @@ async def record_upsert(
     if id is None and (doc_no is None or not str(doc_no).strip()):
         return tool_error("INVALID_ARGUMENT", "新增事实单据必须提供 doc_no 单据号！", tool="record_upsert")
 
-    st = normalize_record_status(status)
-    actual_event_date = str(event_date).strip() if event_date and str(event_date).strip() else date.today().isoformat()
+    clean_doc_no = doc_no.strip() if doc_no and str(doc_no).strip() else None
 
     b_id = str(batch_id).strip() if batch_id and str(batch_id).strip() else None
     if b_id:
@@ -1456,23 +1472,39 @@ async def record_upsert(
         if not hit:
             return tool_error("INVALID_ARGUMENT", f"批次 [{b_id}] 在项目 [{proj}] 的批次表中不存在！必须先通过 batch_upsert 建立批次主档后方可关联单据。", tool="record_upsert")
 
-    clean_doc_no = doc_no.strip() if doc_no and str(doc_no).strip() else None
+    kwargs: dict[str, Any] = {
+        "id": id,
+        "project_id": proj,
+        "dataset_code": dataset_code.strip().lower(),
+        "payload": payload or {},
+        "patch": patch,
+    }
+    if clean_doc_no is not None:
+        kwargs["doc_no"] = clean_doc_no
+    if entity_name is not None and entity_name.strip():
+        kwargs["entity_name"] = entity_name.strip()
+    if b_id is not None:
+        kwargs["batch_id"] = b_id
+    if parent_id is not None:
+        kwargs["parent_id"] = parent_id
 
-    record = DataRecord(
-        id=id,
-        project_id=proj,
-        dataset_code=dataset_code.strip().lower(),
-        parent_id=parent_id,
-        batch_id=b_id,
-        doc_no=clean_doc_no,
-        entity_name=entity_name.strip() if entity_name else None,
-        amount=amount,
-        currency=currency.strip().upper() if currency else "CNY",
-        event_date=actual_event_date,
-        status=st,
-        payload=payload or {},
-        patch=patch,
-    )
+    if patch:
+        # patch 模式下仅显式传入的字段加入 kwargs，保持未传字段不在 model_fields_set 中以保全脊柱 (F-1)
+        if status is not None:
+            kwargs["status"] = normalize_record_status(status)
+        if amount is not None:
+            kwargs["amount"] = amount
+        if currency is not None and currency.strip():
+            kwargs["currency"] = currency.strip().upper()
+        if event_date is not None and str(event_date).strip():
+            kwargs["event_date"] = str(event_date).strip()
+    else:
+        kwargs["status"] = normalize_record_status(status or "recorded")
+        kwargs["amount"] = amount if amount is not None else Decimal("0.0000")
+        kwargs["currency"] = currency.strip().upper() if currency and str(currency).strip() else "CNY"
+        kwargs["event_date"] = str(event_date).strip() if event_date and str(event_date).strip() else date.today().isoformat()
+
+    record = DataRecord(**kwargs)
     # 当非 patch 模式时，前置严格执行动态 JSON Schema 契约校验 (强化软肋骨防御)
     # patch 模式下由 db.upsert_record 在与既有 payload 合并后再执行完整校验
     if not patch:
@@ -1543,6 +1575,24 @@ async def record_query(
     if query_text is not None and str(query_text).strip() == "":
         return tool_error("INVALID_ARGUMENT", "query_text 不能为空！", tool="record_query")
 
+    clean_id: int | list[int] | None = None
+    if id is not None:
+        if isinstance(id, (list, tuple, set)):
+            if not id:
+                return tool_error("INVALID_ARGUMENT", "id 列表不能为空！", tool="record_query")
+            val_list = []
+            for item in id:
+                try:
+                    val_list.append(_validate_positive_int_id(item))
+                except ValueError as exc:
+                    return tool_error("INVALID_ARGUMENT", str(exc), tool="record_query")
+            clean_id = val_list
+        else:
+            try:
+                clean_id = _validate_positive_int_id(id)
+            except ValueError as exc:
+                return tool_error("INVALID_ARGUMENT", str(exc), tool="record_query")
+
     st = None
     if status is not None:
         st_list = fact_engine.normalize_status_list(status)
@@ -1572,7 +1622,7 @@ async def record_query(
         query_text=query_text,
         limit=clamp_limit(limit),
         offset=offset,
-        id=id,
+        id=clean_id,
     )
     items_list = []
     for r in rows:
@@ -1585,8 +1635,8 @@ async def record_query(
         items_list.append(d)
 
     applied_filters: dict[str, Any] = {}
-    if id is not None:
-        applied_filters["id"] = id
+    if clean_id is not None:
+        applied_filters["id"] = clean_id
     if dataset_code:
         applied_filters["dataset_code"] = dataset_code.strip().lower()
     if doc_no:

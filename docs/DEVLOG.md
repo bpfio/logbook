@@ -13,7 +13,7 @@
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
-| L-OPT-081 | closed | feat | Logbook 0.8.1: 读写对称性补齐 (record_query 支持 id 检索)、record_upsert 局部补丁模式 (patch=True 防静默丢字段)、主键更新解耦 doc_no 与 Schema 错误自解释引导 | 77ff3a0 | 彻底解决 Agent 使用四大痛点: ① record_query 增设 id/id_list 过滤参数与 applied_filters 回显，消除 extra_forbidden; ② record_upsert 引入 patch=True 局部更新，合并已有 payload 并重新执行 Schema 契约校验，消除改错别字需整条重发与丢内容风险; ③ record_upsert 按主键 id 更新时允许省略 doc_no (自动沿用原单号)，新增时严格强制 doc_no 非空; ④ validate_payload_schema 校验报错提示可用必填项列表与 dataset_manage / logbook://schema/fields 自愈指引; 新增 5 项专项单测，门禁 78 项 100% 全绿 (DEV-2026-11-14-01) |
+| L-OPT-081 | closed | feat | Logbook 0.8.1: 读写对称性补齐 (record_query 支持 id 检索)、record_upsert 局部补丁模式 (patch=True 脊梁保全与防丢字段)、主键更新解耦 doc_no 与 Schema 错误自解释引导 | a22b68a | 彻底解决 Agent 使用四大痛点与外部评审 F-1~F-4 缺陷: ① record_query 增设严格正整数 id/id_list 过滤参数与 applied_filters 回显，消除 extra_forbidden，遇到非正整数严格 fail-closed 拦截 (F-3/F-4); ② record_upsert 引入 patch=True 局部更新，合并已有 payload 并通过 model_fields_set 严格保全 status/amount/currency/event_date 等强脊柱列原值，彻底消除任务状态被冲刷与静默丢字段风险 (F-1); ③ record_upsert 按主键 id 更新时允许省略 doc_no (自动沿用原单号)，新增时严格强制 doc_no 非空; ④ validate_payload_schema 校验报错提示可用必填项列表与 dataset_manage / logbook://schema/fields 自愈指引; ⑤ 单测重构为断言 update_sql 真实绑定参数 (F-2); 新增 6 项专项单测，门禁 79 项 100% 全绿 (DEV-2026-11-14-01) |
 | L-PUB-080 | closed | refactor | Logbook 0.8.0 开源前置真实缺陷全量闭环: README 14核心原语对齐、个人绝对路径清除、gate 回归脚本改造与内网 IP 彻底脱敏 | 0e30829 | 响应用户对开源真实可用性质询，消灭言行不一与自嗨包装: ① 重构 README.md，彻底删除 task_upsert 等废弃工具描述与 0.2.0 过期标记，100% 对齐 0.8.0 规范的 14 个核心正典原语与客户端配置; ② 根除 sql/01_init.sql、deploy/qnap/DEPLOY.md 与 scripts/ 中硬编码的个人本地绝对路径 (/home/yupeng); ③ 改造 scripts/replay_brix_writes.py 与 measure_brief.py，对齐 0.8.0 record_upsert/record_query 原语，保障门禁脚本真实一致; ④ 更新 docker-compose.yml 镜像标签为 logbook:0.8.0; ⑤ 历史会话存档全面替换内网 IP 为 RFC 5737 规范保留地址; 单元测试 73 项全绿 (DEV-2026-11-08-04) |
 | L-FIX-080 | closed | fix | Logbook 0.8.0 终极收敛封版: 修复 import_devlog_markdown 签名错位与租约冲突 SQL 参数绑定错误 | e66fcbd | 落实用户裁决彻底收敛封版，消灭过度挑刺与伪需求，仅拧紧2处真实边缘代码笔误: ① 修正 converter.py 中 import_devlog_markdown 调用 bulk_upsert_records 的传参溢出崩溃 (P0)，并在 db.bulk_upsert_records 引入双形态入参自适应防呆; ② 修正 db.acquire_file_lease 中冲突持有者查询 CTE 的 SQL 参数绑定错误 ($2 错写为 agent_name 改正为 $4 file_path)，确保并发抢锁失败时精准回显持锁人; ③ 单元测试 73 项全绿 (新增2项防回归单测)，生产平滑更新上线，6,924 条生产数据零丢失，系统进入免维护静止稳态 (DEV-2026-11-08-03) |
 | L-CLEAN-080 | closed | refactor | Logbook 0.8.0: 独立第三方代码二次深度审计、MCP Resource AttributeError 根除、协议 Repr 纠偏与 500+ 行死代码彻底拔除 | b25b36e | 落实独立第三方深度审计清单: ① 修复 get_active_tasks_resource 等 6 大 MCP Resource 端点字典安全提取 _v(obj, key)，根除生产现场 AttributeError 崩溃; ② 修复 ssh_server.py 的 resources/read 协议封装，消除 [ReadResourceContents(...)] Python Repr 乱码字符串，输出纯净 Markdown; ③ 彻底清除 normalizer.py (319 行) 与 engine.py (215 行) 中已淘汰历史实体状态映射与未调用死代码 (净删 534 行); ④ 全量纠偏 4 大 Prompts 规程、协商开户指引与 SingleFlight 规则中的废弃工具名 (project_init -> project_manage); ⑤ 单元测试 71 项全绿，生产热部署验证，6,924 条生产物理数据零丢失 (DEV-2026-11-08-02) |
@@ -69,10 +69,14 @@
 
 ---
 
-## 二、发现台账 (36)
+## 二、发现台账 (40)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-OPT81-01 | review | P1 | fixed | patch=True 局部更新未保全强脊柱字段 (status/amount/currency/event_date) | 仅合并 payload 未保全脊柱列，导致 closed 任务被冲刷为 recorded；改由 model_fields_set 保全原值 (DEV-2026-11-14-01) |
+| F-OPT81-02 | review | P2 | fixed | 单测断言 mock 预设 updated_row 导致未能捕获脊柱覆盖真实缺陷 | mock 返回写死数据导致用例假绿；重构为直接断言 update_sql 真实绑定参数 (DEV-2026-11-14-01) |
+| F-OPT81-03 | review | P2 | fixed | record_query id 过滤对非正整数 fail-open 导致穿透返回全量 | isdigit 对负数、字母、上标数字异常放行或报错；改用正整数严格正则并显式阻断 bool (DEV-2026-11-14-01) |
+| F-OPT81-04 | review | P3 | fixed | 单测套件缺少非法 id 入参负向门禁测试 | 增补 7 种非法形态负向断言用例，实现非法 id fail-closed 100% 拦截 (DEV-2026-11-14-01) |
 | F-SQL-01 | audit | P0 | fixed | 消除对带触发器视图的写入依赖，DAO 层改造为单语句直接写入底层物理事实表 shared.records | INSTEAD OF 触发器不支持 ON CONFLICT，统一直写 shared.records 原生原子操作 (DEV-2026-11-07-02) |
 | F-TYPE-01 | audit | P1 | fixed | 修复 asyncpg 同一占位符多处复用导致的 bigint = text (42883) 参数类型推断冲突 | update_devlog 与 update_research 按 record_id 主键精准更新，消灭参数推断混乱 (DEV-2026-11-07-02) |
 | F-DATA-01 | audit | P1 | fixed | 补齐 shared.records (project_id, dataset_code, doc_no) 联合唯一索引与统一时间线物理表 shared.task_timeline | 建立数据库内核级硬唯一约束与物理事件时间线表 (DEV-2026-11-07-02) |
@@ -119,35 +123,49 @@
 
 ---
 
-## [DEV-2026-11-14-01] Logbook 0.8.1: 读写对称性补齐、局部补丁模式 (patch=True) 与契约自解释增强 — ✅ 闭环
+## [DEV-2026-11-14-01] Logbook 0.8.1: 读写对称性补齐、局部补丁模式 (patch=True)、强脊柱保全与契约自解释增强 — ✅ 闭环
 
-根据用户裁决与实际 Agent 使用过程中的痛点反馈，完成四大体验与防御维度的系统级优化、门禁与回归验证：
+根据用户裁决与实际 Agent 使用过程中的痛点反馈，以及外部独立深度审计复核提出的 F-1~F-4 缺陷，完成五大维度的系统级优化、防回归重构与门禁闭环：
 
 1. **结构化四要素复盘 (SSOT)**:
    - **故障/需求背景 (Problem)**:
      - **读写严重不对称 (ISSUE-01)**: Agent 调用 `record_upsert` 返回记录带有主键 `id`，且入参支持 `id: int`；但 `record_query` 读端未开放 `id` 过滤，传 `id` 直接被 FastMCP/Pydantic 拦截为 `INVALID_ARGUMENT: id Extra inputs are not permitted`；
      - **强制全量替换与丢内容风险 (ISSUE-02)**: `db.upsert_record` 更新语句使用 `payload = $11::jsonb` 全量覆盖，修改错别字或部分字段必须全篇重传全部动态字段，存在严重漏写、静默丢字段的脆性风险；
      - **主键更新强绑定单据号 (ISSUE-03)**: `record_upsert` 的 `doc_no: str` 为必选参数，在明确提供物理主键 `id` 时仍强制要求提供 `doc_no`，导致未缓存单号时无法直接按 ID 更新；
-     - **Schema 契约拦截缺乏引导 (ISSUE-04)**: `FactEngine.validate_payload_schema` 校验拦截仅报字段缺失，未提示可用必填项列表与查看 Schema 的资源入口，导致 Agent 靠猜或翻历史记录反推字段。
+     - **Schema 契约拦截缺乏引导 (ISSUE-04)**: `FactEngine.validate_payload_schema` 校验拦截仅报字段缺失，未提示可用必填项列表与查看 Schema 的资源入口，导致 Agent 靠猜或翻历史记录反推字段；
+     - **外部评审发现 F-1 (高危，F-OPT81-01)**: `patch=True` 仅保全了软肋骨（`payload`），但在 `update_sql` 中将 `amount`、`currency`、`event_date`、`status` 无条件赋值为 MCP 层默认值，导致如修改 `sys_task` 备注会把 `closed` 状态静默冲刷回 `recorded`，并将业务日期篡改为今天；
+     - **外部评审发现 F-2 (中危，F-OPT81-02)**: 原单测 `mock_conn.fetchrow` 返回写死的 mock 字典，断言仅读取 mock 台词而非被测代码传给数据库的真实绑定参数，导致 F-1 在单测中逃逸；
+     - **外部评审发现 F-3 (中危，F-OPT81-03)**: `record_query` 使用 `str.isdigit()` 进行校验，对 "abc"、0、负数或空数组 fail-open 静默丢弃，导致无 id 条件穿透返回全量记录，而 `applied_filters["id"]` 虚假回显；且 Unicode 上标数字如 `'²'` 导致 `int()` 抛 500；
+     - **外部评审发现 F-4 (低危，F-OPT81-04)**: 单测套件缺乏对非法 `id` 入参的负向测试用例。
    - **根因定位 (Root Cause)**:
      - 事实引擎统一过程中读写端参数契约未完全拉齐，`record_query` 遗漏了单据主键 `id` 列；
      - 底层更新 SQL 缺少 JSONB 局部合并分支，未向应用层暴露 patch 语义；
      - 数据模型层强脊柱校验要求 `doc_no` 在任何场景下非空；
-     - 校验异常提示仅关注校验本身，缺少自愈性上下文。
+     - 校验异常提示仅关注校验本身，缺少自愈性上下文；
+     - `record_upsert` 中强脊柱字段设有默认值（如 status="recorded"），在 `patch` 模式下直接覆盖了底库已有记录；
+     - ID 校验逻辑使用宽松的 `isdigit` 未做非正整数与伪数字的严格类型断言。
    - **解决方案 (Solution)**:
-     - `src/logbook/mcp_server.py`: `record_query` 增设 `id: int | list[int] | None = None` 参数，并在 `applied_filters["id"]` 实时回显；
-     - `src/logbook/db.py`: `query_records` 增补 `id` 参数化过滤（标量 `id = $N`，数组 `id = ANY($N)`);
-     - `src/logbook/models.py` & `mcp_server.py`: `DataRecord` 与 `record_upsert` 增设 `patch: bool = False` 参数，`doc_no` 声明为可选并增加新增与更新的差异化防呆；
-     - `src/logbook/db.py`: `upsert_record` 支持 `patch=True` 局部合并已存 payload 并再次执行 Schema 校验，指定 `id` 更新且未传 `doc_no` 时自动沿用已有单号；
-     - `src/logbook/engine.py`: `validate_payload_schema` 丰富抛错文案，输出必填项列表并指引 `dataset_manage(action='query')` 与 `logbook://schema/fields`；
-     - 增补回归测试：编写 `tests/test_opt_081_symmetry_and_patch.py` 覆盖 5 大核心场景。
+     - `src/logbook/mcp_server.py`:
+       - `record_query` 增设 `id: int | list[int] | None = None` 参数，引入 `_validate_positive_int_id` 严格校验正整数（fail-closed 拦截非正整数、布尔型、Unicode 伪数字与空数组），并在 `applied_filters["id"]` 真实回显 (ISSUE-01, F-3);
+       - `record_upsert` 增设 `patch: bool = False` 参数，在 patch 模式下仅将显式传入的字段加入 `DataRecord` kwargs，未传强脊柱字段不进入 `model_fields_set` (ISSUE-02, F-1);
+       - `doc_no` 调整为可选，仅在 `id is None` 且缺失有效 `doc_no` 时前置拦截报错 (ISSUE-03);
+     - `src/logbook/db.py`:
+       - `query_records` 增补严格 `id` 参数化过滤（标量 `id = $N`，数组 `id = ANY($N)`，非法入参抛 ValueError）；
+       - `upsert_record` 穿透 `model_fields_set`：在 `is_patch` 模式下，仅更新显式传入字段，未传字段从 `existing_row` 完整保全 `status`, `amount`, `currency`, `event_date`, `entity_name`, `batch_id`, `parent_id` (F-1);
+       - 合并 payload 后再行执行 Schema 校验，指定 `id` 更新时支持省略 `doc_no` 沿用原单号;
+     - `src/logbook/engine.py`: `validate_payload_schema` 丰富抛错文案，输出必填项列表并指引 `dataset_manage(action='query')` 与 `logbook://schema/fields` (ISSUE-04);
+     - 专项测试重构与补齐 (`tests/test_opt_081_symmetry_and_patch.py`):
+       - 深入断言 `mock_conn.fetchrow.call_args_list[1]` 的真实 SQL 绑定参数，确证强脊梁字段 100% 保全 (F-2);
+       - 增设针对 7 种非法 ID 场景的 fail-closed 负向测试 (F-4)。
    - **验证证据 (Evidence)**:
-     - 单元测试门禁：`bash scripts/gate.sh unit` 78 项全绿（78 passed, 40 deselected，100% PASS，0 失败）；
+     - 单元测试门禁：`bash scripts/gate.sh unit` 79 项全绿（79 passed, 40 deselected，100% PASS，0 失败）；
+     - 事实台账归档：外部评审 4 大发现项 F-OPT81-01~04 已按 `sys_finding` 契约完整录入生产知识库并回读校验核准；
      - 兼容性保全：`patch` 缺省为 `False`，现有测试与批量脚本 100% 保持原有语义。
 
 2. **实测指标**:
-   - 单元测试通过率: 78/78 (100% PASS, 40 deselected integration)
+   - 单元测试通过率: 79/79 (100% PASS, 40 deselected integration)
    - 优化闭环项: ISSUE-01 ~ ISSUE-04 全部闭环
+   - 审计整改项: F-1 (高), F-2 (中), F-3 (中), F-4 (低) 全部闭环
 
 ---
 

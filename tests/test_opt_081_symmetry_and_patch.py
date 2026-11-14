@@ -1,16 +1,19 @@
-"""Logbook 0.8.1 (L-OPT-081) 读写对称性与局部补丁优化专项单元测试套件。
+"""Logbook 0.8.1 (L-OPT-081) 读写对称性、局部补丁模式 (F-1/F-2) 与严格 ID 防御 (F-3/F-4) 专项单元测试套件。
 
 涵盖场景:
 1. record_query 支持 id (标量与数组) 精准过滤与 applied_filters 回显;
-2. record_upsert patch=True 局部更新合并原有 payload，避免全量重传与静默丢字段;
-3. record_upsert 指定 id 更新时支持省略 doc_no 自动沿用原单号;
-4. record_upsert 新增模式若缺失 doc_no 则严格以 INVALID_ARGUMENT 阻断;
-5. validate_payload_schema 契约拦截信息包含可用必填项与自愈指引。
+2. (F-3/F-4) record_query 对非法 id ("abc", 0, 负数, '²', 布尔型, 空列表, 混合非法项) 严格以 INVALID_ARGUMENT 阻断，绝不 fail-open;
+3. (F-1/F-2) record_upsert patch=True 局部更新合并 payload，并严格保全强脊梁 (status, amount, currency, event_date, entity_name, batch_id, parent_id) 原值，通过断言真实 SQL 绑定参数确认;
+4. record_upsert 指定 id 更新时支持省略 doc_no 自动沿用原单号;
+5. record_upsert 新增模式若缺失 doc_no 则严格以 INVALID_ARGUMENT 阻断;
+6. validate_payload_schema 契约拦截信息包含可用必填项与自愈指引。
 """
 
+import json
+from datetime import date
+from decimal import Decimal
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from decimal import Decimal
 
 from logbook.mcp_server import record_query, record_upsert
 from logbook.models import DataRecord
@@ -65,48 +68,77 @@ async def test_record_query_supports_id_scalar_and_list():
 
 
 @pytest.mark.asyncio
-async def test_record_upsert_patch_mode_preserves_unmodified_fields():
-    """核验 ISSUE-02: record_upsert patch=True 局部更新合并已有 payload，防范静默丢内容。"""
+async def test_record_query_rejects_invalid_id_fail_closed():
+    """核验 F-3 / F-4: record_query 对非法 id 严格阻断报错，绝不 fail-open 穿透全表。"""
+    with patch("logbook.mcp_server.validate_and_negotiate_project", AsyncMock(return_value="test_proj")):
+        # 1. 纯字母字符串
+        res_str = await record_query(project="test_proj", id="abc")
+        assert res_str.get("isError") is True
+        assert res_str.get("error_type") == "INVALID_ARGUMENT"
+        assert "id 必须为正整数" in res_str.get("detail", "")
+
+        # 2. 0
+        res_zero = await record_query(project="test_proj", id=0)
+        assert res_zero.get("isError") is True
+        assert res_zero.get("error_type") == "INVALID_ARGUMENT"
+        assert "id 必须为正整数" in res_zero.get("detail", "")
+
+        # 3. 负数
+        res_neg = await record_query(project="test_proj", id=-5)
+        assert res_neg.get("isError") is True
+        assert res_neg.get("error_type") == "INVALID_ARGUMENT"
+        assert "id 必须为正整数" in res_neg.get("detail", "")
+
+        # 4. Unicode 上标数字 (防 isdigit 误判漏洞)
+        res_unicode = await record_query(project="test_proj", id="²")
+        assert res_unicode.get("isError") is True
+        assert res_unicode.get("error_type") == "INVALID_ARGUMENT"
+        assert "id 必须为正整数" in res_unicode.get("detail", "")
+
+        # 5. 布尔型 (bool 是 int 子类，必须显式拦截)
+        res_bool = await record_query(project="test_proj", id=True)
+        assert res_bool.get("isError") is True
+        assert res_bool.get("error_type") == "INVALID_ARGUMENT"
+        assert "布尔类型" in res_bool.get("detail", "")
+
+        # 6. 空数组
+        res_empty = await record_query(project="test_proj", id=[])
+        assert res_empty.get("isError") is True
+        assert res_empty.get("error_type") == "INVALID_ARGUMENT"
+        assert "id 列表不能为空" in res_empty.get("detail", "")
+
+        # 7. 数组中含非法项
+        res_mixed = await record_query(project="test_proj", id=[9773, "bad_id"])
+        assert res_mixed.get("isError") is True
+        assert res_mixed.get("error_type") == "INVALID_ARGUMENT"
+        assert "id 必须为正整数" in res_mixed.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_record_upsert_patch_preserves_spine_and_ribs_assert_sql_args():
+    """核验 F-1 / F-2: record_upsert patch=True 必须保全强脊梁 (状态/日期/金额/币种/单位) 与软肋骨，直接断言真实 SQL 参数。"""
     existing_row = {
         "id": 1001,
-        "doc_no": "DEVLOG-1001",
+        "doc_no": "TASK-1001",
+        "entity_name": "core_engine",
+        "amount": Decimal("128.5000"),
+        "currency": "USD",
+        "event_date": date(2026, 10, 1),
+        "status": "closed",  # 核心生命周期状态为 closed
+        "batch_id": "BATCH-DEV-01",
+        "parent_id": 500,
         "payload": {
-            "title": "故障排查手记",
-            "problem": "连接池超时",
-            "root_cause": "慢查询阻塞连接",
-            "solution": "临时放大连接池",
-            "evidence": "单测通过",
+            "task_id": "T1001",
+            "title": "生产任务",
+            "notes": "初始笔记",
+            "reviewer": "chief_arch",
         },
-        "entity_name": "db_module",
-    }
-
-    updated_row = {
-        "id": 1001,
-        "project_id": "logbook",
-        "dataset_code": "sys_devlog",
-        "parent_id": None,
-        "batch_id": None,
-        "doc_no": "DEVLOG-1001",
-        "entity_name": "db_module",
-        "amount": Decimal("0.0"),
-        "currency": "CNY",
-        "event_date": "2026-11-14",
-        "status": "recorded",
-        "payload": {
-            "title": "故障排查手记",
-            "problem": "连接池超时",
-            "root_cause": "慢查询阻塞连接",
-            "solution": "重构索引并缩减锁粒度 (已局部修正)",
-            "evidence": "单测通过",
-        },
-        "created_at": "2026-11-14T10:00:00",
-        "updated_at": "2026-11-14T12:00:00",
     }
 
     mock_conn = AsyncMock()
     mock_conn.execute = AsyncMock()
-    # 模拟 existing_row 查询命中
-    mock_conn.fetchrow = AsyncMock(side_effect=[existing_row, updated_row])
+    # 第一次 fetchrow 返回 existing_row，第二次返回 mock 执行结果
+    mock_conn.fetchrow = AsyncMock(side_effect=[existing_row, {"id": 1001, "status": "closed"}])
 
     mock_pool = MagicMock()
     mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
@@ -117,27 +149,60 @@ async def test_record_upsert_patch_mode_preserves_unmodified_fields():
          patch("logbook.mcp_server.validate_and_negotiate_project", AsyncMock(return_value="logbook")), \
          patch.object(fact_engine, "validate_payload_schema", AsyncMock()) as mock_validate:
 
-        # 仅传递需要局部修改的 solution 字段，开启 patch=True
+        # 核心场景: 仅通过 patch=True 修改 notes 属性，不传递任何脊柱字段
         res = await record_upsert(
             project="logbook",
-            dataset_code="sys_devlog",
+            dataset_code="sys_task",
             id=1001,
             patch=True,
-            payload={"solution": "重构索引并缩减锁粒度 (已局部修正)"},
+            payload={"notes": "更新后的复盘笔记 (局部修改)"},
         )
 
         assert res.get("isError") is not True
         assert res["success"] is True
-        assert res["record"]["payload"]["solution"] == "重构索引并缩减锁粒度 (已局部修正)"
-        assert res["record"]["payload"]["problem"] == "连接池超时"
-        
-        # 验证合并后的完整 payload 参与了 schema 契约校验
+
+        # F-2 关键断言: 绝不读写死在 updated_row 里的台词，直接检查传入 conn.fetchrow 的 update_sql 真实绑定参数
+        assert mock_conn.fetchrow.call_count == 2
+        update_call = mock_conn.fetchrow.call_args_list[1]
+        sql_query = update_call.args[0]
+        sql_params = update_call.args[1:]
+
+        # 参数映射对应 update_sql:
+        # $1: existing_id (1001)
+        # $2: dataset_code ('sys_task')
+        # $3: parent_id (500)
+        # $4: batch_id ('BATCH-DEV-01')
+        # $5: doc_no ('TASK-1001')
+        # $6: entity_name ('core_engine')
+        # $7: amount (Decimal('128.5000'))
+        # $8: currency ('USD')
+        # $9: event_date (date(2026, 10, 1))
+        # $10: status ('closed' - 绝对不能被刷成 recorded!)
+        # $11: payload (json string)
+        # $13: project_id ('logbook')
+        assert sql_params[0] == 1001
+        assert sql_params[1] == "sys_task"
+        assert sql_params[2] == 500, "parent_id 必须保全原值"
+        assert sql_params[3] == "BATCH-DEV-01", "batch_id 必须保全原值"
+        assert sql_params[4] == "TASK-1001", "doc_no 必须保全原值"
+        assert sql_params[5] == "core_engine", "entity_name 必须保全原值"
+        assert sql_params[6] == Decimal("128.5000"), "amount 必须保全原值，绝对不能被重置为 0"
+        assert sql_params[7] == "USD", "currency 必须保全原值，绝对不能被重置为 CNY"
+        assert sql_params[8] == date(2026, 10, 1), "event_date 必须保全原业务日期，绝对不能被重置为今天"
+        assert sql_params[9] == "closed", "status 必须保全 closed，绝对不能被重置为 recorded！"
+
+        # 验证 payload 合并：既有 reviewer 键保留，notes 键被更新
+        merged_payload = json.loads(sql_params[10])
+        assert merged_payload["reviewer"] == "chief_arch"
+        assert merged_payload["task_id"] == "T1001"
+        assert merged_payload["notes"] == "更新后的复盘笔记 (局部修改)"
+
+        # 验证 Schema 校验以完整合并后的 payload 执行
         mock_validate.assert_called_once()
-        validated_code, validated_payload = mock_validate.call_args.args
-        assert validated_code == "sys_devlog"
-        assert validated_payload["title"] == "故障排查手记"
-        assert validated_payload["problem"] == "连接池超时"
-        assert validated_payload["solution"] == "重构索引并缩减锁粒度 (已局部修正)"
+        v_code, v_payload = mock_validate.call_args.args
+        assert v_code == "sys_task"
+        assert v_payload["notes"] == "更新后的复盘笔记 (局部修改)"
+        assert v_payload["task_id"] == "T1001"
 
 
 @pytest.mark.asyncio
@@ -146,8 +211,14 @@ async def test_record_upsert_with_id_omitting_doc_no():
     existing_row = {
         "id": 8888,
         "doc_no": "ORIGINAL-DOC-88",
-        "payload": {"title": "原单据"},
         "entity_name": "test_entity",
+        "amount": Decimal("0.0"),
+        "currency": "CNY",
+        "event_date": date(2026, 11, 14),
+        "status": "planned",
+        "batch_id": None,
+        "parent_id": None,
+        "payload": {"title": "原单据"},
     }
     updated_row = {
         "id": 8888,
@@ -190,7 +261,9 @@ async def test_record_upsert_with_id_omitting_doc_no():
 
         assert res.get("isError") is not True
         assert res["success"] is True
-        assert res["record"]["doc_no"] == "ORIGINAL-DOC-88"
+        # 验证 SQL 参数实际传入了原有 doc_no
+        sql_params = mock_conn.fetchrow.call_args_list[1].args[1:]
+        assert sql_params[4] == "ORIGINAL-DOC-88"
 
 
 @pytest.mark.asyncio

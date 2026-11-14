@@ -1494,8 +1494,12 @@ class Database:
             cleaned = ev_date.strip().replace("/", "-")
             if len(cleaned) == 8 and cleaned.isdigit():
                 ev_date = date(int(cleaned[:4]), int(cleaned[4:6]), int(cleaned[6:8]))
-            else:
+            elif len(cleaned) >= 10:
                 ev_date = date.fromisoformat(cleaned[:10])
+            else:
+                ev_date = None
+        elif not isinstance(ev_date, date):
+            ev_date = None
 
         vec_literal = f"[{','.join(str(x) for x in record.embedding)}]" if record.embedding else None
 
@@ -1513,7 +1517,8 @@ class Database:
                 if record.doc_no and str(record.doc_no).strip():
                     existing_row = await conn.fetchrow(
                         """
-                        SELECT id, doc_no, payload, entity_name FROM shared.records 
+                        SELECT id, doc_no, payload, entity_name, amount, currency, event_date, status, batch_id, parent_id
+                        FROM shared.records 
                         WHERE project_id = $1 AND dataset_code = $2 AND doc_no = $3 
                           AND parent_id IS NOT DISTINCT FROM $4
                         LIMIT 1;
@@ -1525,7 +1530,8 @@ class Database:
             else:
                 existing_row = await conn.fetchrow(
                     """
-                    SELECT id, doc_no, payload, entity_name FROM shared.records
+                    SELECT id, doc_no, payload, entity_name, amount, currency, event_date, status, batch_id, parent_id
+                    FROM shared.records
                     WHERE id = $1 AND project_id = $2
                     LIMIT 1;
                     """,
@@ -1535,10 +1541,20 @@ class Database:
                     raise ValueError(f"指定更新的事实记录 ID [{existing_id}] 在项目 [{record.project_id}] 中不存在！")
 
             is_patch = patch or getattr(record, "patch", False)
+            fields_set = getattr(record, "model_fields_set", set())
 
             if existing_id is not None and existing_row is not None:
                 final_doc_no = record.doc_no.strip() if record.doc_no and str(record.doc_no).strip() else existing_row["doc_no"]
+                final_entity_name = record.entity_name.strip() if "entity_name" in fields_set and record.entity_name and str(record.entity_name).strip() else existing_row["entity_name"]
+                final_batch_id = record.batch_id.strip() if "batch_id" in fields_set and record.batch_id and str(record.batch_id).strip() else existing_row["batch_id"]
+                final_parent_id = record.parent_id if "parent_id" in fields_set else existing_row["parent_id"]
+
                 if is_patch:
+                    final_status = record.status if "status" in fields_set else existing_row["status"]
+                    final_amount = record.amount if "amount" in fields_set else existing_row["amount"]
+                    final_currency = record.currency if "currency" in fields_set else existing_row["currency"]
+                    final_ev_date = ev_date if "event_date" in fields_set else existing_row["event_date"]
+
                     old_p = existing_row["payload"]
                     if isinstance(old_p, str):
                         try:
@@ -1551,15 +1567,19 @@ class Database:
                     from logbook.engine import fact_engine
                     await fact_engine.validate_payload_schema(record.dataset_code, final_payload)
                 else:
+                    final_status = record.status
+                    final_amount = record.amount
+                    final_currency = record.currency
+                    final_ev_date = ev_date
                     final_payload = record.payload or {}
 
                 update_sql = """
                     UPDATE shared.records
                     SET dataset_code = $2,
                         parent_id = $3,
-                        batch_id = COALESCE($4, shared.records.batch_id),
+                        batch_id = $4,
                         doc_no = $5,
-                        entity_name = COALESCE($6, shared.records.entity_name),
+                        entity_name = $6,
                         amount = $7,
                         currency = $8,
                         event_date = $9,
@@ -1576,14 +1596,14 @@ class Database:
                     update_sql,
                     existing_id,
                     record.dataset_code,
-                    record.parent_id,
-                    record.batch_id,
+                    final_parent_id,
+                    final_batch_id,
                     final_doc_no,
-                    record.entity_name,
-                    record.amount,
-                    record.currency,
-                    ev_date,
-                    record.status,
+                    final_entity_name,
+                    final_amount,
+                    final_currency,
+                    final_ev_date,
+                    final_status,
                     json.dumps(final_payload, ensure_ascii=False),
                     vec_literal,
                     record.project_id,
@@ -1599,7 +1619,15 @@ class Database:
                 raise ValueError("新增事实单据必须提供有效 doc_no 单据号！")
 
             final_doc_no = record.doc_no.strip()
+            final_status = record.status or "recorded"
+            final_amount = record.amount if record.amount is not None else Decimal("0.0000")
+            final_currency = record.currency or "CNY"
+            final_ev_date = ev_date or date.today()
+            final_entity_name = record.entity_name.strip() if record.entity_name else None
+            final_batch_id = record.batch_id.strip() if record.batch_id else None
+            final_parent_id = record.parent_id
             final_payload = record.payload or {}
+
             if is_patch:
                 from logbook.engine import fact_engine
                 await fact_engine.validate_payload_schema(record.dataset_code, final_payload)
@@ -1622,14 +1650,14 @@ class Database:
                 insert_sql,
                 record.project_id,
                 record.dataset_code,
-                record.parent_id,
-                record.batch_id,
+                final_parent_id,
+                final_batch_id,
                 final_doc_no,
-                record.entity_name,
-                record.amount,
-                record.currency,
-                ev_date,
-                record.status,
+                final_entity_name,
+                final_amount,
+                final_currency,
+                final_ev_date,
+                final_status,
                 json.dumps(final_payload, ensure_ascii=False),
                 vec_literal,
                 record.created_at,
@@ -1848,15 +1876,28 @@ class Database:
             if isinstance(id, (list, tuple, set)):
                 id_list = []
                 for x in id:
-                    if x is not None and str(x).strip().isdigit():
-                        id_list.append(int(x))
-                if id_list:
-                    params.append(id_list)
-                    conditions.append(f"id = ANY(${len(params)})")
+                    if x is not None and not isinstance(x, bool):
+                        if isinstance(x, int) and x > 0:
+                            id_list.append(x)
+                        elif isinstance(x, str) and re.match(r"^[1-9]\d*$", x.strip()):
+                            id_list.append(int(x.strip()))
+                        else:
+                            raise ValueError(f"id 必须为正整数 (收到: {x!r})")
+                    else:
+                        raise ValueError(f"id 必须为正整数 (收到: {x!r})")
+                if not id_list:
+                    raise ValueError("id 列表不能为空！")
+                params.append(id_list)
+                conditions.append(f"id = ANY(${len(params)})")
             else:
-                if str(id).strip().isdigit():
-                    params.append(int(id))
-                    conditions.append(f"id = ${len(params)}")
+                if not isinstance(id, bool) and isinstance(id, int) and id > 0:
+                    clean_int = id
+                elif isinstance(id, str) and re.match(r"^[1-9]\d*$", id.strip()):
+                    clean_int = int(id.strip())
+                else:
+                    raise ValueError(f"id 必须为正整数 (收到: {id!r})")
+                params.append(clean_int)
+                conditions.append(f"id = ${len(params)}")
 
         if dataset_code:
             params.append(dataset_code.strip().lower())
