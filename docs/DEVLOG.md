@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (49)
+## 一、任务台账 (50)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-OPT-081 | closed | feat | Logbook 0.8.1: 读写对称性补齐 (record_query 支持 id 检索)、record_upsert 局部补丁模式 (patch=True 防静默丢字段)、主键更新解耦 doc_no 与 Schema 错误自解释引导 | 77ff3a0 | 彻底解决 Agent 使用四大痛点: ① record_query 增设 id/id_list 过滤参数与 applied_filters 回显，消除 extra_forbidden; ② record_upsert 引入 patch=True 局部更新，合并已有 payload 并重新执行 Schema 契约校验，消除改错别字需整条重发与丢内容风险; ③ record_upsert 按主键 id 更新时允许省略 doc_no (自动沿用原单号)，新增时严格强制 doc_no 非空; ④ validate_payload_schema 校验报错提示可用必填项列表与 dataset_manage / logbook://schema/fields 自愈指引; 新增 5 项专项单测，门禁 78 项 100% 全绿 (DEV-2026-11-14-01) |
 | L-PUB-080 | closed | refactor | Logbook 0.8.0 开源前置真实缺陷全量闭环: README 14核心原语对齐、个人绝对路径清除、gate 回归脚本改造与内网 IP 彻底脱敏 | 0e30829 | 响应用户对开源真实可用性质询，消灭言行不一与自嗨包装: ① 重构 README.md，彻底删除 task_upsert 等废弃工具描述与 0.2.0 过期标记，100% 对齐 0.8.0 规范的 14 个核心正典原语与客户端配置; ② 根除 sql/01_init.sql、deploy/qnap/DEPLOY.md 与 scripts/ 中硬编码的个人本地绝对路径 (/home/yupeng); ③ 改造 scripts/replay_brix_writes.py 与 measure_brief.py，对齐 0.8.0 record_upsert/record_query 原语，保障门禁脚本真实一致; ④ 更新 docker-compose.yml 镜像标签为 logbook:0.8.0; ⑤ 历史会话存档全面替换内网 IP 为 RFC 5737 规范保留地址; 单元测试 73 项全绿 (DEV-2026-11-08-04) |
 | L-FIX-080 | closed | fix | Logbook 0.8.0 终极收敛封版: 修复 import_devlog_markdown 签名错位与租约冲突 SQL 参数绑定错误 | e66fcbd | 落实用户裁决彻底收敛封版，消灭过度挑刺与伪需求，仅拧紧2处真实边缘代码笔误: ① 修正 converter.py 中 import_devlog_markdown 调用 bulk_upsert_records 的传参溢出崩溃 (P0)，并在 db.bulk_upsert_records 引入双形态入参自适应防呆; ② 修正 db.acquire_file_lease 中冲突持有者查询 CTE 的 SQL 参数绑定错误 ($2 错写为 agent_name 改正为 $4 file_path)，确保并发抢锁失败时精准回显持锁人; ③ 单元测试 73 项全绿 (新增2项防回归单测)，生产平滑更新上线，6,924 条生产数据零丢失，系统进入免维护静止稳态 (DEV-2026-11-08-03) |
 | L-CLEAN-080 | closed | refactor | Logbook 0.8.0: 独立第三方代码二次深度审计、MCP Resource AttributeError 根除、协议 Repr 纠偏与 500+ 行死代码彻底拔除 | b25b36e | 落实独立第三方深度审计清单: ① 修复 get_active_tasks_resource 等 6 大 MCP Resource 端点字典安全提取 _v(obj, key)，根除生产现场 AttributeError 崩溃; ② 修复 ssh_server.py 的 resources/read 协议封装，消除 [ReadResourceContents(...)] Python Repr 乱码字符串，输出纯净 Markdown; ③ 彻底清除 normalizer.py (319 行) 与 engine.py (215 行) 中已淘汰历史实体状态映射与未调用死代码 (净删 534 行); ④ 全量纠偏 4 大 Prompts 规程、协商开户指引与 SingleFlight 规则中的废弃工具名 (project_init -> project_manage); ⑤ 单元测试 71 项全绿，生产热部署验证，6,924 条生产物理数据零丢失 (DEV-2026-11-08-02) |
@@ -115,6 +116,38 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-14-01] Logbook 0.8.1: 读写对称性补齐、局部补丁模式 (patch=True) 与契约自解释增强 — ✅ 闭环
+
+根据用户裁决与实际 Agent 使用过程中的痛点反馈，完成四大体验与防御维度的系统级优化、门禁与回归验证：
+
+1. **结构化四要素复盘 (SSOT)**:
+   - **故障/需求背景 (Problem)**:
+     - **读写严重不对称 (ISSUE-01)**: Agent 调用 `record_upsert` 返回记录带有主键 `id`，且入参支持 `id: int`；但 `record_query` 读端未开放 `id` 过滤，传 `id` 直接被 FastMCP/Pydantic 拦截为 `INVALID_ARGUMENT: id Extra inputs are not permitted`；
+     - **强制全量替换与丢内容风险 (ISSUE-02)**: `db.upsert_record` 更新语句使用 `payload = $11::jsonb` 全量覆盖，修改错别字或部分字段必须全篇重传全部动态字段，存在严重漏写、静默丢字段的脆性风险；
+     - **主键更新强绑定单据号 (ISSUE-03)**: `record_upsert` 的 `doc_no: str` 为必选参数，在明确提供物理主键 `id` 时仍强制要求提供 `doc_no`，导致未缓存单号时无法直接按 ID 更新；
+     - **Schema 契约拦截缺乏引导 (ISSUE-04)**: `FactEngine.validate_payload_schema` 校验拦截仅报字段缺失，未提示可用必填项列表与查看 Schema 的资源入口，导致 Agent 靠猜或翻历史记录反推字段。
+   - **根因定位 (Root Cause)**:
+     - 事实引擎统一过程中读写端参数契约未完全拉齐，`record_query` 遗漏了单据主键 `id` 列；
+     - 底层更新 SQL 缺少 JSONB 局部合并分支，未向应用层暴露 patch 语义；
+     - 数据模型层强脊柱校验要求 `doc_no` 在任何场景下非空；
+     - 校验异常提示仅关注校验本身，缺少自愈性上下文。
+   - **解决方案 (Solution)**:
+     - `src/logbook/mcp_server.py`: `record_query` 增设 `id: int | list[int] | None = None` 参数，并在 `applied_filters["id"]` 实时回显；
+     - `src/logbook/db.py`: `query_records` 增补 `id` 参数化过滤（标量 `id = $N`，数组 `id = ANY($N)`);
+     - `src/logbook/models.py` & `mcp_server.py`: `DataRecord` 与 `record_upsert` 增设 `patch: bool = False` 参数，`doc_no` 声明为可选并增加新增与更新的差异化防呆；
+     - `src/logbook/db.py`: `upsert_record` 支持 `patch=True` 局部合并已存 payload 并再次执行 Schema 校验，指定 `id` 更新且未传 `doc_no` 时自动沿用已有单号；
+     - `src/logbook/engine.py`: `validate_payload_schema` 丰富抛错文案，输出必填项列表并指引 `dataset_manage(action='query')` 与 `logbook://schema/fields`；
+     - 增补回归测试：编写 `tests/test_opt_081_symmetry_and_patch.py` 覆盖 5 大核心场景。
+   - **验证证据 (Evidence)**:
+     - 单元测试门禁：`bash scripts/gate.sh unit` 78 项全绿（78 passed, 40 deselected，100% PASS，0 失败）；
+     - 兼容性保全：`patch` 缺省为 `False`，现有测试与批量脚本 100% 保持原有语义。
+
+2. **实测指标**:
+   - 单元测试通过率: 78/78 (100% PASS, 40 deselected integration)
+   - 优化闭环项: ISSUE-01 ~ ISSUE-04 全部闭环
 
 ---
 

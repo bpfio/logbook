@@ -1401,7 +1401,7 @@ async def dataset_query(
 async def record_upsert(
     project: str,
     dataset_code: str,
-    doc_no: str,
+    doc_no: str | None = None,
     event_date: str | None = None,
     amount: float | str | int = 0,
     currency: str = "CNY",
@@ -1412,24 +1412,36 @@ async def record_upsert(
     batch_id: str | None = None,
     id: int | None = None,
     with_embedding: bool = False,
+    patch: bool = False,
 ) -> dict:
     """写入或更新通用业务/事实单据记录 (Strong Spine + Flexible Ribs)。
 
     - project: 必填。归属项目代号 (必须显式传参)。
-    - dataset_code: 必填。关联的数据集定义编码 (如 'safe_forex', 'oss_benchmark')。
-    - doc_no: 必填。单据号/唯一标识 (发票号、关单号、跑分流水号)。
+    - dataset_code: 必填。关联的数据集定义编码 (如 'sys_devlog', 'sys_task', 'sys_waiting', 'sys_research')。
+    - doc_no: 可选。单据号/唯一标识 (发票号、关单号、DEVLOG-xxx、TASK-xxx)。新增记录必填；指定 id 更新时可省略以保持原单号。
     - event_date: 可选。业务发生日期或测试日期 (YYYY-MM-DD，缺省自动填充今日)。
     - amount: 可选。核心数值/金额 (高精度 NUMERIC, 缺省 0)。
     - currency: 可选。币种或量纲单位 (USD, CNY, QPS, MS 等，缺省 CNY)。
     - entity_name: 可选。往来单位/境外付款人/组件仓库名。
-    - status: 可选。状态: recorded, reconciled, verified, cancelled (缺省 recorded)。
+    - status: 可选。状态: recorded, reconciled, verified, cancelled 等 (缺省 recorded)。
     - payload: 可选。业务特有动态属性载荷 (JSONB 软肋骨)。
     - parent_id: 可选。父单据记录 ID (支持主子表分录)。
     - batch_id: 可选。导入批次标识。
     - id: 可选。指定物理记录 ID 更新。
     - with_embedding: 可选。是否同步生成 768 维语义向量 (缺省 False)。
+    - patch: 可选。局部补丁模式 (缺省 False)。为 True 时仅合并更新传入的 payload 字段并保留其余未传键值，防止静默丢字段。
+
+    契约提示: 常用系统数据集必填字段:
+    - sys_devlog: title, problem, root_cause, solution, evidence (复盘四要素+标题)
+    - sys_task: task_id, title
+    - sys_waiting: description
+    - sys_research: title, objective, tradeoffs, decision
+    完整契约可通过 dataset_manage(action='query', code=...) 或 logbook://schema/fields 查询。
     """
     proj = await validate_and_negotiate_project(project, is_write=True)
+
+    if id is None and (doc_no is None or not str(doc_no).strip()):
+        return tool_error("INVALID_ARGUMENT", "新增事实单据必须提供 doc_no 单据号！", tool="record_upsert")
 
     st = normalize_record_status(status)
     actual_event_date = str(event_date).strip() if event_date and str(event_date).strip() else date.today().isoformat()
@@ -1444,22 +1456,27 @@ async def record_upsert(
         if not hit:
             return tool_error("INVALID_ARGUMENT", f"批次 [{b_id}] 在项目 [{proj}] 的批次表中不存在！必须先通过 batch_upsert 建立批次主档后方可关联单据。", tool="record_upsert")
 
+    clean_doc_no = doc_no.strip() if doc_no and str(doc_no).strip() else None
+
     record = DataRecord(
         id=id,
         project_id=proj,
         dataset_code=dataset_code.strip().lower(),
         parent_id=parent_id,
         batch_id=b_id,
-        doc_no=doc_no.strip(),
+        doc_no=clean_doc_no,
         entity_name=entity_name.strip() if entity_name else None,
         amount=amount,
         currency=currency.strip().upper() if currency else "CNY",
         event_date=actual_event_date,
         status=st,
         payload=payload or {},
+        patch=patch,
     )
-    # 动态 JSON Schema 契约校验 (强化软肋骨防御)
-    await fact_engine.validate_payload_schema(record.dataset_code, record.payload)
+    # 当非 patch 模式时，前置严格执行动态 JSON Schema 契约校验 (强化软肋骨防御)
+    # patch 模式下由 db.upsert_record 在与既有 payload 合并后再执行完整校验
+    if not patch:
+        await fact_engine.validate_payload_schema(record.dataset_code, record.payload)
 
     if with_embedding or os.getenv("LOGBOOK_AUTO_EMBED_RECORDS", "0") == "1":
         txt = extract_record_embed_text(record)
@@ -1467,7 +1484,7 @@ async def record_upsert(
             emb = await get_embedding(txt)
             record.embedding = emb.embedding
 
-    res = await db.upsert_record(record)
+    res = await db.upsert_record(record, patch=patch)
     for k in ("event_date", "created_at", "updated_at"):
         if isinstance(res.get(k), (datetime, date)):
             res[k] = res[k].isoformat()
@@ -1499,12 +1516,14 @@ async def record_query(
     limit: int = 50,
     offset: int = 0,
     fields: list[str] | None = None,
+    id: int | list[int] | None = None,
 ) -> dict:
-    """多维检索事实数据单据 (支持日期/金额区间、全文检索、JSONB 属性包含)。
+    """多维检索事实数据单据 (支持日期/金额区间、全文检索、JSONB 属性包含、物理主键精准过滤)。
 
     - project: 必填。项目代号。
     - dataset_code: 可选。数据集编码过滤。
     - doc_no: 可选。单号精准检索。
+    - id: 可选。按单据物理主键 ID 过滤 (支持单整型如 9773，或整型数组如 [9773, 9774])。
     - entity_name: 可选。往来单位模糊匹配。
     - date_from / date_to: 可选。业务发生日期范围 (YYYY-MM-DD)。
     - amount_min / amount_max: 可选。核心数值/金额区间。
@@ -1553,6 +1572,7 @@ async def record_query(
         query_text=query_text,
         limit=clamp_limit(limit),
         offset=offset,
+        id=id,
     )
     items_list = []
     for r in rows:
@@ -1565,6 +1585,8 @@ async def record_query(
         items_list.append(d)
 
     applied_filters: dict[str, Any] = {}
+    if id is not None:
+        applied_filters["id"] = id
     if dataset_code:
         applied_filters["dataset_code"] = dataset_code.strip().lower()
     if doc_no:

@@ -174,7 +174,7 @@ class DataRecord(BaseModel):
     batch_id: str | None = Field(default=None, max_length=64, description="导入批次号")
 
     # 强脊梁 (Strong Spine)
-    doc_no: str = Field(..., max_length=128, description="核心业务单号/关单号/发票号/组件版本")
+    doc_no: str | None = Field(default=None, max_length=128, description="核心业务单号/关单号/发票号/组件版本")
     entity_name: str | None = Field(default=None, max_length=256, description="往来单位/境外付款人/组件仓库名")
     amount: Decimal = Field(default=Decimal("0.0000"), description="核心金额/指标数值 (高精度, 无浮点误差)")
     currency: str = Field(default="CNY", max_length=16, description="币种或量纲单位，如 USD, CNY, QPS, MS")
@@ -183,6 +183,7 @@ class DataRecord(BaseModel):
 
     # 软肋骨 (Flexible Ribs)
     payload: dict[str, Any] = Field(default_factory=dict, description="动态属性载荷 (JSONB)")
+    patch: bool = Field(default=False, description="是否以局部补丁 (JSON merge) 模式更新 payload")
 
     # 语义检索向量 (768 维，讯飞星火 MaaS / 本地降级向量)
     embedding: list[float] | None = Field(default=None, description="768 维语义向量")

@@ -86,7 +86,13 @@ class FactEngine:
         for field in required:
             val = payload.get(field)
             if val is None or (isinstance(val, str) and not val.strip()):
-                raise ValueError(f"数据集 [{dataset_code}] 契约校验失败: 必填字段 '{field}' 缺失或为空！")
+                req_str = ", ".join(f"'{r}'" for r in required)
+                raise ValueError(
+                    f"数据集 [{dataset_code}] 契约校验失败: 必填字段 '{field}' 缺失或为空！"
+                    f"规范定义必填项: [{req_str}]。"
+                    f"提示: 可调用 dataset_manage(action='query', code='{dataset_code}') 查看完整 Schema，"
+                    f"或阅读 MCP 资源 logbook://schema/fields。"
+                )
         
         # 校验属性类型与最小长度及枚举约束 (OPT-02)
         props = schema.get("properties", {})

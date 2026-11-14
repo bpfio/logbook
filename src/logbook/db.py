@@ -1486,7 +1486,7 @@ class Database:
                 res.append(d)
             return res
 
-    async def upsert_record(self, record: DataRecord) -> dict:
+    async def upsert_record(self, record: DataRecord, patch: bool = False) -> dict:
         """插入或更新单个事实记录 (如果指定 id 或匹配到同单号同主键则更新，支持自动注册未定义数据集)。"""
         await self.ensure_datasets_and_records_schema()
         ev_date = record.event_date
@@ -1508,20 +1508,51 @@ class Database:
             """, record.dataset_code)
 
             existing_id = record.id
+            existing_row = None
             if existing_id is None:
-                row = await conn.fetchrow(
+                if record.doc_no and str(record.doc_no).strip():
+                    existing_row = await conn.fetchrow(
+                        """
+                        SELECT id, doc_no, payload, entity_name FROM shared.records 
+                        WHERE project_id = $1 AND dataset_code = $2 AND doc_no = $3 
+                          AND parent_id IS NOT DISTINCT FROM $4
+                        LIMIT 1;
+                        """,
+                        record.project_id, record.dataset_code, record.doc_no.strip(), record.parent_id
+                    )
+                    if existing_row:
+                        existing_id = existing_row["id"]
+            else:
+                existing_row = await conn.fetchrow(
                     """
-                    SELECT id FROM shared.records 
-                    WHERE project_id = $1 AND dataset_code = $2 AND doc_no = $3 
-                      AND parent_id IS NOT DISTINCT FROM $4
+                    SELECT id, doc_no, payload, entity_name FROM shared.records
+                    WHERE id = $1 AND project_id = $2
                     LIMIT 1;
                     """,
-                    record.project_id, record.dataset_code, record.doc_no, record.parent_id
+                    existing_id, record.project_id
                 )
-                if row:
-                    existing_id = row["id"]
+                if not existing_row:
+                    raise ValueError(f"指定更新的事实记录 ID [{existing_id}] 在项目 [{record.project_id}] 中不存在！")
 
-            if existing_id is not None:
+            is_patch = patch or getattr(record, "patch", False)
+
+            if existing_id is not None and existing_row is not None:
+                final_doc_no = record.doc_no.strip() if record.doc_no and str(record.doc_no).strip() else existing_row["doc_no"]
+                if is_patch:
+                    old_p = existing_row["payload"]
+                    if isinstance(old_p, str):
+                        try:
+                            old_p = json.loads(old_p)
+                        except Exception:
+                            old_p = {}
+                    elif not isinstance(old_p, dict):
+                        old_p = {}
+                    final_payload = {**old_p, **(record.payload or {})}
+                    from logbook.engine import fact_engine
+                    await fact_engine.validate_payload_schema(record.dataset_code, final_payload)
+                else:
+                    final_payload = record.payload or {}
+
                 update_sql = """
                     UPDATE shared.records
                     SET dataset_code = $2,
@@ -1547,13 +1578,13 @@ class Database:
                     record.dataset_code,
                     record.parent_id,
                     record.batch_id,
-                    record.doc_no,
+                    final_doc_no,
                     record.entity_name,
                     record.amount,
                     record.currency,
                     ev_date,
                     record.status,
-                    json.dumps(record.payload, ensure_ascii=False),
+                    json.dumps(final_payload, ensure_ascii=False),
                     vec_literal,
                     record.project_id,
                 )
@@ -1562,6 +1593,16 @@ class Database:
                     if isinstance(d.get("payload"), str):
                         d["payload"] = json.loads(d["payload"])
                     return d
+
+            # 新增插入分支
+            if not record.doc_no or not str(record.doc_no).strip():
+                raise ValueError("新增事实单据必须提供有效 doc_no 单据号！")
+
+            final_doc_no = record.doc_no.strip()
+            final_payload = record.payload or {}
+            if is_patch:
+                from logbook.engine import fact_engine
+                await fact_engine.validate_payload_schema(record.dataset_code, final_payload)
 
             insert_sql = """
                 INSERT INTO shared.records (
@@ -1583,13 +1624,13 @@ class Database:
                 record.dataset_code,
                 record.parent_id,
                 record.batch_id,
-                record.doc_no,
+                final_doc_no,
                 record.entity_name,
                 record.amount,
                 record.currency,
                 ev_date,
                 record.status,
-                json.dumps(record.payload, ensure_ascii=False),
+                json.dumps(final_payload, ensure_ascii=False),
                 vec_literal,
                 record.created_at,
                 record.updated_at,
@@ -1787,6 +1828,7 @@ class Database:
         limit: int = 50,
         offset: int = 0,
         project: str | None = None,
+        id: int | list[int] | None = None,
     ) -> list[dict]:
         """多维度查询事实数据记录。"""
         actual_proj = (project_id or project or "").strip()
@@ -1801,6 +1843,20 @@ class Database:
 
         conditions = ["project_id = $1"]
         params: list[Any] = [actual_proj]
+
+        if id is not None:
+            if isinstance(id, (list, tuple, set)):
+                id_list = []
+                for x in id:
+                    if x is not None and str(x).strip().isdigit():
+                        id_list.append(int(x))
+                if id_list:
+                    params.append(id_list)
+                    conditions.append(f"id = ANY(${len(params)})")
+            else:
+                if str(id).strip().isdigit():
+                    params.append(int(id))
+                    conditions.append(f"id = ${len(params)}")
 
         if dataset_code:
             params.append(dataset_code.strip().lower())
