@@ -68,6 +68,32 @@ async def test_record_query_supports_id_scalar_and_list():
 
 
 @pytest.mark.asyncio
+async def test_record_query_cross_project_id_isolation():
+    """核验跨项目 ID 隔离不变量: 项目 A 查项目 B 的 ID 严格返回 0 行，且底层 SQL 恒有 project_id 强过滤。"""
+    mock_conn = AsyncMock()
+    # 模拟底库按 WHERE project_id = $1 AND id = $2 执行，项目 proj_a 查属于 proj_b 的 ID 9999 返回空列表
+    mock_conn.fetch = AsyncMock(return_value=[])
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+    mock_pool.acquire.return_value.__aexit__.return_value = None
+
+    with patch.object(db, "_pool", mock_pool), \
+         patch.object(db, "ensure_datasets_and_records_schema", AsyncMock()):
+        rows = await db.query_records(project_id="proj_a", id=9999)
+        assert rows == []
+        
+        # 验证 SQL 中 project_id 是第一过滤条件，且绑定参数严格对齐
+        mock_conn.fetch.assert_called_once()
+        sql = mock_conn.fetch.call_args.args[0]
+        params = mock_conn.fetch.call_args.args[1:]
+        assert "WHERE project_id = $1" in sql
+        assert "id = $2" in sql
+        assert params[0] == "proj_a"
+        assert params[1] == 9999
+
+
+@pytest.mark.asyncio
 async def test_record_query_rejects_invalid_id_fail_closed():
     """核验 F-3 / F-4: record_query 对非法 id 严格阻断报错，绝不 fail-open 穿透全表。"""
     with patch("logbook.mcp_server.validate_and_negotiate_project", AsyncMock(return_value="test_proj")):
