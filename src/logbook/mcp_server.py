@@ -48,7 +48,7 @@ from .engine import fact_engine
 # 键 tasks_open/findings_open/waitings_open/batch_running/recent_devlogs; A1 未落地期间取不到属预期)
 brief_project = getattr(db, "brief_project", None)
 from typing import Annotated
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, StrictInt
 
 
 # 创建 MCP Server 实例 (version 注入用于生产部署构建辨识)
@@ -1425,9 +1425,9 @@ async def record_upsert(
     entity_name: str | None = None,
     status: str | None = None,
     payload: dict[str, Any] | None = None,
-    parent_id: int | None = None,
+    parent_id: StrictInt | None = None,
     batch_id: str | None = None,
-    id: int | None = None,
+    id: StrictInt | None = None,
     with_embedding: bool = False,
     patch: bool = False,
 ) -> dict:
@@ -1542,13 +1542,13 @@ async def record_query(
     amount_max: float | None = None,
     status: str | list[str] | None = None,
     batch_id: str | None = None,
-    parent_id: int | None = None,
+    parent_id: StrictInt | None = None,
     payload_filter: dict[str, Any] | None = None,
     query_text: str | None = None,
     limit: int = 50,
     offset: int = 0,
     fields: list[str] | None = None,
-    id: int | list[int] | None = None,
+    id: StrictInt | list[StrictInt] | None = None,
 ) -> dict:
     """多维检索事实数据单据 (支持日期/金额区间、全文检索、JSONB 属性包含、物理主键精准过滤)。
 

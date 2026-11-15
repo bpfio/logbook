@@ -69,10 +69,11 @@
 
 ---
 
-## 二、发现台账 (40)
+## 二、发现台账 (41)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-OPT81-12 | review | P2 | fixed | id 入参采用 StrictInt 强类型声明，彻底阻断 Pydantic 宽松模式将 bool 强转为 1 | FastMCP 入口层与 DataRecord 统一声明 StrictInt，杜绝布尔型隐式强转篡改 1 号单据 (DEV-2026-11-14-01) |
 | F-OPT81-01 | review | P1 | fixed | patch=True 局部更新未保全强脊柱字段 (status/amount/currency/event_date) | 仅合并 payload 未保全脊柱列，导致 closed 任务被冲刷为 recorded；改由 model_fields_set 保全原值 (DEV-2026-11-14-01) |
 | F-OPT81-02 | review | P2 | fixed | 单测断言 mock 预设 updated_row 导致未能捕获脊柱覆盖真实缺陷 | mock 返回写死数据导致用例假绿；重构为直接断言 update_sql 真实绑定参数 (DEV-2026-11-14-01) |
 | F-OPT81-03 | review | P2 | fixed | record_query id 过滤对非正整数 fail-open 导致穿透返回全量 | isdigit 对负数、字母、上标数字异常放行或报错；改用正整数严格正则并显式阻断 bool (DEV-2026-11-14-01) |

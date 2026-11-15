@@ -11,7 +11,7 @@ from datetime import datetime, date
 from decimal import Decimal
 from enum import Enum
 from typing import Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, StrictInt
 from .time_sync import get_beijing_now
 
 
@@ -167,10 +167,10 @@ class RecordStatus(str, Enum):
 
 class DataRecord(BaseModel):
     """通用事实数据行模型 (Strong Spine + Flexible Ribs)."""
-    id: int | None = None
+    id: StrictInt | None = None
     project_id: str = Field(..., max_length=64, description="归属项目代号")
     dataset_code: str = Field(..., max_length=64, description="关联数据集唯一标识码")
-    parent_id: int | None = Field(default=None, description="父单据记录 ID (支持主子表分录)")
+    parent_id: StrictInt | None = Field(default=None, description="父单据记录 ID (支持主子表分录)")
     batch_id: str | None = Field(default=None, max_length=64, description="导入批次号")
 
     # 强脊梁 (Strong Spine)

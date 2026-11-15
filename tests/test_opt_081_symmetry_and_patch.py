@@ -139,6 +139,12 @@ async def test_record_query_rejects_invalid_id_fail_closed():
         assert res_mixed.get("error_type") == "INVALID_ARGUMENT"
         assert "id 必须为正整数" in res_mixed.get("detail", "")
 
+        # 8. (F-12) record_upsert 传入 id=True 严格拦截，绝不强转为 1 (StrictInt 约束)
+        res_upsert_bool = await record_upsert(project="test_proj", dataset_code="sys_task", id=True)
+        assert res_upsert_bool.get("isError") is True
+        assert res_upsert_bool.get("error_type") == "INVALID_ARGUMENT"
+        assert "valid integer" in res_upsert_bool.get("detail", "")
+
 
 @pytest.mark.asyncio
 async def test_record_upsert_patch_preserves_spine_and_ribs_assert_sql_args():
