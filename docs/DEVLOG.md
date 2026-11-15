@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (50)
+## 一、任务台账 (51)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-MCP-ROUTEA | closed | feat | Logbook MCP 人体工学与 Schema 贫血治理 (路线A): record_upsert 内联 6 大高频数据集 Payload 规范模板 + dataset_manage/message_action 宽容接受 project 参数消除 extra_forbidden | 1b2d26d | 贯彻用户裁决路线A，消灭 Agent 运行时认知摩擦与 extra_forbidden 试错往返: ① record_upsert 工具描述中完整内嵌 sys_task、sys_devlog、session_checkpoint、sys_finding、sys_waiting、sys_research 六大核心数据集的规范 Payload 结构模板 (必填/可选标注与开箱即用示例)，彻底消除 Schema 贫血引发的探测开销; ② 为 dataset_manage 与 message_action 签名增设可选参数 project: str | None = None，兼容 Agent 习惯性传递 project 的调用惯性，彻底终结 FastMCP extra_forbidden 报错; ③ 增补专项单元测试，81 项门禁全绿 (DEV-2026-11-15-01) |
 | L-OPT-081 | closed | feat | Logbook 0.8.1: 读写对称性补齐 (record_query 支持 id 检索)、record_upsert 局部补丁模式 (patch=True 脊梁保全与防丢字段)、主键更新解耦 doc_no 与 Schema 错误自解释引导 | d6f49ed | 彻底解决 Agent 使用四大痛点与外部评审 F-1~F-4 缺陷: ① record_query 增设严格正整数 id/id_list 过滤参数与 applied_filters 回显，消除 extra_forbidden，遇到非正整数严格 fail-closed 拦截 (F-3/F-4); ② record_upsert 引入 patch=True 局部更新，合并已有 payload 并通过 model_fields_set 严格保全 status/amount/currency/event_date 等强脊柱列原值，彻底消除任务状态被冲刷与静默丢字段风险 (F-1); ③ record_upsert 按主键 id 更新时允许省略 doc_no (自动沿用原单号)，新增时严格强制 doc_no 非空; ④ validate_payload_schema 校验报错提示可用必填项列表与 dataset_manage / logbook://schema/fields 自愈指引; ⑤ 单测重构为断言 update_sql 真实绑定参数 (F-2); 新增 6 项专项单测，门禁 79 项 100% 全绿 (DEV-2026-11-14-01) |
 | L-PUB-080 | closed | refactor | Logbook 0.8.0 开源前置真实缺陷全量闭环: README 14核心原语对齐、个人绝对路径清除、gate 回归脚本改造与内网 IP 彻底脱敏 | 0e30829 | 响应用户对开源真实可用性质询，消灭言行不一与自嗨包装: ① 重构 README.md，彻底删除 task_upsert 等废弃工具描述与 0.2.0 过期标记，100% 对齐 0.8.0 规范的 14 个核心正典原语与客户端配置; ② 根除 sql/01_init.sql、deploy/qnap/DEPLOY.md 与 scripts/ 中硬编码的个人本地绝对路径 (/home/yupeng); ③ 改造 scripts/replay_brix_writes.py 与 measure_brief.py，对齐 0.8.0 record_upsert/record_query 原语，保障门禁脚本真实一致; ④ 更新 docker-compose.yml 镜像标签为 logbook:0.8.0; ⑤ 历史会话存档全面替换内网 IP 为 RFC 5737 规范保留地址; 单元测试 73 项全绿 (DEV-2026-11-08-04) |
 | L-FIX-080 | closed | fix | Logbook 0.8.0 终极收敛封版: 修复 import_devlog_markdown 签名错位与租约冲突 SQL 参数绑定错误 | e66fcbd | 落实用户裁决彻底收敛封版，消灭过度挑刺与伪需求，仅拧紧2处真实边缘代码笔误: ① 修正 converter.py 中 import_devlog_markdown 调用 bulk_upsert_records 的传参溢出崩溃 (P0)，并在 db.bulk_upsert_records 引入双形态入参自适应防呆; ② 修正 db.acquire_file_lease 中冲突持有者查询 CTE 的 SQL 参数绑定错误 ($2 错写为 agent_name 改正为 $4 file_path)，确保并发抢锁失败时精准回显持锁人; ③ 单元测试 73 项全绿 (新增2项防回归单测)，生产平滑更新上线，6,924 条生产数据零丢失，系统进入免维护静止稳态 (DEV-2026-11-08-03) |
@@ -69,10 +70,11 @@
 
 ---
 
-## 二、发现台账 (41)
+## 二、发现台账 (42)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-MCP-ROUTEA | review | P2 | fixed | dataset_manage/message_action 缺失 project 参数导致习惯性传参被 FastMCP extra_forbidden 阻断 | FastMCP 全局 extra='forbid' 导致 Agent 传递 project 被拒; 增设可选 project 参数宽容容错 (DEV-2026-11-15-01) |
 | F-OPT81-12 | review | P2 | fixed | id 入参采用 StrictInt 强类型声明，彻底阻断 Pydantic 宽松模式将 bool 强转为 1 | FastMCP 入口层与 DataRecord 统一声明 StrictInt，杜绝布尔型隐式强转篡改 1 号单据 (DEV-2026-11-14-01) |
 | F-OPT81-01 | review | P1 | fixed | patch=True 局部更新未保全强脊柱字段 (status/amount/currency/event_date) | 仅合并 payload 未保全脊柱列，导致 closed 任务被冲刷为 recorded；改由 model_fields_set 保全原值 (DEV-2026-11-14-01) |
 | F-OPT81-02 | review | P2 | fixed | 单测断言 mock 预设 updated_row 导致未能捕获脊柱覆盖真实缺陷 | mock 返回写死数据导致用例假绿；重构为直接断言 update_sql 真实绑定参数 (DEV-2026-11-14-01) |
@@ -121,6 +123,27 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-15-01] Logbook MCP 人体工学与 Schema 贫血治理 (路线A) — ✅ 闭环
+
+贯彻用户裁决路线A（零工具增量、内联 Schema 模板、宽容参数容错），根除 Agent 使用过程中的认知摩擦与 extra_forbidden 报错：
+
+1. **结构化四要素复盘 (SSOT)**:
+   - **故障/需求背景 (Problem)**:
+     - **Schema 贫血与额外探测开销**: Logbook 0.8.0 将 46 个工具归一为 14 个核心工具后，各实体动态结构折叠进 `payload: dict` 软肋骨中。LLM Agent 无法在 prompt 初始阶段感知具体数据集（如 `sys_task`, `sys_devlog`, `session_checkpoint` 等）的字段契约，必须通过 `dataset_manage` 多次往返探测，增加了上下文与调用延迟；
+     - **全站项目主义惯性与 extra_forbidden 摩擦**: Logbook 绝大多数核心工具强制 `project: str` 显式传参，Agent 形成了“全调用均传 project”的调用惯性；而 `dataset_manage`（管理全局 `shared.datasets`）与 `message_action`（按全局 `message_id` 流转）在签名中未包含 `project`。在 FastMCP `extra='forbid'` 约束下，Agent 习惯性传入 `project="trix"` 即刻触发 `1 validation error for dataset_manageArguments: project Extra inputs are not permitted [type=extra_forbidden]` 报错。
+   - **机理与根因 (Root Cause)**:
+     - 46 工具归一时，动态实体契约虽然通过 `FactEngine` 的 JSON Schema 在底层提供了校验，但工具暴露层（MCP Docstring）仅有一行简略提示，未提供完整的开箱即用模板；
+     - FastMCP 依赖 Pydantic 严格模式校验，未在 Python 函数形参中声明的参数均被视作额外输入并抛出校验异常。
+   - **解决方案 (Solution)**:
+     - **内联高频 Schema 模板**: 在 `record_upsert` docstring 中直接内嵌 `sys_task`、`sys_devlog`、`session_checkpoint`、`sys_finding`、`sys_waiting`、`sys_research` 六大高频数据集的标准 Payload 模板，清晰标注必填/可选字段及推荐脊柱参数，零工具增量，免运行时探测；
+     - **宽容接受 project 参数**: 在 `dataset_manage` 与 `message_action` 签名中增加 `project: str | None = None`，在 docstring 中明确其为宽容兼容参数，并在执行体中安全忽略，彻底消除 `extra_forbidden` 摩擦；
+     - **同步更新客户端 Lazy Schema**: 将更新后的参数与描述同步至 `~/.gemini/antigravity-cli/mcp/logbook/*.json`。
+   - **验证证据 (Evidence)**:
+     - 本地单元测试套件全部通过（81 passed, 0 failed, 退出码 0）；
+     - `tests/test_opt_081_symmetry_and_patch.py` 新增用例实测：`dataset_manage(project="trix", action="query", code="sys_devlog")` 与 `message_action(project="trix", action="read", message_id=1)` 均成功执行无异常。
 
 ---
 

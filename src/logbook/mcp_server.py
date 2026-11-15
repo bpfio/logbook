@@ -1433,27 +1433,92 @@ async def record_upsert(
 ) -> dict:
     """写入或更新通用业务/事实单据记录 (Strong Spine + Flexible Ribs)。
 
+    参数说明:
     - project: 必填。归属项目代号 (必须显式传参)。
-    - dataset_code: 必填。关联的数据集定义编码 (如 'sys_devlog', 'sys_task', 'sys_waiting', 'sys_research')。
+    - dataset_code: 必填。关联数据集编码 (如 'sys_task', 'sys_devlog', 'session_checkpoint', 'sys_finding', 'sys_waiting', 'sys_research')。
     - doc_no: 可选。单据号/唯一标识 (发票号、关单号、DEVLOG-xxx、TASK-xxx)。新增记录必填；指定 id 更新时可省略以保持原单号。
-    - event_date: 可选。业务发生日期或测试日期 (YYYY-MM-DD，缺省自动填充今日)。
+    - event_date: 可选。业务发生日期 (YYYY-MM-DD，缺省自动填充今日)。
     - amount: 可选。核心数值/金额 (高精度 NUMERIC, 缺省 0)。
     - currency: 可选。币种或量纲单位 (USD, CNY, QPS, MS 等，缺省 CNY)。
     - entity_name: 可选。往来单位/境外付款人/组件仓库名。
-    - status: 可选。状态: recorded, reconciled, verified, cancelled 等 (缺省 recorded)。
-    - payload: 可选。业务特有动态属性载荷 (JSONB 软肋骨)。
+    - status: 可选。状态 (任务: 'planned'/'running'/'blocked'/'closed'/'wontfix'; 事实单据: 'recorded'/'verified'/'cancelled' 等)。
+    - payload: 可选。业务特有动态属性载荷 (JSONB 软肋骨)。高频数据集规范模板参见下方契约。
     - parent_id: 可选。父单据记录 ID (支持主子表分录)。
-    - batch_id: 可选。导入批次标识。
-    - id: 可选。指定物理记录 ID 更新。
-    - with_embedding: 可选。是否同步生成 768 维语义向量 (缺省 False)。
+    - batch_id: 可选。导入批次标识 (sys_batch 必须预先存在)。
+    - id: 可选。指定物理记录 ID 更新 (与 parent_id 一并受 StrictInt 保护，杜绝 bool 隐式转换)。
+    - with_embedding: 可选。是否同步生成 768 维语义向量 (缺省 False，devlog/research 建议 True)。
     - patch: 可选。局部补丁模式 (缺省 False)。为 True 时仅合并更新传入的 payload 字段并保留其余未传键值，防止静默丢字段。
 
-    契约提示: 常用系统数据集必填字段:
-    - sys_devlog: title, problem, root_cause, solution, evidence (复盘四要素+标题)
-    - sys_task: task_id, title
-    - sys_waiting: description
-    - sys_research: title, objective, tradeoffs, decision
-    完整契约可通过 dataset_manage(action='query', code=...) 或 logbook://schema/fields 查询。
+    高频系统数据集 Payload 规范结构模板 (开箱即用，免二次探测):
+    1. sys_task (系统任务台账):
+       payload: {
+         "task_id": "TASK-20261115-01",  # [必填] 任务唯一代号
+         "title": "任务核心标题",            # [必填] 简明标题
+         "task_type": "架构重构",          # [可选] 缺陷修复/运维持久化/调研演练等
+         "priority": "P1",                # [可选] P0/P1/P2/P3 或 high/medium/low
+         "assignee": "agent_name",        # [可选] 认领人
+         "reviewer": "yupeng",            # [可选] 验收人
+         "notes": "执行细节与备忘",        # [可选]
+         "proof_link": "验收证据/相关指针", # [可选] closed 状态时推荐提供
+         "commit_hash": "commit_id",      # [可选] 关联提交哈希
+         "tags": ["tag1", "tag2"]         # [可选] 标签列表
+       }
+       推荐脊柱参数: status='planned'|'running'|'closed', doc_no='TASK-...'
+
+    2. sys_devlog (排查手记 / 研发复盘四要素):
+       payload: {
+         "title": "手记标题",              # [必填]
+         "problem": "具体故障现象与报错",    # [必填]
+         "root_cause": "底层机理与代码行分析",# [必填]
+         "solution": "修复逻辑与架构变更",   # [必填]
+         "evidence": "实测比对与复核验证",   # [必填]
+         "author": "agent_name",          # [可选]
+         "task_id": "TASK-..."            # [可选] 关联任务
+       }
+       推荐脊柱参数: status='verified'|'recorded', with_embedding=True, doc_no='proj-YYYYMMDD-...'
+
+    3. session_checkpoint (会话交接检查点):
+       payload: {
+         "subject": "本轮交接主题/定谳摘要",  # [必填]
+         "host": "涉及主机及网络拓扑清单",   # [必填]
+         "health": {                      # [必填] 各子系统/网络状态
+           "ssh": "免密就绪/通道正常",
+           "repo": "已提交/本地 clean",
+           "inbound": "连通正常 0% 丢包"
+         },
+         "open_items": ["待办1", "待办2"], # [必填] 遗留未决项与待办清单
+         "commit_head": "git_commit_hash",# [必填] 当前代码 HEAD
+         "doc_pointer": "关联文档或记录指针" # [必填] DEVLOG.md 或 sys_devlog 单号
+       }
+       推荐脊柱参数: status='recorded', doc_no='proj-YYYYMMDD-checkpoint-...'
+
+    4. sys_finding (系统发现 / 架构缺陷 / 安全隐患):
+       payload: {
+         "summary": "核心发现与隐患概述",    # [必填]
+         "finding_id": "FINDING-01",      # [可选]
+         "title": "标题",                 # [可选]
+         "severity": "critical|high|medium|low", # [可选] 严重程度
+         "source": "排查动作/体检发现",     # [可选]
+         "reporter": "agent_name",        # [可选]
+         "resolution": "建议处置措施"       # [可选]
+       }
+
+    5. sys_waiting (阻塞事项 / 外部依赖 / 用户裁决):
+       payload: {
+         "description": "阻塞机理与定案依据", # [必填]
+         "waiting_id": "W-20261115-01",   # [可选]
+         "category": "用户裁决|外部依赖|网络隔离", # [可选]
+         "owner": "agent_name"            # [可选]
+       }
+
+    6. sys_research (技术调研与架构选型决策):
+       payload: {
+         "title": "调研课题标题",          # [必填]
+         "objective": "调研背景与核心目标", # [必填]
+         "tradeoffs": "对抗代价与权衡分析", # [必填] 遵守选型铁律: 必须列出对抗成本清单
+         "decision": "最终决策与落地方案"   # [必填]
+       }
+       推荐脊柱参数: status='recorded', with_embedding=True
     """
     proj = await validate_and_negotiate_project(project, is_write=True)
 
@@ -2071,6 +2136,7 @@ async def message_action(
     action: Literal["read", "archive", "unarchive"],
     message_id: int,
     agent_name: str | None = None,
+    project: str | None = None,
 ) -> dict:
     """统一对讲信箱信件状态流转 (标记已读、归档、取消归档)。
 
@@ -2078,6 +2144,7 @@ async def message_action(
     - action: 必填。'read'=标记为已读; 'archive'=移入归档箱; 'unarchive'=移出归档箱。
     - message_id: 必填。目标信件编号 (整数)。
     - agent_name: 可选。当前操作 Agent 身份 (缺省自动探测并与当前 SSH 凭据对齐)。
+    - project: 可选。宽容参数 (信件按全局 message_id 流转，传此参数会被安全忽略以兼容多项目调用习惯)。
     """
     if action == "read":
         return await message_read(message_id=message_id, agent_name=agent_name)
@@ -2148,6 +2215,7 @@ async def dataset_manage(
     alias_map: dict[str, str] | None = None,
     description: str | None = None,
     limit: int = 50,
+    project: str | None = None,
 ) -> dict:
     """统一数据集元数据规范与声明式 JSON Schema 管理。
 
@@ -2161,6 +2229,7 @@ async def dataset_manage(
     - alias_map: 历史同义词与版本映射表。
     - description: 数据集填报与口径说明。
     - limit: 查询限制条数 (默认 50)。
+    - project: 可选。宽容参数 (数据集元数据属于全站全局目录 shared.datasets，传此参数会被安全忽略以兼容多项目调用习惯)。
     """
     if action == "upsert":
         if not code or not name:

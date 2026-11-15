@@ -15,7 +15,7 @@ from decimal import Decimal
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from logbook.mcp_server import record_query, record_upsert
+from logbook.mcp_server import record_query, record_upsert, dataset_manage, message_action
 from logbook.models import DataRecord
 from logbook.db import db
 from logbook.engine import fact_engine
@@ -341,3 +341,22 @@ async def test_validate_payload_schema_error_guidance():
     assert "规范定义必填项" in err_msg
     assert "dataset_manage" in err_msg
     assert "logbook://schema/fields" in err_msg
+
+
+@pytest.mark.asyncio
+async def test_dataset_manage_and_message_action_accept_project_argument():
+    """核验路线A: dataset_manage 与 message_action 宽容接受 project 参数，消除 extra_forbidden。"""
+    # 1. dataset_manage with project="trix"
+    with patch.object(db, "get_dataset", AsyncMock(return_value={"code": "sys_devlog", "name": "系统手记"})):
+        res = await dataset_manage(project="trix", action="query", code="sys_devlog")
+        assert res.get("isError") is not True
+        assert res.get("success") is True
+        assert res.get("dataset", {}).get("code") == "sys_devlog"
+
+    # 2. message_action with project="trix"
+    with patch("logbook.mcp_server.message_read", AsyncMock(return_value={"success": True, "message_id": 1, "status": "read"})):
+        res_msg = await message_action(project="trix", action="read", message_id=1)
+        assert res_msg.get("isError") is not True
+        assert res_msg.get("success") is True
+        assert res_msg.get("message_id") == 1
+
