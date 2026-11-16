@@ -1857,6 +1857,7 @@ class Database:
         offset: int = 0,
         project: str | None = None,
         id: int | list[int] | None = None,
+        order_by: str | None = None,
     ) -> list[dict]:
         """多维度查询事实数据记录。"""
         actual_proj = (project_id or project or "").strip()
@@ -1943,13 +1944,27 @@ class Database:
 
         where_clause = " AND ".join(conditions)
 
+        is_asc = False
+        if order_by and str(order_by).strip():
+            clean_order = str(order_by).strip().lower()
+            if clean_order in ("asc", "id_asc", "event_date_asc", "date_asc", "oldest_first"):
+                is_asc = True
+            elif clean_order in ("desc", "id_desc", "event_date_desc", "date_desc", "recent_first"):
+                is_asc = False
+            else:
+                raise ValueError(
+                    f"未知 order_by: {order_by!r}。合法值为 'id_desc', 'id_asc', 'event_date_desc', 'event_date_asc', 'desc', 'asc'"
+                )
+
+        dir_sql = "ASC" if is_asc else "DESC"
+
         if query_text and query_text.strip():
             params.append(query_text.strip())
             q_idx = len(params)
             where_clause += f" AND tsv_content @@ plainto_tsquery('simple', ${q_idx})"
-            order_clause = f"ORDER BY ts_rank_cd(tsv_content, plainto_tsquery('simple', ${q_idx})) DESC, event_date DESC, id DESC"
+            order_clause = f"ORDER BY ts_rank_cd(tsv_content, plainto_tsquery('simple', ${q_idx})) DESC, event_date {dir_sql}, id {dir_sql}"
         else:
-            order_clause = "ORDER BY event_date DESC, id DESC"
+            order_clause = f"ORDER BY event_date {dir_sql}, id {dir_sql}"
 
         params.append(limit)
         lim_idx = len(params)

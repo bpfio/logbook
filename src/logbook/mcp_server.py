@@ -1614,6 +1614,7 @@ async def record_query(
     offset: int = 0,
     fields: list[str] | None = None,
     id: StrictInt | list[StrictInt] | None = None,
+    order_by: str | None = None,
 ) -> dict:
     """多维检索事实数据单据 (支持日期/金额区间、全文检索、JSONB 属性包含、物理主键精准过滤)。
 
@@ -1632,6 +1633,9 @@ async def record_query(
     - limit: 返回条数 (1..200, 缺省 50)。
     - offset: 分页偏移量 (缺省 0)。
     - fields: 可选列投影，缺省返回全列。
+    - order_by: 可选。结果排序方向 (缺省 'id_desc'，即天然最新在前)。
+      * 可选值: 'id_desc' | 'desc' (最新在前，默认); 'id_asc' | 'asc' (最旧在前/正向追溯)。
+      * 排序机制说明: 默认天然最新在前 (ORDER BY event_date DESC, id DESC)。若仅需获取最新 N 条单据/手记，直接指定 limit=N 即可，无需传 order_by。
     """
     proj = await validate_and_negotiate_project(project, is_write=False)
 
@@ -1671,6 +1675,20 @@ async def record_query(
                 return tool_error("INVALID_ARGUMENT", str(exc), tool="record_query")
         st = validated if len(validated) > 1 else validated[0]
 
+    clean_order: str | None = None
+    if order_by is not None:
+        raw_order = str(order_by).strip().lower()
+        if raw_order in ("desc", "id_desc", "event_date_desc", "date_desc", "recent_first"):
+            clean_order = "id_desc"
+        elif raw_order in ("asc", "id_asc", "event_date_asc", "date_asc", "oldest_first"):
+            clean_order = "id_asc"
+        else:
+            return tool_error(
+                "INVALID_ARGUMENT",
+                f"未知 order_by: {order_by!r}。合法值为: 'id_desc', 'id_asc', 'event_date_desc', 'event_date_asc', 'desc', 'asc' (缺省即为 id_desc 最新在前)",
+                tool="record_query",
+            )
+
     rows = await db.query_records(
         project_id=proj,
         dataset_code=dataset_code,
@@ -1688,6 +1706,7 @@ async def record_query(
         limit=clamp_limit(limit),
         offset=offset,
         id=clean_id,
+        order_by=clean_order,
     )
     items_list = []
     for r in rows:
@@ -1728,6 +1747,8 @@ async def record_query(
         applied_filters["query_text"] = str(query_text).strip()
     if fields is not None:
         applied_filters["fields"] = fields
+    if clean_order is not None:
+        applied_filters["order_by"] = clean_order
 
     items = project_fields(items_list, fields, valid_keys=VALID_RECORD_FIELDS)
     return {

@@ -58,6 +58,7 @@ async def test_record_query_supports_id_scalar_and_list():
             limit=50,
             offset=0,
             id=9773,
+            order_by=None,
         )
 
         # 2. 数组 ID
@@ -359,4 +360,58 @@ async def test_dataset_manage_and_message_action_accept_project_argument():
         assert res_msg.get("isError") is not True
         assert res_msg.get("success") is True
         assert res_msg.get("message_id") == 1
+
+
+@pytest.mark.asyncio
+async def test_record_query_supports_order_by_direction_and_tolerance():
+    """核验方案一/二: record_query 宽容支持 order_by 参数并正确切换 SQL 排序方向。"""
+    mock_item = {"id": 100, "project_id": "test_proj", "doc_no": "D-100", "payload": {}}
+
+    with patch("logbook.mcp_server.validate_and_negotiate_project", AsyncMock(return_value="test_proj")), \
+         patch.object(db, "query_records", AsyncMock(return_value=[mock_item])) as mock_q:
+
+        # 1. 显式传 order_by="id_desc"
+        res_desc = await record_query(project="test_proj", dataset_code="sys_devlog", limit=3, order_by="id_desc")
+        assert res_desc.get("isError") is not True
+        assert res_desc["success"] is True
+        assert res_desc["applied_filters"]["order_by"] == "id_desc"
+        assert mock_q.call_args.kwargs["order_by"] == "id_desc"
+
+        # 2. 传 order_by="id_asc"
+        res_asc = await record_query(project="test_proj", dataset_code="sys_devlog", limit=3, order_by="id_asc")
+        assert res_asc.get("isError") is not True
+        assert res_asc["applied_filters"]["order_by"] == "id_asc"
+        assert mock_q.call_args.kwargs["order_by"] == "id_asc"
+
+        # 3. 传别名 "desc"
+        res_alias = await record_query(project="test_proj", order_by="desc")
+        assert res_alias.get("isError") is not True
+        assert res_alias["applied_filters"]["order_by"] == "id_desc"
+        assert mock_q.call_args.kwargs["order_by"] == "id_desc"
+
+        # 4. 非法 order_by fail-closed 拦截
+        res_err = await record_query(project="test_proj", order_by="unsupported_sort")
+        assert res_err.get("isError") is True
+        assert res_err.get("error_type") == "INVALID_ARGUMENT"
+        assert "未知 order_by" in res_err.get("detail", "")
+
+    # 5. db.query_records 真实 SQL 排序语句断言
+    mock_conn = AsyncMock()
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+    mock_pool.acquire.return_value.__aexit__.return_value = None
+
+    with patch.object(db, "_pool", mock_pool), \
+         patch.object(db, "ensure_datasets_and_records_schema", AsyncMock()):
+        # 5a. 默认 / id_desc -> ORDER BY event_date DESC, id DESC
+        await db.query_records(project_id="test_proj", order_by="id_desc")
+        sql_desc = mock_conn.fetch.call_args.args[0]
+        assert "ORDER BY event_date DESC, id DESC" in sql_desc
+
+        # 5b. id_asc -> ORDER BY event_date ASC, id ASC
+        await db.query_records(project_id="test_proj", order_by="id_asc")
+        sql_asc = mock_conn.fetch.call_args.args[0]
+        assert "ORDER BY event_date ASC, id ASC" in sql_asc
+
 

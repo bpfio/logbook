@@ -9,10 +9,11 @@
 
 ---
 
-## 一、任务台账 (51)
+## 一、任务台账 (52)
 
 | ID | 状态 | 类型 | 标题 | commit | 备注 |
 |---|---|---|---|---|---|
+| L-MCP-ORDERBY | closed | feat | record_query 增设 order_by 排序参数并完善说明书 (最新在前契约与正序追溯) | 0d01fd3 | 贯彻用户裁决方案一+方案二组合拳: ① 在 record_query 工具描述中讲透默认天然最新在前 (ORDER BY event_date DESC, id DESC) 说明书契约，消除 Agent 因未明排序机制而盲猜脑补参数的冲动; ② 签名增设可选参数 order_by，宽容接受并归一化 id_desc/desc (最新在前) 与 id_asc/asc (正向追溯)，在彻底消灭 FastMCP extra_forbidden 报错的同时解锁历史正序追溯能力; ③ 增补专项单元测试与 SQL 排序断言，82 项门禁全绿 (DEV-2026-11-16-01) |
 | L-MCP-ROUTEA | closed | feat | Logbook MCP 人体工学与 Schema 贫血治理 (路线A): record_upsert 内联 6 大高频数据集 Payload 规范模板 + dataset_manage/message_action 宽容接受 project 参数消除 extra_forbidden | 1b2d26d | 贯彻用户裁决路线A，消灭 Agent 运行时认知摩擦与 extra_forbidden 试错往返: ① record_upsert 工具描述中完整内嵌 sys_task、sys_devlog、session_checkpoint、sys_finding、sys_waiting、sys_research 六大核心数据集的规范 Payload 结构模板 (必填/可选标注与开箱即用示例)，彻底消除 Schema 贫血引发的探测开销; ② 为 dataset_manage 与 message_action 签名增设可选参数 project: str | None = None，兼容 Agent 习惯性传递 project 的调用惯性，彻底终结 FastMCP extra_forbidden 报错; ③ 增补专项单元测试，81 项门禁全绿 (DEV-2026-11-15-01) |
 | L-OPT-081 | closed | feat | Logbook 0.8.1: 读写对称性补齐 (record_query 支持 id 检索)、record_upsert 局部补丁模式 (patch=True 脊梁保全与防丢字段)、主键更新解耦 doc_no 与 Schema 错误自解释引导 | d6f49ed | 彻底解决 Agent 使用四大痛点与外部评审 F-1~F-4 缺陷: ① record_query 增设严格正整数 id/id_list 过滤参数与 applied_filters 回显，消除 extra_forbidden，遇到非正整数严格 fail-closed 拦截 (F-3/F-4); ② record_upsert 引入 patch=True 局部更新，合并已有 payload 并通过 model_fields_set 严格保全 status/amount/currency/event_date 等强脊柱列原值，彻底消除任务状态被冲刷与静默丢字段风险 (F-1); ③ record_upsert 按主键 id 更新时允许省略 doc_no (自动沿用原单号)，新增时严格强制 doc_no 非空; ④ validate_payload_schema 校验报错提示可用必填项列表与 dataset_manage / logbook://schema/fields 自愈指引; ⑤ 单测重构为断言 update_sql 真实绑定参数 (F-2); 新增 6 项专项单测，门禁 79 项 100% 全绿 (DEV-2026-11-14-01) |
 | L-PUB-080 | closed | refactor | Logbook 0.8.0 开源前置真实缺陷全量闭环: README 14核心原语对齐、个人绝对路径清除、gate 回归脚本改造与内网 IP 彻底脱敏 | 0e30829 | 响应用户对开源真实可用性质询，消灭言行不一与自嗨包装: ① 重构 README.md，彻底删除 task_upsert 等废弃工具描述与 0.2.0 过期标记，100% 对齐 0.8.0 规范的 14 个核心正典原语与客户端配置; ② 根除 sql/01_init.sql、deploy/qnap/DEPLOY.md 与 scripts/ 中硬编码的个人本地绝对路径 (/home/yupeng); ③ 改造 scripts/replay_brix_writes.py 与 measure_brief.py，对齐 0.8.0 record_upsert/record_query 原语，保障门禁脚本真实一致; ④ 更新 docker-compose.yml 镜像标签为 logbook:0.8.0; ⑤ 历史会话存档全面替换内网 IP 为 RFC 5737 规范保留地址; 单元测试 73 项全绿 (DEV-2026-11-08-04) |
@@ -70,10 +71,11 @@
 
 ---
 
-## 二、发现台账 (42)
+## 二、发现台账 (43)
 
 | ID | 来源 | 级别 | 状态 | 处置 | 备注 |
 |---|---|---|---|---|---|
+| F-MCP-ORDERBY | review | P2 | fixed | Agent 习惯性传 order_by='id_desc' 遭 FastMCP extra_forbidden 阻断 | 工具说明书未交代默认排序机制诱发脑补; 完善说明书并宽容支持 order_by 切换排序 (DEV-2026-11-16-01) |
 | F-MCP-ROUTEA | review | P2 | fixed | dataset_manage/message_action 缺失 project 参数导致习惯性传参被 FastMCP extra_forbidden 阻断 | FastMCP 全局 extra='forbid' 导致 Agent 传递 project 被拒; 增设可选 project 参数宽容容错 (DEV-2026-11-15-01) |
 | F-OPT81-12 | review | P2 | fixed | id 入参采用 StrictInt 强类型声明，彻底阻断 Pydantic 宽松模式将 bool 强转为 1 | FastMCP 入口层与 DataRecord 统一声明 StrictInt，杜绝布尔型隐式强转篡改 1 号单据 (DEV-2026-11-14-01) |
 | F-OPT81-01 | review | P1 | fixed | patch=True 局部更新未保全强脊柱字段 (status/amount/currency/event_date) | 仅合并 payload 未保全脊柱列，导致 closed 任务被冲刷为 recorded；改由 model_fields_set 保全原值 (DEV-2026-11-14-01) |
@@ -123,6 +125,27 @@
 
 | ID | 类别 | 状态 | 事项 |
 |---|---|---|---|
+
+---
+
+## [DEV-2026-11-16-01] record_query 排序说明书完善与 order_by 人体工学支持 — ✅ 闭环
+
+贯彻用户裁决“方案一（更新工具说明书）+ 方案二（宽容支持 order_by）”组合拳，彻底根治客户端盲猜排序参数引发的 FastMCP extra_forbidden 报错，并正式解锁历史正序追溯能力：
+
+1. **结构化四要素复盘 (SSOT)**:
+   - **故障/需求背景 (Problem)**:
+     - 客户端 Agent 调用 `record_query(project="bpfio/xhub", dataset_code="sys_devlog", limit=3, order_by="id_desc")`，遭遇 FastMCP 报错：`1 validation error for record_queryArguments: order_by Extra inputs are not permitted [type=extra_forbidden]`；
+     - 诉求分析：调用端核心目标是取“最新 3 条 devlog”。因工具说明书未说明排序规则，Agent 无法确定默认是正序还是倒序，自作聪明脑补了 SQL 风格的 `order_by="id_desc"` 传参。
+   - **机理与根因 (Root Cause)**:
+     - 诱因：`record_query` 工具描述中仅列出了 `limit`，缺失对返回记录排序行为的契约说明；
+     - 现实：底座 `db.query_records` 默认天然为 `ORDER BY event_date DESC, id DESC`（最新在前），调用端本无需传参；但因缺少说明，诱发调用端防御性盲猜传参，触碰了 FastMCP 全局 `extra='forbid'` 严格防御线。
+   - **解决方案 (Solution)**:
+     - **方案一（更新说明书）**: 在 `record_query` docstring 中写明：“排序机制: 默认天然最新在前 (ORDER BY event_date DESC, id DESC)。若仅需获取最新 N 条单据/手记，直接指定 limit=N 即可，无需传 order_by”；
+     - **方案二（宽容支持 order_by）**: 在 `record_query` 与 `db.query_records` 中增设可选形参 `order_by: str | None = None`，归一化吸收 `id_desc`/`desc`（最新在前）与 `id_asc`/`asc`（最旧在前/正序追溯），并在 `applied_filters` 中回显；
+     - **同步更新客户端 Lazy Schema**: 将更新后的工具参数与描述同步至 `~/.gemini/antigravity-cli/mcp/logbook/*.json`。
+   - **验证证据 (Evidence)**:
+     - 单元测试门禁：82 项用例 100% 全绿（含新增的 `test_record_query_supports_order_by_direction_and_tolerance`，包含真实 SQL 排序语句与非法排序拦截断言）；
+     - 生产环境 SSH MCP 穿透复测：原报错调用 `record_query(project="bpfio/xhub", dataset_code="sys_devlog", limit=3, order_by="id_desc")` 成功执行无报错，精准返回最新 3 条手记。
 
 ---
 
